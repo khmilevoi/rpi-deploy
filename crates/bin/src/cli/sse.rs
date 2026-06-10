@@ -11,7 +11,7 @@ pub struct SseParser {
 
 impl SseParser {
     pub fn push(&mut self, chunk: &str) -> Vec<SseEvent> {
-        self.buf.push_str(&chunk.replace('\r', ""));
+        self.buf.push_str(&chunk.replace("\r\n", "\n").replace('\r', "\n"));
         let mut events = Vec::new();
         while let Some(pos) = self.buf.find("\n\n") {
             let record: String = self.buf.drain(..pos + 2).collect();

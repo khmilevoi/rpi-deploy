@@ -67,17 +67,20 @@ impl DeploymentStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<DeploymentStatus> {
-        match s {
-            "running" => Some(DeploymentStatus::Running),
-            "success" => Some(DeploymentStatus::Success),
-            "failed" => Some(DeploymentStatus::Failed),
-            _ => None,
-        }
-    }
-
     pub fn is_terminal(&self) -> bool {
         !matches!(self, DeploymentStatus::Running)
+    }
+}
+
+impl std::str::FromStr for DeploymentStatus {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "running" => Ok(DeploymentStatus::Running),
+            "success" => Ok(DeploymentStatus::Success),
+            "failed" => Ok(DeploymentStatus::Failed),
+            _ => Err(()),
+        }
     }
 }
 
@@ -148,9 +151,9 @@ mod tests {
             DeploymentStatus::Success,
             DeploymentStatus::Failed,
         ] {
-            assert_eq!(DeploymentStatus::from_str(s.as_str()), Some(s));
+            assert_eq!(s.as_str().parse::<DeploymentStatus>(), Ok(s));
         }
-        assert_eq!(DeploymentStatus::from_str("bogus"), None);
+        assert_eq!("bogus".parse::<DeploymentStatus>(), Err(()));
     }
 
     #[test]

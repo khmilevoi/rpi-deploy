@@ -42,13 +42,29 @@ async fn version() -> Json<VersionInfo> {
     Json(VersionInfo { version: env!("CARGO_PKG_VERSION").to_string(), api: "v1".to_string() })
 }
 
+fn is_valid_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('a'..='z' | '0'..='9'))
+        && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
+}
+
 async fn create_deployment(
     State(state): State<AppState>,
     Json(req): Json<DeployRequest>,
 ) -> Result<Response, ApiError> {
     let config: ProjectConfig = req.project.into();
-    if config.name.is_empty() {
-        return Err(ApiError(DomainError::Invalid("project.name is empty".into())));
+    if !is_valid_name(&config.name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project.name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    if !is_valid_name(&config.service) {
+        return Err(ApiError(DomainError::Invalid(
+            "project.service must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    if config.container_port == 0 {
+        return Err(ApiError(DomainError::Invalid("project.port must be > 0".into())));
     }
     let git_ref = DeployRef::parse(req.git_ref.as_deref().unwrap_or(&config.branch));
 
@@ -125,7 +141,8 @@ async fn deployment_logs(
                 for line in d.log_tail.lines().map(str::to_string) {
                     yield sse_log(line);
                 }
-                yield sse_finished(d.status.as_str());
+                let status_str = if d.status.is_terminal() { d.status.as_str() } else { "interrupted" };
+                yield sse_finished(status_str);
             };
             Ok(Sse::new(stream).into_response())
         }

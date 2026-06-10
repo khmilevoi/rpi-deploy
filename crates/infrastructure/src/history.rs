@@ -25,7 +25,7 @@ fn row_to_deployment(row: &rusqlite::Row<'_>) -> Result<Deployment, rusqlite::Er
         project: row.get(1)?,
         git_ref: row.get(2)?,
         commit_sha: row.get(3)?,
-        status: DeploymentStatus::from_str(&status).ok_or_else(|| {
+        status: status.parse::<DeploymentStatus>().map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
                 4,
                 rusqlite::types::Type::Text,

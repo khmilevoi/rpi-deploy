@@ -17,7 +17,7 @@ pub(crate) fn git_ssh_command(key: &Path, known_hosts: &Path) -> String {
     let key = key.display().to_string().replace('\\', "/");
     let known_hosts = known_hosts.display().to_string().replace('\\', "/");
     format!(
-        "ssh -i {key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={known_hosts}"
+        "ssh -i \"{key}\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=\"{known_hosts}\""
     )
 }
 
@@ -134,7 +134,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            "ssh -i /var/lib/pi/keys/rateme/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/pi/known_hosts"
+            "ssh -i \"/var/lib/pi/keys/rateme/id_ed25519\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=\"/var/lib/pi/known_hosts\""
         );
     }
 }

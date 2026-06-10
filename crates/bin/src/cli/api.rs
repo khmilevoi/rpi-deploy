@@ -3,6 +3,20 @@ use futures::StreamExt;
 use crate::cli::sse::SseParser;
 use crate::proto::{DeployAccepted, DeployRequest, ProjectViewDto, VersionInfo};
 
+async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status();
+    let msg = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_string))
+        .unwrap_or_else(|| status.to_string());
+    anyhow::bail!("{msg}")
+}
+
 pub struct ApiClient {
     http: reqwest::Client,
     base: String,
@@ -18,7 +32,7 @@ impl ApiClient {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             anyhow::bail!("agent does not expose /v1 — incompatible agent; update it on the Pi");
         }
-        Ok(resp.error_for_status()?.json().await?)
+        Ok(extract_error(resp).await?.json().await?)
     }
 
     pub async fn deploy(&self, req: &DeployRequest) -> anyhow::Result<DeployAccepted> {
@@ -26,7 +40,7 @@ impl ApiClient {
         if resp.status() == reqwest::StatusCode::CONFLICT {
             anyhow::bail!("deploy of this project is already in progress on the agent");
         }
-        Ok(resp.error_for_status()?.json().await?)
+        Ok(extract_error(resp).await?.json().await?)
     }
 
     pub async fn follow_logs(&self, id: &str, mut on_line: impl FnMut(&str)) -> anyhow::Result<String> {
@@ -34,8 +48,8 @@ impl ApiClient {
             .http
             .get(format!("{}/v1/deployments/{id}/logs", self.base))
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let resp = extract_error(resp).await?;
         let mut stream = resp.bytes_stream();
         let mut parser = SseParser::default();
         let mut buf: Vec<u8> = Vec::new();
@@ -64,6 +78,6 @@ impl ApiClient {
 
     pub async fn projects(&self) -> anyhow::Result<Vec<ProjectViewDto>> {
         let resp = self.http.get(format!("{}/v1/projects", self.base)).send().await?;
-        Ok(resp.error_for_status()?.json().await?)
+        Ok(extract_error(resp).await?.json().await?)
     }
 }

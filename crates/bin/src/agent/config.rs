@@ -7,6 +7,7 @@ pub struct AgentConfig {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
     #[serde(default = "default_socket")]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub socket: PathBuf,
     pub tcp: Option<String>,
     #[serde(default = "default_port_min")]

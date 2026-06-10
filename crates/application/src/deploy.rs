@@ -9,8 +9,32 @@ use pi_domain::error::DomainError;
 use crate::locks::{DeployLocks, DeployPermit};
 use crate::tail::TailSink;
 
-/// Сколько последних строк лога деплоя сохраняется в историю (§18 log_tail).
 const LOG_TAIL_LINES: usize = 400;
+
+/// Гарантирует отправку `finished(Failed)` по дропу, если `disarm()` не вызван.
+/// Защищает от паники и от ранних возвратов через `?`.
+struct FinishGuard {
+    sink: Arc<dyn LogSink>,
+    armed: bool,
+}
+
+impl FinishGuard {
+    fn new(sink: Arc<dyn LogSink>) -> Self {
+        Self { sink, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.sink.finished(DeploymentStatus::Failed);
+        }
+    }
+}
 
 /// Use-case деплоя (§7, §8.2). Лок проекта берётся через try_begin ДО
 /// постановки async-задачи, чтобы HTTP-хендлер мог сразу ответить 409.
@@ -61,8 +85,9 @@ impl DeployProject {
     ) -> Result<Deployment, DomainError> {
         let _permit = permit; // держим лок до конца деплоя, отпускается Drop'ом
 
-        let tail = TailSink::new(sink, LOG_TAIL_LINES);
+        let tail = TailSink::new(Arc::clone(&sink), LOG_TAIL_LINES);
         let log: Arc<dyn LogSink> = tail.clone();
+        let mut guard = FinishGuard::new(sink);
 
         let mut deployment = Deployment {
             id: deployment_id,
@@ -96,6 +121,7 @@ impl DeployProject {
                     )
                     .await;
                 log.finished(DeploymentStatus::Success);
+                guard.disarm();
                 record_result?;
                 Ok(deployment)
             }
@@ -113,6 +139,7 @@ impl DeployProject {
                     )
                     .await;
                 log.finished(DeploymentStatus::Failed);
+                guard.disarm();
                 record_result?;
                 Err(err)
             }
