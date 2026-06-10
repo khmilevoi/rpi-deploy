@@ -1,0 +1,3 @@
+# dev-режим (Windows/локально): TCP вместо unix-сокета, данные в ./.dev-data
+data_dir = ".dev-data"
+tcp = "127.0.0.1:7700"
