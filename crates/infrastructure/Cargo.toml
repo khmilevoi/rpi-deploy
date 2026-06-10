@@ -1,0 +1,17 @@
+[package]
+name = "pi-infrastructure"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pi-domain = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+rusqlite_migration = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "pi-domain"
+version.workspace = true
+edition.workspace = true
+
+[features]
+mocks = ["dep:mockall"]
+
+[dependencies]
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+mockall = { workspace = true, optional = true }

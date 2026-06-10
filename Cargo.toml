@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["crates/domain", "crates/application", "crates/infrastructure", "crates/bin"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+pi-domain = { path = "crates/domain" }
+pi-application = { path = "crates/application" }
+pi-infrastructure = { path = "crates/infrastructure" }
+
+async-trait = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "net", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite_migration = "1.3"
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+async-stream = "0.3"
+dirs = "5"
+anyhow = "1"
+
+# dev
+mockall = "0.13"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
