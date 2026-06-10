@@ -49,6 +49,8 @@ impl Db {
         let mut conn = Connection::open(path).map_err(storage_err)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(storage_err)?;
+        // Future-facing: v0.1 records deployment start before project upsert, so
+        // deployments.project is intentionally not FK-constrained yet.
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(storage_err)?;
         migrations()
@@ -116,5 +118,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn projects_schema_enforces_name_primary_key_and_unique_host_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+
+        db.call(|c| {
+            c.execute(
+                "INSERT INTO projects
+                 (name, repo, branch, compose_path, service, container_port, host_port, created_at)
+                 VALUES ('a', 'repo-a', 'main', 'docker-compose.yml', 'web', 3000, 8000, 1)",
+                [],
+            )
+            .map_err(storage_err)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let duplicate_name = db
+            .call(|c| {
+                c.execute(
+                    "INSERT INTO projects
+                     (name, repo, branch, compose_path, service, container_port, host_port, created_at)
+                     VALUES ('a', 'repo-b', 'main', 'docker-compose.yml', 'web', 3000, 8001, 1)",
+                    [],
+                )
+                .map_err(storage_err)?;
+                Ok(())
+            })
+            .await;
+        assert!(matches!(duplicate_name, Err(DomainError::Storage(_))));
+
+        let duplicate_port = db
+            .call(|c| {
+                c.execute(
+                    "INSERT INTO projects
+                     (name, repo, branch, compose_path, service, container_port, host_port, created_at)
+                     VALUES ('b', 'repo-b', 'main', 'docker-compose.yml', 'web', 3000, 8000, 1)",
+                    [],
+                )
+                .map_err(storage_err)?;
+                Ok(())
+            })
+            .await;
+        assert!(matches!(duplicate_port, Err(DomainError::Storage(_))));
     }
 }
