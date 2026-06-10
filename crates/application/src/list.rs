@@ -84,7 +84,7 @@ mod tests {
                 state: "running".into(),
             }])
         });
-        // ps по "b" падает (стек ни разу не поднимался) - статус unknown, не ошибка
+        // ps по "b" падает (стек ни разу не поднимался) - показываем пустой список сервисов.
         runtime.expect_ps().withf(|n| n == "b").returning(|_| {
             Err(DomainError::Runtime("no such project".into()))
         });
@@ -104,5 +104,21 @@ mod tests {
         );
         assert_eq!(views[1].name, "b");
         assert!(views[1].services.is_empty());
+    }
+
+    #[tokio::test]
+    async fn propagates_project_repository_errors_without_querying_runtime() {
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_list()
+            .returning(|| Err(DomainError::Storage("db unavailable".into())));
+
+        let mut runtime = MockContainerRuntime::new();
+        runtime.expect_ps().times(0);
+
+        let list = ListProjects::new(Arc::new(projects), Arc::new(runtime));
+        let err = list.execute().await.unwrap_err();
+
+        assert!(matches!(err, DomainError::Storage(message) if message == "db unavailable"));
     }
 }
