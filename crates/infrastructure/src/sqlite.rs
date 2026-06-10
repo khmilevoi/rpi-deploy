@@ -1,1 +1,120 @@
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
+use pi_domain::error::DomainError;
+use rusqlite::Connection;
+use rusqlite_migration::{Migrations, M};
+
+fn migrations() -> Migrations<'static> {
+    Migrations::new(vec![M::up(
+        r#"
+        CREATE TABLE projects (
+            name           TEXT PRIMARY KEY,
+            repo           TEXT NOT NULL,
+            branch         TEXT NOT NULL,
+            compose_path   TEXT NOT NULL,
+            service        TEXT NOT NULL,
+            container_port INTEGER NOT NULL,
+            hostname       TEXT,
+            host_port      INTEGER NOT NULL UNIQUE,
+            created_at     INTEGER NOT NULL
+        );
+        CREATE TABLE deployments (
+            id          TEXT PRIMARY KEY,
+            project     TEXT NOT NULL,
+            git_ref     TEXT NOT NULL,
+            commit_sha  TEXT,
+            status      TEXT NOT NULL,
+            started_at  INTEGER NOT NULL,
+            finished_at INTEGER,
+            log_tail    TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX idx_deployments_project ON deployments(project, started_at DESC);
+        "#,
+    )])
+}
+
+pub(crate) fn storage_err(e: rusqlite::Error) -> DomainError {
+    DomainError::Storage(e.to_string())
+}
+
+/// Wrapper around rusqlite: WAL and migrations at open, all calls through spawn_blocking.
+#[derive(Clone)]
+pub struct Db {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl Db {
+    pub fn open(path: &Path) -> Result<Db, DomainError> {
+        let mut conn = Connection::open(path).map_err(storage_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(storage_err)?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(storage_err)?;
+        migrations()
+            .to_latest(&mut conn)
+            .map_err(|e| DomainError::Storage(format!("migrations: {e}")))?;
+        Ok(Db {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    pub async fn call<T, F>(&self, f: F) -> Result<T, DomainError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, DomainError> + Send + 'static,
+    {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn
+                .lock()
+                .map_err(|_| DomainError::Storage("db mutex poisoned".into()))?;
+            f(&mut conn)
+        })
+        .await
+        .map_err(|e| DomainError::Storage(format!("join error: {e}")))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn opens_db_in_wal_mode_with_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        let mode: String = db
+            .call(|c| {
+                c.query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                    .map_err(storage_err)
+            })
+            .await
+            .unwrap();
+        assert_eq!(mode, "wal");
+        let n: i64 = db
+            .call(|c| {
+                c.query_row("SELECT count(*) FROM projects", [], |r| r.get(0))
+                    .map_err(storage_err)
+            })
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn reopen_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        drop(Db::open(&path).unwrap());
+        let db = Db::open(&path).unwrap();
+        let n: i64 = db
+            .call(|c| {
+                c.query_row("SELECT count(*) FROM deployments", [], |r| r.get(0))
+                    .map_err(storage_err)
+            })
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+}
