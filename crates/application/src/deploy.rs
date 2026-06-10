@@ -329,9 +329,7 @@ mod tests {
         );
         assert_eq!(
             *order.lock().unwrap(),
-            vec![
-                "started", "upsert", "fetch", "override", "build", "up", "finished"
-            ]
+            vec!["started", "upsert", "fetch", "override", "build", "up", "finished"]
         );
     }
 

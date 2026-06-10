@@ -192,7 +192,10 @@ mod tests {
         updated.branch = "develop".into();
         let project = repo.upsert(&updated).await.unwrap();
 
-        assert_eq!(project.host_port, 8000, "host port is stable across re-deploys");
+        assert_eq!(
+            project.host_port, 8000,
+            "host port is stable across re-deploys"
+        );
         assert_eq!(project.config.branch, "develop");
         assert_eq!(repo.list().await.unwrap().len(), 1);
     }

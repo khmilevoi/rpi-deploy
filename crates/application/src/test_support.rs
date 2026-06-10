@@ -11,7 +11,10 @@ pub struct CollectSink {
 
 impl CollectSink {
     pub fn new() -> Arc<CollectSink> {
-        Arc::new(CollectSink { lines: Mutex::new(vec![]), finished: Mutex::new(vec![]) })
+        Arc::new(CollectSink {
+            lines: Mutex::new(vec![]),
+            finished: Mutex::new(vec![]),
+        })
     }
 }
 

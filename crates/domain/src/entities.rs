@@ -125,7 +125,10 @@ mod tests {
     #[test]
     fn parse_40_hex_chars_as_sha() {
         let r = DeployRef::parse("0123456789abcdef0123456789abcdef01234567");
-        assert_eq!(r, DeployRef::Sha("0123456789abcdef0123456789abcdef01234567".into()));
+        assert_eq!(
+            r,
+            DeployRef::Sha("0123456789abcdef0123456789abcdef01234567".into())
+        );
     }
 
     #[test]
@@ -140,7 +143,11 @@ mod tests {
 
     #[test]
     fn status_roundtrips_through_str() {
-        for s in [DeploymentStatus::Running, DeploymentStatus::Success, DeploymentStatus::Failed] {
+        for s in [
+            DeploymentStatus::Running,
+            DeploymentStatus::Success,
+            DeploymentStatus::Failed,
+        ] {
             assert_eq!(DeploymentStatus::from_str(s.as_str()), Some(s));
         }
         assert_eq!(DeploymentStatus::from_str("bogus"), None);

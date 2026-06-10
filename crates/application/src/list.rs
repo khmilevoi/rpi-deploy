@@ -33,7 +33,11 @@ impl ListProjects {
         for project in self.projects.list().await? {
             // Ошибка ps (стек ещё не поднимался / docker недоступен) - не повод
             // ронять весь список: показываем проект без сервисов.
-            let services = self.runtime.ps(&project.config.name).await.unwrap_or_default();
+            let services = self
+                .runtime
+                .ps(&project.config.name)
+                .await
+                .unwrap_or_default();
             views.push(ProjectView {
                 name: project.config.name,
                 repo: project.config.repo,
@@ -85,9 +89,10 @@ mod tests {
             }])
         });
         // ps по "b" падает (стек ни разу не поднимался) - показываем пустой список сервисов.
-        runtime.expect_ps().withf(|n| n == "b").returning(|_| {
-            Err(DomainError::Runtime("no such project".into()))
-        });
+        runtime
+            .expect_ps()
+            .withf(|n| n == "b")
+            .returning(|_| Err(DomainError::Runtime("no such project".into())));
 
         let list = ListProjects::new(Arc::new(projects), Arc::new(runtime));
         let views = list.execute().await.unwrap();

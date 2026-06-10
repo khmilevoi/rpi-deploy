@@ -58,9 +58,6 @@ mod tests {
             "other projects unaffected"
         );
         drop(permit);
-        assert!(
-            locks.try_acquire("rateme").is_some(),
-            "released after drop"
-        );
+        assert!(locks.try_acquire("rateme").is_some(), "released after drop");
     }
 }

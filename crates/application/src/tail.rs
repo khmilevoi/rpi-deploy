@@ -13,7 +13,11 @@ pub struct TailSink {
 
 impl TailSink {
     pub fn new(inner: Arc<dyn LogSink>, cap: usize) -> Arc<TailSink> {
-        Arc::new(TailSink { inner, lines: Mutex::new(VecDeque::new()), cap })
+        Arc::new(TailSink {
+            inner,
+            lines: Mutex::new(VecDeque::new()),
+            cap,
+        })
     }
 
     pub fn tail(&self) -> String {
@@ -58,7 +62,10 @@ mod tests {
         tail.finished(DeploymentStatus::Success);
 
         assert_eq!(*inner.lines.lock().unwrap(), vec!["a".to_string()]);
-        assert_eq!(*inner.finished.lock().unwrap(), vec![DeploymentStatus::Success]);
+        assert_eq!(
+            *inner.finished.lock().unwrap(),
+            vec![DeploymentStatus::Success]
+        );
     }
 
     #[test]

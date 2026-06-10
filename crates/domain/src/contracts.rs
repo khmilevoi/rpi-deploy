@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use mockall::automock;
 
 use crate::entities::{
-    ComposeStack, Deployment, DeploymentStatus, DeployRef, FetchedSource, Project, ProjectConfig,
+    ComposeStack, DeployRef, Deployment, DeploymentStatus, FetchedSource, Project, ProjectConfig,
     ServiceState,
 };
 use crate::error::DomainError;
