@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use pi_domain::contracts::ProjectRepository;
 use pi_domain::entities::{Project, ProjectConfig};
 use pi_domain::error::DomainError;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::sqlite::{storage_err, Db};
 
@@ -75,7 +75,9 @@ impl ProjectRepository for SqliteProjectRepo {
         let (min, max) = (self.port_min, self.port_max);
         self.db
             .call(move |conn| {
-                let tx = conn.transaction().map_err(storage_err)?;
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(storage_err)?;
                 let exists: Option<u16> = tx
                     .query_row(
                         "SELECT host_port FROM projects WHERE name = ?1",
@@ -202,6 +204,34 @@ mod tests {
         repo.upsert(&cfg("a")).await.unwrap();
         let err = repo.upsert(&cfg("b")).await.unwrap_err();
         assert!(matches!(err, DomainError::Invalid(_)), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn allocates_first_gap_in_port_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO projects
+                 (name, repo, branch, compose_path, service, container_port, host_port, created_at)
+                 VALUES ('a', 'repo-a', 'main', 'docker-compose.yml', 'web', 3000, 8000, 1)",
+                [],
+            )
+            .map_err(storage_err)?;
+            conn.execute(
+                "INSERT INTO projects
+                 (name, repo, branch, compose_path, service, container_port, host_port, created_at)
+                 VALUES ('c', 'repo-c', 'main', 'docker-compose.yml', 'web', 3000, 8002, 1)",
+                [],
+            )
+            .map_err(storage_err)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let repo = SqliteProjectRepo::new(db, 8000, 8999);
+        assert_eq!(repo.upsert(&cfg("b")).await.unwrap().host_port, 8001);
     }
 
     #[tokio::test]
