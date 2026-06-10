@@ -1,0 +1,13 @@
+[package]
+name = "pi-application"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pi-domain = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+pi-domain = { workspace = true, features = ["mocks"] }
+mockall = { workspace = true }
+tokio = { workspace = true }
