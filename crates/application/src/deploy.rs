@@ -85,7 +85,8 @@ impl DeployProject {
                 deployment.commit_sha = Some(commit_sha);
                 deployment.finished_at = Some(finished_at);
                 deployment.log_tail = tail.tail();
-                self.history
+                let record_result = self
+                    .history
                     .record_finished(
                         &deployment.id,
                         DeploymentStatus::Success,
@@ -93,22 +94,26 @@ impl DeployProject {
                         finished_at,
                         &deployment.log_tail,
                     )
-                    .await?;
+                    .await;
                 log.finished(DeploymentStatus::Success);
+                record_result?;
                 Ok(deployment)
             }
             Err(err) => {
                 log.line(&format!("deploy failed: {err}"));
-                self.history
+                let log_tail = tail.tail();
+                let record_result = self
+                    .history
                     .record_finished(
                         &deployment.id,
                         DeploymentStatus::Failed,
                         None,
                         finished_at,
-                        &tail.tail(),
+                        &log_tail,
                     )
-                    .await?;
+                    .await;
                 log.finished(DeploymentStatus::Failed);
+                record_result?;
                 Err(err)
             }
         }
@@ -160,7 +165,10 @@ mod tests {
         MockProjectRepository, MockSource,
     };
     use pi_domain::entities::{DeployRef, DeploymentStatus, FetchedSource, Project, ProjectConfig};
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
 
     pub fn sample_config() -> ProjectConfig {
         ProjectConfig {
@@ -213,25 +221,35 @@ mod tests {
     async fn happy_path_runs_all_stages_and_records_success() {
         let mut m = mocks();
         let cfg = sample_config();
+        let order = Arc::new(Mutex::new(Vec::new()));
 
-        m.projects.expect_upsert().times(1).returning(|c| {
+        let stage_order = Arc::clone(&order);
+        m.projects.expect_upsert().times(1).returning(move |c| {
+            stage_order.lock().unwrap().push("upsert");
             Ok(Project {
                 config: c.clone(),
                 host_port: 8000,
                 created_at: 1,
             })
         });
-        m.source.expect_fetch().times(1).returning(|_, _, _| {
+        let stage_order = Arc::clone(&order);
+        m.source.expect_fetch().times(1).returning(move |_, _, _| {
+            stage_order.lock().unwrap().push("fetch");
             Ok(FetchedSource {
                 workdir: PathBuf::from("/var/lib/pi/workdirs/rateme"),
                 commit_sha: SHA.into(),
             })
         });
+        let stage_order = Arc::clone(&order);
         m.overrides
             .expect_write()
             .withf(|p, s, hp, cp| p == "rateme" && s == "web" && *hp == 8000 && *cp == 3000)
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/var/lib/pi/overrides/rateme.yml")));
+            .returning(move |_, _, _, _| {
+                stage_order.lock().unwrap().push("override");
+                Ok(PathBuf::from("/var/lib/pi/overrides/rateme.yml"))
+            });
+        let stage_order = Arc::clone(&order);
         m.runtime
             .expect_build()
             .withf(|stack, _| {
@@ -241,25 +259,51 @@ mod tests {
                     && stack.override_file == PathBuf::from("/var/lib/pi/overrides/rateme.yml")
             })
             .times(1)
-            .returning(|_, _| Ok(()));
-        m.runtime.expect_up().times(1).returning(|_, _| Ok(()));
+            .returning(move |_, _| {
+                stage_order.lock().unwrap().push("build");
+                Ok(())
+            });
+        let stage_order = Arc::clone(&order);
+        m.runtime
+            .expect_up()
+            .withf(|stack, _| {
+                stack.project_name == "rateme"
+                    && stack.compose_file
+                        == PathBuf::from("/var/lib/pi/workdirs/rateme/docker-compose.yml")
+                    && stack.override_file == PathBuf::from("/var/lib/pi/overrides/rateme.yml")
+            })
+            .times(1)
+            .returning(move |_, _| {
+                stage_order.lock().unwrap().push("up");
+                Ok(())
+            });
+        let stage_order = Arc::clone(&order);
         m.history
             .expect_record_started()
             .withf(|d| {
                 d.id == "dep-1" && d.status == DeploymentStatus::Running && d.git_ref == "main"
             })
             .times(1)
-            .returning(|_| Ok(()));
+            .returning(move |_| {
+                stage_order.lock().unwrap().push("started");
+                Ok(())
+            });
+        let stage_order = Arc::clone(&order);
         m.history
             .expect_record_finished()
-            .withf(|id, status, sha, finished_at, _tail| {
+            .withf(|id, status, sha, finished_at, tail| {
                 id == "dep-1"
                     && *status == DeploymentStatus::Success
                     && sha == &Some(SHA)
                     && *finished_at == 100
+                    && tail.contains("project 'rateme': host port 8000")
+                    && tail.contains(&format!("fetched {SHA}"))
             })
             .times(1)
-            .returning(|_, _, _, _, _| Ok(()));
+            .returning(move |_, _, _, _, _| {
+                stage_order.lock().unwrap().push("finished");
+                Ok(())
+            });
 
         let deploy = build(m);
         let sink = CollectSink::new();
@@ -281,6 +325,12 @@ mod tests {
         assert_eq!(
             *sink.finished.lock().unwrap(),
             vec![DeploymentStatus::Success]
+        );
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![
+                "started", "upsert", "fetch", "override", "build", "up", "finished"
+            ]
         );
     }
 }
