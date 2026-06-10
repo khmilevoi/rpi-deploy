@@ -390,6 +390,10 @@ mod tests {
             *sink.finished.lock().unwrap(),
             vec![DeploymentStatus::Failed]
         );
+        assert!(
+            deploy.try_begin("rateme").is_ok(),
+            "lock must be free after failed deploy"
+        );
     }
 
     #[tokio::test]
