@@ -165,6 +165,7 @@ mod tests {
         MockProjectRepository, MockSource,
     };
     use pi_domain::entities::{DeployRef, DeploymentStatus, FetchedSource, Project, ProjectConfig};
+    use pi_domain::error::DomainError;
     use std::{
         path::PathBuf,
         sync::{Arc, Mutex},
@@ -331,6 +332,118 @@ mod tests {
             vec![
                 "started", "upsert", "fetch", "override", "build", "up", "finished"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn build_failure_records_failed_and_emits_finished_failed() {
+        let mut m = mocks();
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
+        });
+        m.source.expect_fetch().returning(|_, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.runtime
+            .expect_build()
+            .returning(|_, _| Err(DomainError::Runtime("compose build exited with 1".into())));
+        // up не должен вызываться вовсе
+        m.runtime.expect_up().times(0);
+        m.history.expect_record_started().returning(|_| Ok(()));
+        m.history
+            .expect_record_finished()
+            .withf(|id, status, sha, _at, tail| {
+                id == "dep-2"
+                    && *status == DeploymentStatus::Failed
+                    && sha.is_none()
+                    && tail.contains("compose build exited with 1")
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let deploy = build(m);
+        let sink = CollectSink::new();
+        let permit = deploy.try_begin("rateme").unwrap();
+        let err = deploy
+            .execute(
+                permit,
+                "dep-2".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, DomainError::Runtime(_)));
+        assert_eq!(
+            *sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Failed]
+        );
+    }
+
+    #[tokio::test]
+    async fn try_begin_twice_returns_deploy_in_progress() {
+        let deploy = build(mocks());
+        let _permit = deploy.try_begin("rateme").unwrap();
+        let err = match deploy.try_begin("rateme") {
+            Ok(_) => panic!("second try_begin must fail while deploy is in progress"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, DomainError::DeployInProgress(p) if p == "rateme"));
+    }
+
+    #[tokio::test]
+    async fn lock_released_after_execute_finishes() {
+        let mut m = mocks();
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
+        });
+        m.source.expect_fetch().returning(|_, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.history.expect_record_started().returning(|_| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let deploy = build(m);
+        let permit = deploy.try_begin("rateme").unwrap();
+        deploy
+            .execute(
+                permit,
+                "dep-3".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            deploy.try_begin("rateme").is_ok(),
+            "lock must be free after deploy"
         );
     }
 }
