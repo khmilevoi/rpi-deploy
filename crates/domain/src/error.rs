@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Доменные ошибки. Инфра-ошибки мапятся в эти варианты на границе слоёв (§19).
+/// Domain errors. Infrastructure errors map to these variants at layer boundaries (§19).
 #[derive(Debug, Error)]
 pub enum DomainError {
     #[error("source error: {0}")]

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-/// In-memory per-project локи (§8.1: живут только в памяти).
+/// In-memory per-project locks (§8.1: live only in memory).
 pub struct DeployLocks {
     inner: Mutex<HashSet<String>>,
 }
@@ -13,7 +13,7 @@ impl DeployLocks {
         })
     }
 
-    /// None — деплой этого проекта уже идёт.
+    /// None — deploy of this project is already in progress.
     pub fn try_acquire(self: &Arc<Self>, project: &str) -> Option<DeployPermit> {
         let mut held = self.inner.lock().ok()?;
         if !held.insert(project.to_string()) {
@@ -26,7 +26,7 @@ impl DeployLocks {
     }
 }
 
-/// RAII-пермит: освобождает лок при Drop (в т.ч. при панике деплой-таски).
+/// RAII permit: releases lock on Drop (including on deploy task panic).
 pub struct DeployPermit {
     locks: Arc<DeployLocks>,
     project: String,

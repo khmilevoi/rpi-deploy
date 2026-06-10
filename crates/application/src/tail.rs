@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use pi_domain::contracts::LogSink;
 use pi_domain::entities::DeploymentStatus;
 
-/// Обёртка над LogSink: форвардит события и хранит последние `cap` строк.
+/// Wrapper over LogSink: forwards events and keeps the last `cap` lines.
 pub struct TailSink {
     inner: Arc<dyn LogSink>,
     lines: Mutex<VecDeque<String>>,

@@ -4,7 +4,7 @@ use pi_domain::contracts::{ContainerRuntime, ProjectRepository};
 use pi_domain::entities::ServiceState;
 use pi_domain::error::DomainError;
 
-/// Строка для `pi ls`: проект + состояние его сервисов (§7 ListProjects).
+/// Line for `pi ls`: project + state of its services (§7 ListProjects).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectView {
     pub name: String,
@@ -31,8 +31,8 @@ impl ListProjects {
     pub async fn execute(&self) -> Result<Vec<ProjectView>, DomainError> {
         let mut views = Vec::new();
         for project in self.projects.list().await? {
-            // Ошибка ps (стек ещё не поднимался / docker недоступен) - не повод
-            // ронять весь список: показываем проект без сервисов.
+            // ps error (stack not yet up / docker unavailable) is not a reason
+            // to drop the entire list: we show the project without services.
             let services = self
                 .runtime
                 .ps(&project.config.name)
@@ -88,7 +88,7 @@ mod tests {
                 state: "running".into(),
             }])
         });
-        // ps по "b" падает (стек ни разу не поднимался) - показываем пустой список сервисов.
+        // ps for "b" fails (stack never been up) - show empty list of services.
         runtime
             .expect_ps()
             .withf(|n| n == "b")

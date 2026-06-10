@@ -11,8 +11,8 @@ use crate::tail::TailSink;
 
 const LOG_TAIL_LINES: usize = 400;
 
-/// Гарантирует отправку `finished(Failed)` по дропу, если `disarm()` не вызван.
-/// Защищает от паники и от ранних возвратов через `?`.
+/// Guarantees sending `finished(Failed)` on drop if `disarm()` is not called.
+/// Protects against panics and early returns via `?`.
 struct FinishGuard {
     sink: Arc<dyn LogSink>,
     armed: bool,
@@ -36,8 +36,8 @@ impl Drop for FinishGuard {
     }
 }
 
-/// Use-case деплоя (§7, §8.2). Лок проекта берётся через try_begin ДО
-/// постановки async-задачи, чтобы HTTP-хендлер мог сразу ответить 409.
+/// Deploy use-case (§7, §8.2). Project lock is acquired via try_begin BEFORE
+/// spawning the async task, so the HTTP handler can immediately respond with 409.
 pub struct DeployProject {
     source: Arc<dyn Source>,
     runtime: Arc<dyn ContainerRuntime>,
@@ -68,7 +68,7 @@ impl DeployProject {
         })
     }
 
-    /// Err(DeployInProgress) — деплой проекта уже идёт (MVP: без очереди, §23 v0.1).
+    /// Err(DeployInProgress) — deploy of this project is already in progress (MVP: no queue, §23 v0.1).
     pub fn try_begin(&self, project: &str) -> Result<DeployPermit, DomainError> {
         self.locks
             .try_acquire(project)
@@ -83,7 +83,7 @@ impl DeployProject {
         git_ref: DeployRef,
         sink: Arc<dyn LogSink>,
     ) -> Result<Deployment, DomainError> {
-        let _permit = permit; // держим лок до конца деплоя, отпускается Drop'ом
+        let _permit = permit; // keep lock until deploy finishes, released by Drop
 
         let tail = TailSink::new(Arc::clone(&sink), LOG_TAIL_LINES);
         let log: Arc<dyn LogSink> = tail.clone();
@@ -382,7 +382,7 @@ mod tests {
         m.runtime
             .expect_build()
             .returning(|_, _| Err(DomainError::Runtime("compose build exited with 1".into())));
-        // up не должен вызываться вовсе
+        // up should not be called at all
         m.runtime.expect_up().times(0);
         m.history.expect_record_started().returning(|_| Ok(()));
         m.history

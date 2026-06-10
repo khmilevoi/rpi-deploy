@@ -1,22 +1,22 @@
 use std::path::PathBuf;
 
-/// Конфиг проекта из pi.toml (приходит в деплой-запросе, §12).
+/// Project config from pi.toml (received in deploy request, §12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectConfig {
     pub name: String,
     pub repo: String,
     pub branch: String,
-    /// Путь compose-файла относительно корня репо.
+    /// Path to compose file relative to repo root.
     pub compose_path: String,
-    /// Публичный сервис из compose ([ingress].service).
+    /// Public service from compose ([ingress].service).
     pub service: String,
-    /// Контейнерный порт публичного сервиса ([ingress].port).
+    /// Container port of the public service ([ingress].port).
     pub container_port: u16,
-    /// FQDN ([ingress].hostname). В v0.1 только сохраняется (ingress — v0.2).
+    /// FQDN ([ingress].hostname). In v0.1 only stored (ingress — v0.2).
     pub hostname: Option<String>,
 }
 
-/// Зарегистрированный проект: конфиг + закреплённый host-порт (§4).
+/// Registered project: config + allocated host port (§4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     pub config: ProjectConfig,
@@ -24,7 +24,7 @@ pub struct Project {
     pub created_at: i64,
 }
 
-/// Ветка или конкретный commit-sha (§4).
+/// Branch or specific commit-sha (§4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeployRef {
     Branch(String),
@@ -32,7 +32,7 @@ pub enum DeployRef {
 }
 
 impl DeployRef {
-    /// 40 hex-символов — это sha, всё остальное — ветка.
+    /// 40 hex characters is a sha, everything else is a branch.
     pub fn parse(s: &str) -> DeployRef {
         let is_sha = s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit());
         if is_sha {
@@ -49,8 +49,8 @@ impl DeployRef {
     }
 }
 
-/// Статусы v0.1. Остальные (`queued|canceled|interrupted|superseded`) — v0.3;
-/// в БД статус хранится строкой, расширение enum миграции не требует.
+/// Statuses for v0.1. Others (`queued|canceled|interrupted|superseded`) — v0.3;
+/// in the DB status is stored as a string, extending enum does not require migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentStatus {
     Running,
@@ -84,7 +84,7 @@ impl std::str::FromStr for DeploymentStatus {
     }
 }
 
-/// Один акт деплоя (§4).
+/// One deployment action (§4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deployment {
     pub id: String,
@@ -97,22 +97,22 @@ pub struct Deployment {
     pub log_tail: String,
 }
 
-/// Результат Source::fetch — где лежит код и какой sha выкачан.
+/// Result of Source::fetch — where the code is located and which sha was fetched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedSource {
     pub workdir: PathBuf,
     pub commit_sha: String,
 }
 
-/// Состояние одного сервиса compose-стека (для `pi ls`).
+/// State of one service in a compose stack (for `pi ls`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceState {
     pub service: String,
     pub state: String,
 }
 
-/// Что запускать: проект + абсолютные пути compose-файлов.
-/// Репозиторный docker-compose.override.yml обнаруживает адаптер (§12.1).
+/// What to run: project + absolute paths to compose files.
+/// Repository docker-compose.override.yml is discovered by the adapter (§12.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposeStack {
     pub project_name: String,
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn parse_anything_else_as_branch() {
         assert_eq!(DeployRef::parse("main"), DeployRef::Branch("main".into()));
-        // 40 символов, но не hex — это ветка
+        // 40 characters but not hex — this is a branch
         assert_eq!(
             DeployRef::parse("zzzz456789abcdef0123456789abcdef01234567"),
             DeployRef::Branch("zzzz456789abcdef0123456789abcdef01234567".into())

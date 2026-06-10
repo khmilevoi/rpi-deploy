@@ -11,14 +11,14 @@ use crate::entities::{
 };
 use crate::error::DomainError;
 
-/// Приёмник построчных логов деплоя + терминального события.
-/// Реализации: SSE-хаб агента, TailSink в application, заглушки в тестах.
+/// Receiver for line-by-line deployment logs + terminal event.
+/// Implementations: SSE hub of the agent, TailSink in application, stubs in tests.
 pub trait LogSink: Send + Sync {
     fn line(&self, line: &str);
     fn finished(&self, status: DeploymentStatus);
 }
 
-/// Получить код по DeployRef (§6). v1-адаптер — GitSource.
+/// Fetch code by DeployRef (§6). v1 adapter — GitSource.
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait Source: Send + Sync {
@@ -30,7 +30,7 @@ pub trait Source: Send + Sync {
     ) -> Result<FetchedSource, DomainError>;
 }
 
-/// Абстракция контейнерного бэкенда (§6). v1 — DockerComposeRuntime.
+/// Abstraction of container backend (§6). v1 — DockerComposeRuntime.
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync {
@@ -39,17 +39,17 @@ pub trait ContainerRuntime: Send + Sync {
     async fn ps(&self, project_name: &str) -> Result<Vec<ServiceState>, DomainError>;
 }
 
-/// Реестр проектов + порт-аллокация (§6).
+/// Project registry + port allocation (§6).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait ProjectRepository: Send + Sync {
-    /// Создаёт проект (с аллокацией host-порта) или обновляет конфиг,
-    /// сохраняя уже выданный host-порт.
+    /// Creates a project (with host port allocation) or updates the config,
+    /// preserving the already-allocated host port.
     async fn upsert(&self, config: &ProjectConfig) -> Result<Project, DomainError>;
     async fn list(&self) -> Result<Vec<Project>, DomainError>;
 }
 
-/// История деплоев (§6).
+/// Deployment history (§6).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait DeploymentHistory: Send + Sync {
@@ -65,7 +65,7 @@ pub trait DeploymentHistory: Send + Sync {
     async fn get(&self, id: &str) -> Result<Option<Deployment>, DomainError>;
 }
 
-/// Пишет compose-override с маппингом 127.0.0.1:<host> → <container> (§12.1).
+/// Writes compose-override with mapping 127.0.0.1:<host> → <container> (§12.1).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait OverrideStore: Send + Sync {
@@ -78,13 +78,13 @@ pub trait OverrideStore: Send + Sync {
     ) -> Result<PathBuf, DomainError>;
 }
 
-/// Детерминизм времени в тестах (§6).
+/// Time determinism in tests (§6).
 #[cfg_attr(feature = "mocks", automock)]
 pub trait Clock: Send + Sync {
     fn now_unix(&self) -> i64;
 }
 
-/// Детерминизм идентификаторов в тестах (§6).
+/// Identifier determinism in tests (§6).
 #[cfg_attr(feature = "mocks", automock)]
 pub trait IdGen: Send + Sync {
     fn new_id(&self) -> String;

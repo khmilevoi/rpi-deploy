@@ -15,22 +15,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Деплой текущего проекта (читает ./pi.toml)
+    /// Deploy current project (reads ./pi.toml)
     Deploy {
-        /// Ветка или commit-sha (дефолт — branch из pi.toml)
+        /// Branch or commit-sha (default — branch from pi.toml)
         #[arg(long = "ref")]
         git_ref: Option<String>,
-        /// Профиль сервера из ~/.config/pi/config.toml
+        /// Server profile from ~/.config/pi/config.toml
         #[arg(long)]
         server: Option<String>,
     },
-    /// Список проектов на агенте
+    /// List projects on the agent
     #[command(alias = "ps")]
     Ls {
         #[arg(long)]
         server: Option<String>,
     },
-    /// Управление агентом
+    /// Agent management
     Agent {
         #[command(subcommand)]
         cmd: AgentCmd,
@@ -39,9 +39,9 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum AgentCmd {
-    /// Запустить агент (foreground; под systemd)
+    /// Start the agent (foreground; under systemd)
     Run {
-        /// Путь к agent.toml (дефолт: /etc/pi/agent.toml)
+        /// Path to agent.toml (default: /etc/pi/agent.toml)
         #[arg(long)]
         config: Option<PathBuf>,
     },
