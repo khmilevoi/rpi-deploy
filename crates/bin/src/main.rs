@@ -15,6 +15,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Деплой текущего проекта (читает ./pi.toml)
+    Deploy {
+        /// Ветка или commit-sha (дефолт — branch из pi.toml)
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+        /// Профиль сервера из ~/.config/pi/config.toml
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Список проектов на агенте
+    #[command(alias = "ps")]
+    Ls {
+        #[arg(long)]
+        server: Option<String>,
+    },
     /// Управление агентом
     Agent {
         #[command(subcommand)]
@@ -42,6 +57,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
+        Cmd::Deploy { git_ref, server } => cli::commands::deploy(git_ref, server).await,
+        Cmd::Ls { server } => cli::commands::ls(server).await,
         Cmd::Agent { cmd: AgentCmd::Run { config } } => agent::run::run(config).await,
     }
 }
