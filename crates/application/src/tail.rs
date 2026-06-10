@@ -28,10 +28,12 @@ impl TailSink {
 impl LogSink for TailSink {
     fn line(&self, line: &str) {
         if let Ok(mut lines) = self.lines.lock() {
-            if lines.len() == self.cap {
-                lines.pop_front();
+            if self.cap > 0 {
+                if lines.len() == self.cap {
+                    lines.pop_front();
+                }
+                lines.push_back(line.to_string());
             }
-            lines.push_back(line.to_string());
         }
         self.inner.line(line);
     }
@@ -68,5 +70,16 @@ mod tests {
         tail.line("3");
 
         assert_eq!(tail.tail(), "2\n3");
+    }
+
+    #[test]
+    fn zero_capacity_keeps_empty_tail_but_still_forwards() {
+        let inner = CollectSink::new();
+        let tail = TailSink::new(inner.clone(), 0);
+
+        tail.line("discarded");
+
+        assert_eq!(tail.tail(), "");
+        assert_eq!(*inner.lines.lock().unwrap(), vec!["discarded".to_string()]);
     }
 }
