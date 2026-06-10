@@ -72,18 +72,25 @@ impl DeploymentHistory for SqliteHistory {
         finished_at: i64,
         log_tail: &str,
     ) -> Result<(), DomainError> {
-        let (id, sha, tail) = (
+        let (id, id_for_error, sha, tail) = (
+            id.to_string(),
             id.to_string(),
             commit_sha.map(str::to_string),
             log_tail.to_string(),
         );
         self.db
             .call(move |conn| {
-                conn.execute(
+                let rows = conn
+                    .execute(
                     "UPDATE deployments SET status=?2, commit_sha=COALESCE(?3, commit_sha), finished_at=?4, log_tail=?5 WHERE id=?1",
                     params![id, status.as_str(), sha, finished_at, tail],
                 )
                 .map_err(storage_err)?;
+                if rows == 0 {
+                    return Err(DomainError::NotFound(format!(
+                        "deployment {id_for_error}"
+                    )));
+                }
                 Ok(())
             })
             .await
@@ -161,6 +168,58 @@ mod tests {
         assert_eq!(d.commit_sha.as_deref(), Some("abc123"));
         assert_eq!(d.finished_at, Some(200));
         assert_eq!(d.log_tail, "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn record_finished_missing_deployment_returns_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = history(&dir)
+            .record_finished("missing", DeploymentStatus::Failed, None, 200, "tail")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, DomainError::NotFound(message) if message.contains("missing")));
+    }
+
+    #[tokio::test]
+    async fn record_finished_with_none_preserves_existing_commit_sha() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = history(&dir);
+        h.record_started(&started("d1")).await.unwrap();
+        h.record_finished("d1", DeploymentStatus::Success, Some("abc123"), 200, "ok")
+            .await
+            .unwrap();
+        h.record_finished("d1", DeploymentStatus::Failed, None, 300, "failed")
+            .await
+            .unwrap();
+
+        let d = h.get("d1").await.unwrap().unwrap();
+        assert_eq!(d.status, DeploymentStatus::Failed);
+        assert_eq!(d.commit_sha.as_deref(), Some("abc123"));
+        assert_eq!(d.finished_at, Some(300));
+        assert_eq!(d.log_tail, "failed");
+    }
+
+    #[tokio::test]
+    async fn get_unknown_status_returns_storage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO deployments
+                 (id, project, git_ref, status, started_at, log_tail)
+                 VALUES ('d1', 'rateme', 'main', 'bogus', 100, '')",
+                [],
+            )
+            .map_err(storage_err)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let h = SqliteHistory::new(db);
+        let err = h.get("d1").await.unwrap_err();
+        assert!(matches!(err, DomainError::Storage(message) if message.contains("unknown status")));
     }
 
     #[tokio::test]
