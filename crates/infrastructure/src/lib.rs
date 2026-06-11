@@ -6,5 +6,6 @@ pub mod history;
 pub mod overrides;
 pub mod process;
 pub mod repo;
+pub mod secrets;
 pub mod sqlite;
 pub mod sys;
