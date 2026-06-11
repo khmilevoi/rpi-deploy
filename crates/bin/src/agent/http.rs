@@ -181,7 +181,13 @@ mod tests {
         let mut runtime = MockContainerRuntime::new();
         runtime.expect_build().returning(|_, _| Ok(()));
         runtime.expect_up().returning(|_, _| Ok(()));
-        runtime.expect_ps().returning(|_| Ok(vec![]));
+        runtime.expect_ps().returning(|_| {
+            Ok(vec![pi_domain::entities::ServiceState {
+                service: "web".into(),
+                state: "running".into(),
+                health: Some("healthy".into()),
+            }])
+        });
         runtime
     }
 
@@ -190,16 +196,30 @@ mod tests {
         source: Arc<dyn Source>,
         runtime: Arc<dyn ContainerRuntime>,
     ) -> AppState {
+        use pi_infrastructure::cloudflared::DisabledIngress;
+        use pi_infrastructure::envfile::FsEnvFileWriter;
+        use pi_infrastructure::health::HybridHealthGate;
+        use pi_infrastructure::secrets::EncryptedFileStore;
+
         let db = Db::open(&dir.join("state.db")).unwrap();
         let projects = SqliteProjectRepo::new(db.clone(), 8000, 8999);
         let history: Arc<dyn pi_domain::contracts::DeploymentHistory> = SqliteHistory::new(db);
         let overrides = FsOverrideStore::new(dir.join("overrides"));
+        let secrets = EncryptedFileStore::open(dir).unwrap();
+        let health = HybridHealthGate::with_interval(
+            Arc::clone(&runtime),
+            std::time::Duration::from_millis(10),
+        );
         let deploy = DeployProject::new(
             source,
             Arc::clone(&runtime),
             projects.clone(),
             Arc::clone(&history),
             overrides,
+            secrets,
+            FsEnvFileWriter::new(),
+            health,
+            DisabledIngress::new(),
             SystemClock::new(),
         );
         let list = ListProjects::new(projects, runtime);
