@@ -90,27 +90,6 @@ fn parse_env_file(text: &str) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(bundle.vars)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn env_file_parsing_matches_agent_rules() {
-        // Same dotenv dialect as the agent (§10, plan Task 3): the agent
-        // strips `export ` and rejects invalid keys with 400, so a file the
-        // CLI accepts must round-trip identically.
-        let vars = parse_env_file("# c\nexport TOKEN=\"abc=def\"\nNAME='single'\nDB=postgres://u:p@db/x\n").unwrap();
-        assert_eq!(vars["TOKEN"], "abc=def");
-        assert_eq!(vars["NAME"], "single");
-        assert_eq!(vars["DB"], "postgres://u:p@db/x");
-        assert_eq!(vars.len(), 3);
-        assert!(
-            parse_env_file("1BAD=x").is_err(),
-            "agent rejects this key; the CLI must too"
-        );
-    }
-}
-
 pub async fn ls(server: Option<String>) -> anyhow::Result<()> {
     let profile = ClientConfig::load()?.select(server.as_deref())?;
     let tunnel = SshTunnel::open(&profile).await?;
@@ -144,4 +123,26 @@ pub async fn ls(server: Option<String>) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_file_parsing_matches_agent_rules() {
+        // Same dotenv dialect as the agent (§10, plan Task 3): the agent
+        // strips `export ` and rejects invalid keys with 400, so a file the
+        // CLI accepts must round-trip identically.
+        let text = "# c\nexport TOKEN=\"abc=def\"\nNAME='single'\nDB=postgres://u:p@db/x\n";
+        let vars = parse_env_file(text).unwrap();
+        assert_eq!(vars["TOKEN"], "abc=def");
+        assert_eq!(vars["NAME"], "single");
+        assert_eq!(vars["DB"], "postgres://u:p@db/x");
+        assert_eq!(vars.len(), 3);
+        assert!(
+            parse_env_file("1BAD=x").is_err(),
+            "agent rejects this key; the CLI must too"
+        );
+    }
 }

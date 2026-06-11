@@ -126,18 +126,13 @@ impl HealthGate for HybridHealthGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_sink::CollectSink;
     use pi_domain::contracts::MockContainerRuntime;
-    use pi_domain::entities::{DeploymentStatus, HealthcheckConfig, ServiceState};
+    use pi_domain::entities::{HealthcheckConfig, ServiceState};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct NullSink;
-    impl LogSink for NullSink {
-        fn line(&self, _line: &str) {}
-        fn finished(&self, _status: DeploymentStatus) {}
-    }
-
     fn sink() -> Arc<dyn LogSink> {
-        Arc::new(NullSink)
+        CollectSink::new()
     }
 
     fn config(healthcheck: HealthcheckConfig) -> ProjectConfig {

@@ -36,7 +36,7 @@ fn write_temp_private(dir: &Path, prefix: &str, contents: &[u8]) -> std::io::Res
     }
 }
 
-fn parent_dir<'p>(path: &'p Path) -> std::io::Result<&'p Path> {
+fn parent_dir(path: &Path) -> std::io::Result<&Path> {
     path.parent().ok_or_else(|| {
         std::io::Error::other(format!("missing parent directory for {}", path.display()))
     })

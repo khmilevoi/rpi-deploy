@@ -194,21 +194,7 @@ impl Ingress for DisabledIngress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_domain::entities::DeploymentStatus;
-    use std::sync::Mutex;
-
-    struct VecSink(Mutex<Vec<String>>);
-    impl VecSink {
-        fn new() -> Arc<VecSink> {
-            Arc::new(VecSink(Mutex::new(vec![])))
-        }
-    }
-    impl LogSink for VecSink {
-        fn line(&self, line: &str) {
-            self.0.lock().unwrap().push(line.to_string());
-        }
-        fn finished(&self, _status: DeploymentStatus) {}
-    }
+    use crate::test_sink::CollectSink;
 
     fn doc(yaml: &str) -> serde_yaml::Value {
         serde_yaml::from_str(yaml).unwrap()
@@ -294,7 +280,7 @@ mod tests {
             vec!["whatever".into()],
         );
         let err = ingress
-            .upsert("a.example.com", 8000, VecSink::new())
+            .upsert("a.example.com", 8000, CollectSink::new())
             .await
             .unwrap_err();
         assert!(
@@ -315,7 +301,7 @@ mod tests {
             vec!["pi-test-no-such-binary".into()],
         );
         ingress
-            .upsert("old.example.com", 8001, VecSink::new())
+            .upsert("old.example.com", 8001, CollectSink::new())
             .await
             .unwrap();
         assert_eq!(
@@ -339,7 +325,7 @@ mod tests {
         // The config write must be rolled back: otherwise the next deploy
         // sees no diff and never retries dns/restart for this hostname.
         let err = ingress
-            .upsert("new.example.com", 8002, VecSink::new())
+            .upsert("new.example.com", 8002, CollectSink::new())
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Ingress(_)));
@@ -350,7 +336,7 @@ mod tests {
         );
         // a retry diffs again and re-attempts dns instead of silently passing
         let err = ingress
-            .upsert("new.example.com", 8002, VecSink::new())
+            .upsert("new.example.com", 8002, CollectSink::new())
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Ingress(_)), "retry re-runs dns");

@@ -13,3 +13,5 @@ pub mod repo;
 pub mod secrets;
 pub mod sqlite;
 pub mod sys;
+#[cfg(test)]
+pub(crate) mod test_sink;
