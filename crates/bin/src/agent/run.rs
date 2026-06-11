@@ -9,6 +9,7 @@ pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let state = build_state(&config)?;
     let app = router(state);
 
+    // windows
     if let Some(addr) = &config.tcp {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("pi-agent listening on tcp {addr}");
@@ -16,6 +17,7 @@ pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // unix
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -25,7 +27,10 @@ pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(&config.socket);
         let listener = tokio::net::UnixListener::bind(&config.socket)?;
         std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o660))?;
-        tracing::info!("pi-agent listening on unix socket {}", config.socket.display());
+        tracing::info!(
+            "pi-agent listening on unix socket {}",
+            config.socket.display()
+        );
         axum::serve(listener, app).await?;
         Ok(())
     }
