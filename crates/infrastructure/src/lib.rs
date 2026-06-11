@@ -3,6 +3,7 @@ pub mod docker;
 pub mod dotenv;
 pub mod envfile;
 pub mod events;
+pub(crate) mod fsutil;
 pub mod git;
 pub mod health;
 pub mod history;

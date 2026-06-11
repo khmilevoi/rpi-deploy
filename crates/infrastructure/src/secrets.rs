@@ -1,5 +1,4 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,6 +9,7 @@ use pi_domain::entities::EnvBundle;
 use pi_domain::error::DomainError;
 
 use crate::dotenv;
+use crate::fsutil;
 
 fn secrets_err(msg: impl std::fmt::Display) -> DomainError {
     DomainError::Secrets(msg.to_string())
@@ -61,74 +61,13 @@ fn read_identity(path: &Path) -> Result<age::x25519::Identity, DomainError> {
 fn open_or_create_identity(path: &Path) -> Result<age::x25519::Identity, DomainError> {
     let identity = age::x25519::Identity::generate();
     let contents = identity.to_string();
-    if write_private_exclusive(path, contents.expose_secret().as_bytes())? {
+    if fsutil::write_private_exclusive(path, contents.expose_secret().as_bytes())
+        .map_err(secrets_err)?
+    {
         Ok(identity)
     } else {
         read_identity(path)
     }
-}
-
-fn create_private_new(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
-
-fn write_temp_private(dir: &Path, prefix: &str, contents: &[u8]) -> Result<PathBuf, DomainError> {
-    loop {
-        let temp_path = dir.join(format!(".{prefix}.{}.tmp", uuid::Uuid::new_v4()));
-        match create_private_new(&temp_path) {
-            Ok(mut file) => {
-                let write_result = file.write_all(contents).and_then(|_| file.sync_all());
-                if let Err(e) = write_result {
-                    let _ = fs::remove_file(&temp_path);
-                    return Err(secrets_err(e));
-                }
-                return Ok(temp_path);
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(secrets_err(e)),
-        }
-    }
-}
-
-fn write_private_exclusive(path: &Path, contents: &[u8]) -> Result<bool, DomainError> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| secrets_err(format!("missing parent directory for {}", path.display())))?;
-    let prefix = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("secret");
-    let temp_path = write_temp_private(dir, prefix, contents)?;
-    let link_result = fs::hard_link(&temp_path, path);
-    let _ = fs::remove_file(&temp_path);
-    match link_result {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(secrets_err(e)),
-    }
-}
-
-fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<(), DomainError> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| secrets_err(format!("missing parent directory for {}", path.display())))?;
-    let prefix = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("bundle");
-    let temp_path = write_temp_private(dir, prefix, contents)?;
-    if let Err(e) = fs::rename(&temp_path, path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(secrets_err(e));
-    }
-    Ok(())
 }
 
 #[async_trait]
@@ -138,9 +77,11 @@ impl SecretStore for EncryptedFileStore {
         let ciphertext =
             age::encrypt(&self.identity.to_public(), plaintext.as_bytes()).map_err(secrets_err)?;
         let path = self.bundle_path(project)?;
-        tokio::task::spawn_blocking(move || write_private_atomic(&path, &ciphertext))
-            .await
-            .map_err(|e| secrets_err(format!("join error: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            fsutil::write_private_atomic(&path, &ciphertext).map_err(secrets_err)
+        })
+        .await
+        .map_err(|e| secrets_err(format!("join error: {e}")))?
     }
 
     async fn load(&self, project: &str) -> Result<EnvBundle, DomainError> {
