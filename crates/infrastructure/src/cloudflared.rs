@@ -80,7 +80,11 @@ impl CloudflaredIngress {
         tunnel: String,
         restart: Vec<String>,
     ) -> Arc<CloudflaredIngress> {
-        Arc::new(CloudflaredIngress { config_path, tunnel, restart })
+        Arc::new(CloudflaredIngress {
+            config_path,
+            tunnel,
+            restart,
+        })
     }
 }
 
@@ -92,12 +96,14 @@ impl Ingress for CloudflaredIngress {
         host_port: u16,
         log: Arc<dyn LogSink>,
     ) -> Result<(), DomainError> {
-        let text = tokio::fs::read_to_string(&self.config_path).await.map_err(|e| {
-            ingress_err(format!(
-                "cannot read {}: {e}; bootstrap the tunnel first (docs/install-agent-v0.1.md)",
-                self.config_path.display()
-            ))
-        })?;
+        let text = tokio::fs::read_to_string(&self.config_path)
+            .await
+            .map_err(|e| {
+                ingress_err(format!(
+                    "cannot read {}: {e}; bootstrap the tunnel first (docs/install-agent-v0.1.md)",
+                    self.config_path.display()
+                ))
+            })?;
         let mut doc: serde_yaml::Value = serde_yaml::from_str(&text).map_err(ingress_err)?;
         let service = format!("http://127.0.0.1:{host_port}");
         let changed = upsert_ingress_rule(&mut doc, hostname, &service).map_err(ingress_err)?;
@@ -108,7 +114,9 @@ impl Ingress for CloudflaredIngress {
             return Ok(());
         }
         let updated = serde_yaml::to_string(&doc).map_err(ingress_err)?;
-        tokio::fs::write(&self.config_path, updated).await.map_err(ingress_err)?;
+        tokio::fs::write(&self.config_path, updated)
+            .await
+            .map_err(ingress_err)?;
         log.line(&format!("ingress: routing {hostname} -> {service}"));
 
         let mut dns = Command::new("cloudflared");
@@ -116,7 +124,9 @@ impl Ingress for CloudflaredIngress {
         match run_capture(dns).await {
             Ok(_) => log.line(&format!("ingress: DNS record created for {hostname}")),
             Err(err) if is_already_exists(&err) => {
-                log.line(&format!("ingress: DNS for {hostname} already exists; leaving as is"));
+                log.line(&format!(
+                    "ingress: DNS for {hostname} already exists; leaving as is"
+                ));
             }
             Err(err) => return Err(ingress_err(format!("route dns: {err}"))),
         }
@@ -193,7 +203,10 @@ mod tests {
         assert!(changed);
         let rules = d.get("ingress").unwrap().as_sequence().unwrap();
         assert_eq!(rules.len(), 3);
-        assert_eq!(rules[1].get("hostname").unwrap().as_str(), Some("new.example.com"));
+        assert_eq!(
+            rules[1].get("hostname").unwrap().as_str(),
+            Some("new.example.com")
+        );
         assert!(rules[2].get("hostname").is_none(), "catch-all stays last");
     }
 
@@ -214,7 +227,10 @@ mod tests {
         assert!(changed);
         let rules = d.get("ingress").unwrap().as_sequence().unwrap();
         assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0].get("service").unwrap().as_str(), Some("http://127.0.0.1:9000"));
+        assert_eq!(
+            rules[0].get("service").unwrap().as_str(),
+            Some("http://127.0.0.1:9000")
+        );
     }
 
     #[test]
@@ -225,7 +241,10 @@ mod tests {
         assert!(changed);
         let rules = d.get("ingress").unwrap().as_sequence().unwrap();
         assert_eq!(rules.len(), 2);
-        assert_eq!(rules[1].get("service").unwrap().as_str(), Some("http_status:404"));
+        assert_eq!(
+            rules[1].get("service").unwrap().as_str(),
+            Some("http_status:404")
+        );
     }
 
     #[test]
@@ -236,8 +255,12 @@ mod tests {
 
     #[test]
     fn already_exists_detection() {
-        assert!(is_already_exists("... record with that host already exists ..."));
-        assert!(is_already_exists("Already configured CNAME for this hostname"));
+        assert!(is_already_exists(
+            "... record with that host already exists ..."
+        ));
+        assert!(is_already_exists(
+            "Already configured CNAME for this hostname"
+        ));
         assert!(!is_already_exists("connection refused"));
     }
 
@@ -249,7 +272,10 @@ mod tests {
             "home".into(),
             vec!["whatever".into()],
         );
-        let err = ingress.upsert("a.example.com", 8000, VecSink::new()).await.unwrap_err();
+        let err = ingress
+            .upsert("a.example.com", 8000, VecSink::new())
+            .await
+            .unwrap_err();
         assert!(
             matches!(&err, DomainError::Ingress(m) if m.contains("config.yml")),
             "got: {err}"
@@ -267,8 +293,15 @@ mod tests {
             "home".into(),
             vec!["pi-test-no-such-binary".into()],
         );
-        ingress.upsert("old.example.com", 8001, VecSink::new()).await.unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), BASE, "file untouched");
+        ingress
+            .upsert("old.example.com", 8001, VecSink::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            BASE,
+            "file untouched"
+        );
     }
 
     #[tokio::test]
@@ -283,8 +316,13 @@ mod tests {
         );
         // `cloudflared` is not on PATH in tests -> route dns fails -> Err,
         // but the config must already be updated (§11 order: config, dns, restart).
-        let err = ingress.upsert("new.example.com", 8002, VecSink::new()).await.unwrap_err();
+        let err = ingress
+            .upsert("new.example.com", 8002, VecSink::new())
+            .await
+            .unwrap_err();
         assert!(matches!(err, DomainError::Ingress(_)));
-        assert!(std::fs::read_to_string(&path).unwrap().contains("new.example.com"));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("new.example.com"));
     }
 }

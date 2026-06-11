@@ -18,11 +18,19 @@ pub async fn deploy(git_ref: Option<String>, server: Option<String>) -> anyhow::
     let version = api.version().await?;
     eprintln!("agent {} (api {})", version.version, version.api);
 
-    let req = DeployRequest { project: (&project).into(), git_ref };
+    let req = DeployRequest {
+        project: (&project).into(),
+        git_ref,
+    };
     let accepted = api.deploy(&req).await?;
-    eprintln!("deployment {} started; streaming logs:", accepted.deployment_id);
+    eprintln!(
+        "deployment {} started; streaming logs:",
+        accepted.deployment_id
+    );
 
-    let status = api.follow_logs(&accepted.deployment_id, |line| println!("{line}")).await?;
+    let status = api
+        .follow_logs(&accepted.deployment_id, |line| println!("{line}"))
+        .await?;
     eprintln!("deploy finished: {status}");
     if status != "success" {
         drop(tunnel);
@@ -36,9 +44,8 @@ pub async fn env_send(apply: bool, server: Option<String>) -> anyhow::Result<()>
     let project_name = pitoml.project.name.clone();
     let env_file = Path::new(&pitoml.env.file).to_path_buf();
 
-    let raw = std::fs::read_to_string(&env_file).map_err(|e| {
-        anyhow::anyhow!("cannot read {}: {e}", env_file.display())
-    })?;
+    let raw = std::fs::read_to_string(&env_file)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", env_file.display()))?;
     let vars = parse_env_file(&raw)?;
     if vars.is_empty() {
         anyhow::bail!("no variables found in {}", env_file.display());
@@ -83,9 +90,9 @@ fn parse_env_file(text: &str) -> anyhow::Result<BTreeMap<String, String>> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (key, val) = line.split_once('=').ok_or_else(|| {
-            anyhow::anyhow!("line {}: expected KEY=VALUE, got: {line}", i + 1)
-        })?;
+        let (key, val) = line
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("line {}: expected KEY=VALUE, got: {line}", i + 1))?;
         let key = key.trim().to_string();
         let val = strip_quotes(val.trim());
         map.insert(key, val);
@@ -111,7 +118,10 @@ pub async fn ls(server: Option<String>) -> anyhow::Result<()> {
         println!("no projects deployed yet");
         return Ok(());
     }
-    println!("{:<16} {:<10} {:<28} {:<6} SERVICES", "NAME", "BRANCH", "HOSTNAME", "PORT");
+    println!(
+        "{:<16} {:<10} {:<28} {:<6} SERVICES",
+        "NAME", "BRANCH", "HOSTNAME", "PORT"
+    );
     for p in projects {
         let services = if p.services.is_empty() {
             "-".to_string()

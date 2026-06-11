@@ -18,7 +18,10 @@ pub struct MaskingSink {
 
 impl MaskingSink {
     pub fn new(inner: Arc<dyn LogSink>) -> Arc<MaskingSink> {
-        Arc::new(MaskingSink { inner, secrets: Mutex::new(Vec::new()) })
+        Arc::new(MaskingSink {
+            inner,
+            secrets: Mutex::new(Vec::new()),
+        })
     }
 
     pub fn arm(&self, bundle: &EnvBundle) {
@@ -76,7 +79,10 @@ mod tests {
     fn masks_armed_values_and_keeps_short_ones() {
         let inner = CollectSink::new();
         let mask = MaskingSink::new(inner.clone());
-        mask.arm(&bundle(&[("DB_PASSWORD", "hunter2-long"), ("PORT", "3000")]));
+        mask.arm(&bundle(&[
+            ("DB_PASSWORD", "hunter2-long"),
+            ("PORT", "3000"),
+        ]));
 
         mask.line("connecting with hunter2-long to db on 3000");
 
@@ -90,7 +96,10 @@ mod tests {
     fn masks_every_occurrence_and_longest_value_first() {
         let inner = CollectSink::new();
         let mask = MaskingSink::new(inner.clone());
-        mask.arm(&bundle(&[("TOKEN", "abc123"), ("URL", "https://u:abc123@host")]));
+        mask.arm(&bundle(&[
+            ("TOKEN", "abc123"),
+            ("URL", "https://u:abc123@host"),
+        ]));
 
         mask.line("https://u:abc123@host then abc123 again abc123");
 
@@ -106,7 +115,13 @@ mod tests {
         let mask = MaskingSink::new(inner.clone());
         mask.line("raw hunter2-long");
         mask.finished(DeploymentStatus::Success);
-        assert_eq!(*inner.lines.lock().unwrap(), vec!["raw hunter2-long".to_string()]);
-        assert_eq!(*inner.finished.lock().unwrap(), vec![DeploymentStatus::Success]);
+        assert_eq!(
+            *inner.lines.lock().unwrap(),
+            vec!["raw hunter2-long".to_string()]
+        );
+        assert_eq!(
+            *inner.finished.lock().unwrap(),
+            vec![DeploymentStatus::Success]
+        );
     }
 }

@@ -7,14 +7,22 @@ use tokio::process::Command;
 
 pub async fn run_streamed(mut cmd: Command, log: Arc<dyn LogSink>) -> Result<(), String> {
     let label = format!("{:?}", cmd.as_std());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
     let mut child = cmd.spawn().map_err(|e| format!("spawn {label}: {e}"))?;
 
     let stdout = child.stdout.take().ok_or("child stdout not captured")?;
     let stderr = child.stderr.take().ok_or("child stderr not captured")?;
-    tokio::join!(forward_lines(stdout, Arc::clone(&log)), forward_lines(stderr, Arc::clone(&log)));
+    tokio::join!(
+        forward_lines(stdout, Arc::clone(&log)),
+        forward_lines(stderr, Arc::clone(&log))
+    );
 
-    let status = child.wait().await.map_err(|e| format!("wait {label}: {e}"))?;
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("wait {label}: {e}"))?;
     if status.success() {
         Ok(())
     } else {
@@ -32,7 +40,10 @@ async fn forward_lines<R: AsyncRead + Unpin>(reader: R, log: Arc<dyn LogSink>) {
 pub async fn run_capture(mut cmd: Command) -> Result<String, String> {
     let label = format!("{:?}", cmd.as_std());
     cmd.stdin(Stdio::null());
-    let out = cmd.output().await.map_err(|e| format!("spawn {label}: {e}"))?;
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("spawn {label}: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "{label} exited with {}: {}",
@@ -80,7 +91,10 @@ mod tests {
         cmd.arg("--version");
         run_streamed(cmd, sink.clone()).await.unwrap();
         let lines = sink.0.lock().unwrap();
-        assert!(lines.iter().any(|l| l.starts_with("git version")), "got: {lines:?}");
+        assert!(
+            lines.iter().any(|l| l.starts_with("git version")),
+            "got: {lines:?}"
+        );
     }
 
     #[tokio::test]

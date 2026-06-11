@@ -55,8 +55,14 @@ mod tests {
     #[tokio::test]
     async fn writes_env_file_into_existing_workdir() {
         let dir = tempfile::tempdir().unwrap();
-        FsEnvFileWriter::new().write(dir.path(), &bundle()).await.unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join(".env")).unwrap(), "A=1\n");
+        FsEnvFileWriter::new()
+            .write(dir.path(), &bundle())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".env")).unwrap(),
+            "A=1\n"
+        );
     }
 
     #[tokio::test]

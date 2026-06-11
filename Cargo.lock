@@ -1390,7 +1390,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1417,7 +1417,7 @@ dependencies = [
 
 [[package]]
 name = "pi-application"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "mockall",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "pi-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "mockall",
@@ -1436,14 +1436,17 @@ dependencies = [
 
 [[package]]
 name = "pi-infrastructure"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "age",
  "async-trait",
+ "mockall",
  "pi-domain",
+ "reqwest",
  "rusqlite",
  "rusqlite_migration",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tracing",
@@ -2085,6 +2088,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2554,6 +2570,12 @@ dependencies = [
  "crypto-common",
  "subtle",
 ]
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

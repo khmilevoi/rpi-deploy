@@ -35,7 +35,14 @@ impl SendEnv {
         overrides: Arc<dyn OverrideStore>,
         runtime: Arc<dyn ContainerRuntime>,
     ) -> Arc<SendEnv> {
-        Arc::new(SendEnv { secrets, projects, source, env_files, overrides, runtime })
+        Arc::new(SendEnv {
+            secrets,
+            projects,
+            source,
+            env_files,
+            overrides,
+            runtime,
+        })
     }
 
     pub async fn execute(
@@ -51,7 +58,10 @@ impl SendEnv {
         self.secrets.save(project, &bundle).await?;
         let keys = bundle.vars.len();
         if !apply {
-            return Ok(EnvSaved { keys, applied: false });
+            return Ok(EnvSaved {
+                keys,
+                applied: false,
+            });
         }
 
         let registered = self.projects.get(project).await?.ok_or_else(|| {
@@ -70,7 +80,12 @@ impl SendEnv {
         self.env_files.write(&workdir, &bundle).await?;
         let override_file = self
             .overrides
-            .write(project, &config.service, registered.host_port, config.container_port)
+            .write(
+                project,
+                &config.service,
+                registered.host_port,
+                config.container_port,
+            )
             .await?;
         let stack = ComposeStack {
             project_name: config.name.clone(),
@@ -79,7 +94,10 @@ impl SendEnv {
             override_file,
         };
         self.runtime.up(&stack, log).await?;
-        Ok(EnvSaved { keys, applied: true })
+        Ok(EnvSaved {
+            keys,
+            applied: true,
+        })
     }
 }
 
@@ -177,7 +195,13 @@ mod tests {
             .execute("rateme", bundle(), false, CollectSink::new())
             .await
             .unwrap();
-        assert_eq!(saved, EnvSaved { keys: 2, applied: false });
+        assert_eq!(
+            saved,
+            EnvSaved {
+                keys: 2,
+                applied: false
+            }
+        );
     }
 
     #[tokio::test]
@@ -195,7 +219,10 @@ mod tests {
     async fn apply_reinjects_env_and_runs_up_with_masked_logs() {
         let mut m = mocks();
         m.secrets.expect_save().returning(|_, _| Ok(()));
-        m.projects.expect_get().withf(|n| n == "rateme").returning(|_| Ok(Some(registered())));
+        m.projects
+            .expect_get()
+            .withf(|n| n == "rateme")
+            .returning(|_| Ok(Some(registered())));
         m.source
             .expect_workdir()
             .withf(|n| n == "rateme")
@@ -225,12 +252,27 @@ mod tests {
             });
 
         let sink = CollectSink::new();
-        let saved = build(m).execute("rateme", bundle(), true, sink.clone()).await.unwrap();
+        let saved = build(m)
+            .execute("rateme", bundle(), true, sink.clone())
+            .await
+            .unwrap();
 
-        assert_eq!(saved, EnvSaved { keys: 2, applied: true });
+        assert_eq!(
+            saved,
+            EnvSaved {
+                keys: 2,
+                applied: true
+            }
+        );
         let lines = sink.lines.lock().unwrap();
-        assert!(lines.iter().any(|l| l.contains("***DB_PASSWORD***")), "lines: {lines:?}");
-        assert!(!lines.iter().any(|l| l.contains("hunter2-long")), "secret leaked");
+        assert!(
+            lines.iter().any(|l| l.contains("***DB_PASSWORD***")),
+            "lines: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("hunter2-long")),
+            "secret leaked"
+        );
     }
 
     #[tokio::test]
@@ -251,8 +293,14 @@ mod tests {
     #[tokio::test]
     async fn list_env_keys_returns_names_only() {
         let mut secrets = MockSecretStore::new();
-        secrets.expect_load().withf(|p| p == "rateme").returning(|_| Ok(bundle()));
-        let keys = ListEnvKeys::new(Arc::new(secrets)).execute("rateme").await.unwrap();
+        secrets
+            .expect_load()
+            .withf(|p| p == "rateme")
+            .returning(|_| Ok(bundle()));
+        let keys = ListEnvKeys::new(Arc::new(secrets))
+            .execute("rateme")
+            .await
+            .unwrap();
         assert_eq!(keys, vec!["DB_PASSWORD".to_string(), "PORT".to_string()]);
     }
 }

@@ -29,7 +29,9 @@ pub struct CloudflaredSection {
 }
 
 fn default_restart() -> Vec<String> {
-    ["systemctl", "--user", "restart", "cloudflared"].map(String::from).to_vec()
+    ["systemctl", "--user", "restart", "cloudflared"]
+        .map(String::from)
+        .to_vec()
 }
 
 fn default_data_dir() -> PathBuf {
@@ -51,7 +53,9 @@ impl AgentConfig {
     }
 
     pub fn load(path: Option<&Path>) -> anyhow::Result<AgentConfig> {
-        let path = path.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/etc/pi/agent.toml"));
+        let path = path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/etc/pi/agent.toml"));
         if path.exists() {
             AgentConfig::parse(&std::fs::read_to_string(&path)?)
         } else {
@@ -68,14 +72,18 @@ mod tests {
     fn empty_config_gives_spec_defaults() {
         let config = AgentConfig::parse("").unwrap();
         assert_eq!(config.data_dir, std::path::PathBuf::from("/var/lib/pi"));
-        assert_eq!(config.socket, std::path::PathBuf::from("/run/pi/agent.sock"));
+        assert_eq!(
+            config.socket,
+            std::path::PathBuf::from("/run/pi/agent.sock")
+        );
         assert!(config.tcp.is_none());
         assert_eq!((config.port_min, config.port_max), (8000, 8999));
     }
 
     #[test]
     fn tcp_override_for_dev() {
-        let config = AgentConfig::parse("tcp = \"127.0.0.1:7700\"\ndata_dir = \".dev-data\"").unwrap();
+        let config =
+            AgentConfig::parse("tcp = \"127.0.0.1:7700\"\ndata_dir = \".dev-data\"").unwrap();
         assert_eq!(config.tcp.as_deref(), Some("127.0.0.1:7700"));
     }
 
@@ -87,7 +95,10 @@ mod tests {
         .unwrap();
         let cf = config.cloudflared.unwrap();
         assert_eq!(cf.tunnel, "home");
-        assert_eq!(cf.restart, vec!["systemctl", "--user", "restart", "cloudflared"]);
+        assert_eq!(
+            cf.restart,
+            vec!["systemctl", "--user", "restart", "cloudflared"]
+        );
     }
 
     #[test]

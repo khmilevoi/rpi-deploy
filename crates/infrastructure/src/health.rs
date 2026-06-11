@@ -40,7 +40,11 @@ impl HybridHealthGate {
         runtime: Arc<dyn ContainerRuntime>,
         interval: Duration,
     ) -> Arc<HybridHealthGate> {
-        Arc::new(HybridHealthGate { runtime, http: reqwest::Client::new(), interval })
+        Arc::new(HybridHealthGate {
+            runtime,
+            http: reqwest::Client::new(),
+            interval,
+        })
     }
 
     async fn probe(&self, config: &ProjectConfig, host_port: u16) -> Result<Probe, DomainError> {
@@ -78,7 +82,9 @@ impl HybridHealthGate {
             }
             None => match tokio::net::TcpStream::connect(("127.0.0.1", host_port)).await {
                 Ok(_) => Ok(Probe::Pass),
-                Err(e) => Ok(Probe::Wait(format!("tcp connect 127.0.0.1:{host_port}: {e}"))),
+                Err(e) => Ok(Probe::Wait(format!(
+                    "tcp connect 127.0.0.1:{host_port}: {e}"
+                ))),
             },
         }
     }
@@ -94,19 +100,21 @@ impl HealthGate for HybridHealthGate {
     ) -> Result<(), DomainError> {
         let budget = Duration::from_secs(config.healthcheck.timeout_secs);
         let deadline = tokio::time::Instant::now() + budget;
-        log.line(&format!("healthcheck: waiting up to {}s ...", budget.as_secs()));
-        let mut last = String::from("no probe attempted");
+        log.line(&format!(
+            "healthcheck: waiting up to {}s ...",
+            budget.as_secs()
+        ));
         loop {
-            match self.probe(config, host_port).await? {
+            let wait_reason = match self.probe(config, host_port).await? {
                 Probe::Pass => {
                     log.line("healthcheck: passed");
                     return Ok(());
                 }
-                Probe::Wait(reason) => last = reason,
-            }
+                Probe::Wait(reason) => reason,
+            };
             if tokio::time::Instant::now() >= deadline {
                 return Err(DomainError::HealthCheck(format!(
-                    "timed out after {}s (last probe: {last})",
+                    "timed out after {}s (last probe: {wait_reason})",
                     budget.as_secs()
                 )));
             }
@@ -171,13 +179,19 @@ mod tests {
     async fn docker_healthy_passes() {
         let mut runtime = MockContainerRuntime::new();
         runtime.expect_ps().returning(|_| Ok(web(Some("healthy"))));
-        gate(runtime).check(&config(HealthcheckConfig::default()), 1, sink()).await.unwrap();
+        gate(runtime)
+            .check(&config(HealthcheckConfig::default()), 1, sink())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn docker_unhealthy_fails_without_waiting_for_timeout() {
         let mut runtime = MockContainerRuntime::new();
-        runtime.expect_ps().times(1).returning(|_| Ok(web(Some("unhealthy"))));
+        runtime
+            .expect_ps()
+            .times(1)
+            .returning(|_| Ok(web(Some("unhealthy"))));
         let err = gate(runtime)
             .check(&config(HealthcheckConfig::default()), 1, sink())
             .await
@@ -196,7 +210,10 @@ mod tests {
                 Ok(web(Some("healthy")))
             }
         });
-        gate(runtime).check(&config(HealthcheckConfig::default()), 1, sink()).await.unwrap();
+        gate(runtime)
+            .check(&config(HealthcheckConfig::default()), 1, sink())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -210,7 +227,10 @@ mod tests {
         });
         let mut runtime = MockContainerRuntime::new();
         runtime.expect_ps().returning(|_| Ok(web(None)));
-        gate(runtime).check(&config(HealthcheckConfig::default()), port, sink()).await.unwrap();
+        gate(runtime)
+            .check(&config(HealthcheckConfig::default()), port, sink())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -236,7 +256,10 @@ mod tests {
             expect: Some("204".into()),
             timeout_secs: 5,
         };
-        gate(runtime).check(&config(hc), port, sink()).await.unwrap();
+        gate(runtime)
+            .check(&config(hc), port, sink())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -248,9 +271,18 @@ mod tests {
         };
         let mut runtime = MockContainerRuntime::new();
         runtime.expect_ps().returning(|_| Ok(web(None)));
-        let hc = HealthcheckConfig { timeout_secs: 0, ..HealthcheckConfig::default() };
-        let err = gate(runtime).check(&config(hc), port, sink()).await.unwrap_err();
-        assert!(matches!(&err, DomainError::HealthCheck(m) if m.contains("timed out")), "got: {err}");
+        let hc = HealthcheckConfig {
+            timeout_secs: 0,
+            ..HealthcheckConfig::default()
+        };
+        let err = gate(runtime)
+            .check(&config(hc), port, sink())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, DomainError::HealthCheck(m) if m.contains("timed out")),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

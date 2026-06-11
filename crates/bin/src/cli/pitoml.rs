@@ -41,7 +41,9 @@ pub struct BuildSection {
 
 impl Default for BuildSection {
     fn default() -> BuildSection {
-        BuildSection { compose: default_compose() }
+        BuildSection {
+            compose: default_compose(),
+        }
     }
 }
 
@@ -74,7 +76,9 @@ pub struct EnvSection {
 
 impl Default for EnvSection {
     fn default() -> EnvSection {
-        EnvSection { file: default_env_file() }
+        EnvSection {
+            file: default_env_file(),
+        }
     }
 }
 
@@ -114,7 +118,10 @@ impl PiToml {
     pub fn parse(text: &str) -> anyhow::Result<PiToml> {
         let parsed: PiToml = toml::from_str(text)?;
         if parsed.schema != 1 {
-            anyhow::bail!("unsupported pi.toml schema {} (this pi supports schema 1)", parsed.schema);
+            anyhow::bail!(
+                "unsupported pi.toml schema {} (this pi supports schema 1)",
+                parsed.schema
+            );
         }
         if let Some(timeout) = &parsed.healthcheck.timeout {
             parse_duration_secs(timeout)
@@ -232,7 +239,10 @@ file = ".env"
 
     #[test]
     fn healthcheck_timeout_and_expect_are_validated() {
-        let toml = SAMPLE.replace("path = \"/\"", "path = \"/\"\ntimeout = \"2m\"\nexpect = \"204\"");
+        let toml = SAMPLE.replace(
+            "path = \"/\"",
+            "path = \"/\"\ntimeout = \"2m\"\nexpect = \"204\"",
+        );
         let config = PiToml::parse(&toml).unwrap().to_project_config();
         assert_eq!(config.healthcheck.timeout_secs, 120);
         assert_eq!(config.healthcheck.expect.as_deref(), Some("204"));

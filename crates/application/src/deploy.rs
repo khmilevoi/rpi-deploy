@@ -55,6 +55,7 @@ pub struct DeployProject {
 }
 
 impl DeployProject {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source: Arc<dyn Source>,
         runtime: Arc<dyn ContainerRuntime>,
@@ -117,7 +118,9 @@ impl DeployProject {
         };
         self.history.record_started(&deployment).await?;
 
-        let result = self.run_stages(&config, &git_ref, log.clone(), &masker).await;
+        let result = self
+            .run_stages(&config, &git_ref, log.clone(), &masker)
+            .await;
         let finished_at = self.clock.now_unix();
 
         match result {
@@ -206,11 +209,15 @@ impl DeployProject {
         self.runtime.up(&stack, log.clone()).await?;
 
         // §8: health gate — on failure the deploy is failed, stack stays up
-        self.health.check(config, project.host_port, log.clone()).await?;
+        self.health
+            .check(config, project.host_port, log.clone())
+            .await?;
 
         // §11: route hostname only when configured
         if let Some(hostname) = &config.hostname {
-            self.ingress.upsert(hostname, project.host_port, log.clone()).await?;
+            self.ingress
+                .upsert(hostname, project.host_port, log.clone())
+                .await?;
         }
 
         Ok(fetched.commit_sha)
@@ -304,7 +311,11 @@ mod tests {
         let stage_order = Arc::clone(&order);
         m.projects.expect_upsert().times(1).returning(move |c| {
             stage_order.lock().unwrap().push("upsert");
-            Ok(Project { config: c.clone(), host_port: 8000, created_at: 1 })
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
         });
         let stage_order = Arc::clone(&order);
         m.source.expect_fetch().times(1).returning(move |_, _, _| {
@@ -408,14 +419,23 @@ mod tests {
         let sink = CollectSink::new();
         let permit = deploy.try_begin("rateme").unwrap();
         let result = deploy
-            .execute(permit, "dep-1".into(), cfg, DeployRef::Branch("main".into()), sink.clone())
+            .execute(
+                permit,
+                "dep-1".into(),
+                cfg,
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+            )
             .await
             .unwrap();
 
         assert_eq!(result.status, DeploymentStatus::Success);
         assert_eq!(result.commit_sha.as_deref(), Some(SHA));
         assert_eq!(result.finished_at, Some(100));
-        assert_eq!(*sink.finished.lock().unwrap(), vec![DeploymentStatus::Success]);
+        assert_eq!(
+            *sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Success]
+        );
         assert_eq!(
             *order.lock().unwrap(),
             vec![
@@ -429,14 +449,25 @@ mod tests {
     async fn build_failure_records_failed_and_emits_finished_failed() {
         let mut m = mocks();
         m.projects.expect_upsert().returning(|c| {
-            Ok(Project { config: c.clone(), host_port: 8000, created_at: 1 })
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
         });
         m.source.expect_fetch().returning(|_, _, _| {
-            Ok(FetchedSource { workdir: PathBuf::from("/wd"), commit_sha: SHA.into() })
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
         });
-        m.secrets.expect_load().returning(|_| Ok(EnvBundle::default()));
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
         m.env_files.expect_write().times(0);
-        m.overrides.expect_write().returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.runtime
             .expect_build()
             .returning(|_, _| Err(DomainError::Runtime("compose build exited with 1".into())));
@@ -470,8 +501,14 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, DomainError::Runtime(_)));
-        assert_eq!(*sink.finished.lock().unwrap(), vec![DeploymentStatus::Failed]);
-        assert!(deploy.try_begin("rateme").is_ok(), "lock must be free after failed deploy");
+        assert_eq!(
+            *sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Failed]
+        );
+        assert!(
+            deploy.try_begin("rateme").is_ok(),
+            "lock must be free after failed deploy"
+        );
     }
 
     #[tokio::test]
@@ -489,20 +526,33 @@ mod tests {
     async fn lock_released_after_execute_finishes() {
         let mut m = mocks();
         m.projects.expect_upsert().returning(|c| {
-            Ok(Project { config: c.clone(), host_port: 8000, created_at: 1 })
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
         });
         m.source.expect_fetch().returning(|_, _, _| {
-            Ok(FetchedSource { workdir: PathBuf::from("/wd"), commit_sha: SHA.into() })
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
         });
-        m.secrets.expect_load().returning(|_| Ok(EnvBundle::default()));
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
         m.env_files.expect_write().times(0);
-        m.overrides.expect_write().returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
         m.history.expect_record_started().returning(|_| Ok(()));
-        m.history.expect_record_finished().returning(|_, _, _, _, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
 
         let deploy = build(m);
         let permit = deploy.try_begin("rateme").unwrap();
@@ -516,7 +566,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(deploy.try_begin("rateme").is_ok(), "lock must be free after deploy");
+        assert!(
+            deploy.try_begin("rateme").is_ok(),
+            "lock must be free after deploy"
+        );
     }
 
     fn secret_bundle() -> EnvBundle {
@@ -527,14 +580,25 @@ mod tests {
 
     fn ok_pre_stages(m: &mut Mocks) {
         m.projects.expect_upsert().returning(|c| {
-            Ok(Project { config: c.clone(), host_port: 8000, created_at: 1 })
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
         });
         m.source.expect_fetch().returning(|_, _, _| {
-            Ok(FetchedSource { workdir: PathBuf::from("/wd"), commit_sha: SHA.into() })
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
         });
-        m.overrides.expect_write().returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.history.expect_record_started().returning(|_| Ok(()));
-        m.history.expect_record_finished().returning(|_, _, _, _, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
     }
 
     #[tokio::test]
@@ -571,18 +635,30 @@ mod tests {
 
         assert_eq!(result.status, DeploymentStatus::Success);
         assert!(result.log_tail.contains(".env injected (1 keys)"));
-        assert!(result.log_tail.contains("***DB_PASSWORD***"), "tail: {}", result.log_tail);
-        assert!(!result.log_tail.contains("hunter2-long"), "secret leaked into tail");
+        assert!(
+            result.log_tail.contains("***DB_PASSWORD***"),
+            "tail: {}",
+            result.log_tail
+        );
+        assert!(
+            !result.log_tail.contains("hunter2-long"),
+            "secret leaked into tail"
+        );
         let lines = sink.lines.lock().unwrap();
         assert!(lines.iter().any(|l| l.contains("***DB_PASSWORD***")));
-        assert!(!lines.iter().any(|l| l.contains("hunter2-long")), "secret leaked into stream");
+        assert!(
+            !lines.iter().any(|l| l.contains("hunter2-long")),
+            "secret leaked into stream"
+        );
     }
 
     #[tokio::test]
     async fn health_gate_failure_fails_deploy_and_skips_ingress() {
         let mut m = mocks();
         ok_pre_stages(&mut m);
-        m.secrets.expect_load().returning(|_| Ok(EnvBundle::default()));
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
         m.env_files.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
@@ -606,14 +682,19 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, DomainError::HealthCheck(_)));
-        assert_eq!(*sink.finished.lock().unwrap(), vec![DeploymentStatus::Failed]);
+        assert_eq!(
+            *sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Failed]
+        );
     }
 
     #[tokio::test]
     async fn project_without_hostname_skips_ingress() {
         let mut m = mocks();
         ok_pre_stages(&mut m);
-        m.secrets.expect_load().returning(|_| Ok(EnvBundle::default()));
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
         m.env_files.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));

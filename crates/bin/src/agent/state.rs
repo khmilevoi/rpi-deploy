@@ -43,7 +43,9 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
     let env_files: Arc<dyn pi_domain::contracts::EnvFileWriter> = FsEnvFileWriter::new();
     let health = HybridHealthGate::new(runtime.clone());
     let ingress: Arc<dyn Ingress> = match &config.cloudflared {
-        Some(cf) => CloudflaredIngress::new(cf.config.clone(), cf.tunnel.clone(), cf.restart.clone()),
+        Some(cf) => {
+            CloudflaredIngress::new(cf.config.clone(), cf.tunnel.clone(), cf.restart.clone())
+        }
         None => DisabledIngress::new(),
     };
 

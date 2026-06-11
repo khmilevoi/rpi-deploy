@@ -156,7 +156,10 @@ impl From<ProjectView> for ProjectViewDto {
             services: v
                 .services
                 .into_iter()
-                .map(|s| ServiceStateDto { service: s.service, state: s.state })
+                .map(|s| ServiceStateDto {
+                    service: s.service,
+                    state: s.state,
+                })
                 .collect(),
         }
     }

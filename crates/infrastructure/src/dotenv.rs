@@ -20,7 +20,9 @@ pub fn parse(text: &str) -> Result<EnvBundle, String> {
         if !is_valid_key(key) {
             return Err(format!("line {}: invalid key '{key}'", i + 1));
         }
-        bundle.vars.insert(key.to_string(), unquote(value.trim()).to_string());
+        bundle
+            .vars
+            .insert(key.to_string(), unquote(value.trim()).to_string());
     }
     Ok(bundle)
 }
@@ -71,7 +73,9 @@ mod tests {
     #[test]
     fn rejects_invalid_keys_and_lines_without_equals() {
         assert!(parse("1BAD=x").unwrap_err().contains("line 1"));
-        assert!(parse("OK=1\nno-equals-here").unwrap_err().contains("line 2"));
+        assert!(parse("OK=1\nno-equals-here")
+            .unwrap_err()
+            .contains("line 2"));
         assert!(is_valid_key("_OK_2"));
         assert!(!is_valid_key("BAD-DASH"));
         assert!(!is_valid_key(""));

@@ -75,7 +75,9 @@ impl DockerComposeRuntime {
 impl ContainerRuntime for DockerComposeRuntime {
     async fn build(&self, stack: &ComposeStack, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
         log.line("docker compose build ...");
-        run_streamed(self.compose(stack, &["build"]), log).await.map_err(DomainError::Runtime)
+        run_streamed(self.compose(stack, &["build"]), log)
+            .await
+            .map_err(DomainError::Runtime)
     }
 
     async fn up(&self, stack: &ComposeStack, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
@@ -111,7 +113,10 @@ mod tests {
     fn file_chain_without_repo_override() {
         let dir = tempfile::tempdir().unwrap();
         let s = stack(dir.path());
-        assert_eq!(file_chain(&s), vec![s.compose_file.clone(), s.override_file.clone()]);
+        assert_eq!(
+            file_chain(&s),
+            vec![s.compose_file.clone(), s.override_file.clone()]
+        );
     }
 
     #[test]
@@ -120,33 +125,51 @@ mod tests {
         let repo_override = dir.path().join("docker-compose.override.yml");
         std::fs::write(&repo_override, "services: {}").unwrap();
         let s = stack(dir.path());
-        assert_eq!(file_chain(&s), vec![s.compose_file.clone(), repo_override, s.override_file.clone()]);
+        assert_eq!(
+            file_chain(&s),
+            vec![
+                s.compose_file.clone(),
+                repo_override,
+                s.override_file.clone()
+            ]
+        );
     }
 
     #[test]
     fn compose_args_shape() {
         let files = vec![PathBuf::from("a.yml"), PathBuf::from("b.yml")];
         let args = compose_args("rateme", &files, &["up", "-d"]);
-        let expected: Vec<std::ffi::OsString> =
-            ["compose", "-p", "rateme", "-f", "a.yml", "-f", "b.yml", "up", "-d"]
-                .into_iter()
-                .map(Into::into)
-                .collect();
+        let expected: Vec<std::ffi::OsString> = [
+            "compose", "-p", "rateme", "-f", "a.yml", "-f", "b.yml", "up", "-d",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
         assert_eq!(args, expected);
     }
 
     #[test]
     fn parse_ps_json_reads_ndjson_lines() {
         let out = concat!(
-            r#"{"Service":"web","State":"running","Name":"rateme-web-1"}"#, "\n",
-            r#"{"Service":"db","State":"exited","Name":"rateme-db-1"}"#, "\n",
+            r#"{"Service":"web","State":"running","Name":"rateme-web-1"}"#,
+            "\n",
+            r#"{"Service":"db","State":"exited","Name":"rateme-db-1"}"#,
+            "\n",
             "garbage-line\n"
         );
         assert_eq!(
             parse_ps_json(out),
             vec![
-                ServiceState { service: "web".into(), state: "running".into(), health: None },
-                ServiceState { service: "db".into(), state: "exited".into(), health: None },
+                ServiceState {
+                    service: "web".into(),
+                    state: "running".into(),
+                    health: None
+                },
+                ServiceState {
+                    service: "db".into(),
+                    state: "exited".into(),
+                    health: None
+                },
             ]
         );
     }
@@ -154,9 +177,12 @@ mod tests {
     #[test]
     fn parse_ps_json_reads_health_field() {
         let out = concat!(
-            r#"{"Service":"web","State":"running","Health":"healthy"}"#, "\n",
-            r#"{"Service":"db","State":"running","Health":""}"#, "\n",
-            r#"{"Service":"worker","State":"running"}"#, "\n",
+            r#"{"Service":"web","State":"running","Health":"healthy"}"#,
+            "\n",
+            r#"{"Service":"db","State":"running","Health":""}"#,
+            "\n",
+            r#"{"Service":"worker","State":"running"}"#,
+            "\n",
         );
         let states = parse_ps_json(out);
         assert_eq!(states[0].health.as_deref(), Some("healthy"));
@@ -170,8 +196,16 @@ mod tests {
         assert_eq!(
             parse_ps_json(out),
             vec![
-                ServiceState { service: "web".into(), state: "running".into(), health: None },
-                ServiceState { service: "db".into(), state: "exited".into(), health: None },
+                ServiceState {
+                    service: "web".into(),
+                    state: "running".into(),
+                    health: None
+                },
+                ServiceState {
+                    service: "db".into(),
+                    state: "exited".into(),
+                    health: None
+                },
             ]
         );
     }

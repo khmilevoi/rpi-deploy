@@ -41,7 +41,11 @@ pub struct HealthcheckConfig {
 
 impl Default for HealthcheckConfig {
     fn default() -> HealthcheckConfig {
-        HealthcheckConfig { path: None, expect: None, timeout_secs: 60 }
+        HealthcheckConfig {
+            path: None,
+            expect: None,
+            timeout_secs: 60,
+        }
     }
 }
 
@@ -182,14 +186,21 @@ mod tests {
         bundle.vars.insert("Z_KEY".into(), "1".into());
         bundle.vars.insert("A_KEY".into(), "2".into());
         assert!(!bundle.is_empty());
-        assert_eq!(bundle.keys(), vec!["A_KEY".to_string(), "Z_KEY".to_string()]);
+        assert_eq!(
+            bundle.keys(),
+            vec!["A_KEY".to_string(), "Z_KEY".to_string()]
+        );
     }
 
     #[test]
     fn env_bundle_debug_shows_keys_and_count_without_values() {
         let mut bundle = EnvBundle::default();
-        bundle.vars.insert("API_TOKEN".into(), "raw-token-value".into());
-        bundle.vars.insert("DATABASE_URL".into(), "postgres://secret".into());
+        bundle
+            .vars
+            .insert("API_TOKEN".into(), "raw-token-value".into());
+        bundle
+            .vars
+            .insert("DATABASE_URL".into(), "postgres://secret".into());
 
         let debug = format!("{bundle:?}");
 
