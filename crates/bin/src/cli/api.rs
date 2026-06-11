@@ -1,7 +1,9 @@
 use futures::StreamExt;
 
+use std::collections::BTreeMap;
+
 use crate::cli::sse::SseParser;
-use crate::proto::{DeployAccepted, DeployRequest, ProjectViewDto, VersionInfo};
+use crate::proto::{DeployAccepted, DeployRequest, EnvKeysResponse, EnvSendRequest, EnvSendResponse, ProjectViewDto, VersionInfo};
 
 async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
     if resp.status().is_success() {
@@ -78,6 +80,31 @@ impl ApiClient {
 
     pub async fn projects(&self) -> anyhow::Result<Vec<ProjectViewDto>> {
         let resp = self.http.get(format!("{}/v1/projects", self.base)).send().await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn send_env(
+        &self,
+        project: &str,
+        vars: BTreeMap<String, String>,
+        apply: bool,
+    ) -> anyhow::Result<EnvSendResponse> {
+        let req = EnvSendRequest { vars, apply };
+        let resp = self
+            .http
+            .put(format!("{}/v1/projects/{project}/env", self.base))
+            .json(&req)
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn env_keys(&self, project: &str) -> anyhow::Result<EnvKeysResponse> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/projects/{project}/env", self.base))
+            .send()
+            .await?;
         Ok(extract_error(resp).await?.json().await?)
     }
 }
