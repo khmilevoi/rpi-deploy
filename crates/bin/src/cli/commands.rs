@@ -83,28 +83,31 @@ pub async fn env_ls(server: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Same dotenv dialect as the agent's PUT validation (§10, plan Task 3):
+/// anything accepted here is accepted server-side, and vice versa.
 fn parse_env_file(text: &str) -> anyhow::Result<BTreeMap<String, String>> {
-    let mut map = BTreeMap::new();
-    for (i, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (key, val) = line
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("line {}: expected KEY=VALUE, got: {line}", i + 1))?;
-        let key = key.trim().to_string();
-        let val = strip_quotes(val.trim());
-        map.insert(key, val);
-    }
-    Ok(map)
+    let bundle = pi_infrastructure::dotenv::parse(text).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(bundle.vars)
 }
 
-fn strip_quotes(s: &str) -> String {
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_file_parsing_matches_agent_rules() {
+        // Same dotenv dialect as the agent (§10, plan Task 3): the agent
+        // strips `export ` and rejects invalid keys with 400, so a file the
+        // CLI accepts must round-trip identically.
+        let vars = parse_env_file("# c\nexport TOKEN=\"abc=def\"\nNAME='single'\nDB=postgres://u:p@db/x\n").unwrap();
+        assert_eq!(vars["TOKEN"], "abc=def");
+        assert_eq!(vars["NAME"], "single");
+        assert_eq!(vars["DB"], "postgres://u:p@db/x");
+        assert_eq!(vars.len(), 3);
+        assert!(
+            parse_env_file("1BAD=x").is_err(),
+            "agent rejects this key; the CLI must too"
+        );
     }
 }
 
