@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use mockall::automock;
 
 use crate::entities::{
-    ComposeStack, DeployRef, Deployment, DeploymentStatus, FetchedSource, Project, ProjectConfig,
-    ServiceState,
+    ComposeStack, DeployRef, Deployment, DeploymentStatus, EnvBundle, FetchedSource, Project,
+    ProjectConfig, ServiceState,
 };
 use crate::error::DomainError;
 
@@ -22,6 +22,10 @@ pub trait LogSink: Send + Sync {
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait Source: Send + Sync {
+    /// Where this project's working copy lives on the agent host (used by
+    /// `pi env send --apply` to re-inject .env without a fetch, §10).
+    fn workdir(&self, project_name: &str) -> PathBuf;
+
     async fn fetch(
         &self,
         project: &ProjectConfig,
@@ -46,6 +50,7 @@ pub trait ProjectRepository: Send + Sync {
     /// Creates a project (with host port allocation) or updates the config,
     /// preserving the already-allocated host port.
     async fn upsert(&self, config: &ProjectConfig) -> Result<Project, DomainError>;
+    async fn get(&self, name: &str) -> Result<Option<Project>, DomainError>;
     async fn list(&self) -> Result<Vec<Project>, DomainError>;
 }
 
@@ -76,6 +81,47 @@ pub trait OverrideStore: Send + Sync {
         host_port: u16,
         container_port: u16,
     ) -> Result<PathBuf, DomainError>;
+}
+
+/// Store/retrieve the project EnvBundle, encrypted at rest (§6, §10).
+#[cfg_attr(feature = "mocks", automock)]
+#[async_trait]
+pub trait SecretStore: Send + Sync {
+    async fn save(&self, project: &str, bundle: &EnvBundle) -> Result<(), DomainError>;
+    /// Empty bundle when nothing is stored for the project.
+    async fn load(&self, project: &str) -> Result<EnvBundle, DomainError>;
+}
+
+/// Writes the decrypted bundle as `.env` into the project workdir (§10).
+#[cfg_attr(feature = "mocks", automock)]
+#[async_trait]
+pub trait EnvFileWriter: Send + Sync {
+    /// Fails with NotFound when the workdir does not exist (never deployed).
+    async fn write(&self, workdir: &Path, bundle: &EnvBundle) -> Result<(), DomainError>;
+}
+
+/// Deploy gate (§8): hybrid docker healthcheck -> HTTP -> TCP.
+#[cfg_attr(feature = "mocks", automock)]
+#[async_trait]
+pub trait HealthGate: Send + Sync {
+    async fn check(
+        &self,
+        config: &ProjectConfig,
+        host_port: u16,
+        log: Arc<dyn LogSink>,
+    ) -> Result<(), DomainError>;
+}
+
+/// Routes hostname -> 127.0.0.1:host_port on the edge (§6, §11).
+#[cfg_attr(feature = "mocks", automock)]
+#[async_trait]
+pub trait Ingress: Send + Sync {
+    async fn upsert(
+        &self,
+        hostname: &str,
+        host_port: u16,
+        log: Arc<dyn LogSink>,
+    ) -> Result<(), DomainError>;
 }
 
 /// Time determinism in tests (§6).

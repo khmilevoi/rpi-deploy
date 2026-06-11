@@ -1,4 +1,53 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+/// Project secrets: key -> value (§4). Values never leave the agent unmasked.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct EnvBundle {
+    pub vars: BTreeMap<String, String>,
+}
+
+impl EnvBundle {
+    pub fn is_empty(&self) -> bool {
+        self.vars.is_empty()
+    }
+
+    /// Key names only (sorted, BTreeMap order) — what `pi env ls` shows (§10).
+    pub fn keys(&self) -> Vec<String> {
+        self.vars.keys().cloned().collect()
+    }
+}
+
+impl std::fmt::Debug for EnvBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvBundle")
+            .field("len", &self.vars.len())
+            .field("keys", &self.keys())
+            .finish()
+    }
+}
+
+/// Deploy gate settings from [healthcheck] in pi.toml (§8, §12).
+/// Per-deploy input: travels with ProjectConfig, not persisted in the registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthcheckConfig {
+    /// HTTP probe path; None => plain TCP connect (when no docker healthcheck).
+    pub path: Option<String>,
+    /// Expected HTTP status: "2xx" | "3xx" | exact like "204". None => 2xx/3xx.
+    pub expect: Option<String>,
+    /// Total gate budget in seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for HealthcheckConfig {
+    fn default() -> HealthcheckConfig {
+        HealthcheckConfig {
+            path: None,
+            expect: None,
+            timeout_secs: 60,
+        }
+    }
+}
 
 /// Project config from pi.toml (received in deploy request, §12).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +63,8 @@ pub struct ProjectConfig {
     pub container_port: u16,
     /// FQDN ([ingress].hostname). In v0.1 only stored (ingress — v0.2).
     pub hostname: Option<String>,
+    /// Health gate settings ([healthcheck] from pi.toml). Not persisted in DB.
+    pub healthcheck: HealthcheckConfig,
 }
 
 /// Registered project: config + allocated host port (§4).
@@ -109,6 +160,9 @@ pub struct FetchedSource {
 pub struct ServiceState {
     pub service: String,
     pub state: String,
+    /// Docker healthcheck state ("healthy"/"unhealthy"/"starting"), None when
+    /// the service declares no healthcheck.
+    pub health: Option<String>,
 }
 
 /// What to run: project + absolute paths to compose files.
@@ -124,6 +178,47 @@ pub struct ComposeStack {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_bundle_default_is_empty_and_keys_are_sorted() {
+        let mut bundle = EnvBundle::default();
+        assert!(bundle.is_empty());
+        bundle.vars.insert("Z_KEY".into(), "1".into());
+        bundle.vars.insert("A_KEY".into(), "2".into());
+        assert!(!bundle.is_empty());
+        assert_eq!(
+            bundle.keys(),
+            vec!["A_KEY".to_string(), "Z_KEY".to_string()]
+        );
+    }
+
+    #[test]
+    fn env_bundle_debug_shows_keys_and_count_without_values() {
+        let mut bundle = EnvBundle::default();
+        bundle
+            .vars
+            .insert("API_TOKEN".into(), "raw-token-value".into());
+        bundle
+            .vars
+            .insert("DATABASE_URL".into(), "postgres://secret".into());
+
+        let debug = format!("{bundle:?}");
+
+        assert!(debug.contains("EnvBundle"));
+        assert!(debug.contains("len: 2"));
+        assert!(debug.contains("API_TOKEN"));
+        assert!(debug.contains("DATABASE_URL"));
+        assert!(!debug.contains("raw-token-value"));
+        assert!(!debug.contains("postgres://secret"));
+    }
+
+    #[test]
+    fn healthcheck_defaults_match_spec() {
+        let hc = HealthcheckConfig::default();
+        assert_eq!(hc.path, None);
+        assert_eq!(hc.expect, None);
+        assert_eq!(hc.timeout_secs, 60);
+    }
 
     #[test]
     fn parse_40_hex_chars_as_sha() {

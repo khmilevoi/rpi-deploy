@@ -31,7 +31,9 @@ pub struct DeployEventsHub {
 
 impl DeployEventsHub {
     pub fn new() -> Arc<DeployEventsHub> {
-        Arc::new(DeployEventsHub { streams: Mutex::new(HashMap::new()) })
+        Arc::new(DeployEventsHub {
+            streams: Mutex::new(HashMap::new()),
+        })
     }
 
     pub fn register(self: &Arc<Self>, deployment_id: &str) -> Arc<HubSink> {
@@ -39,10 +41,17 @@ impl DeployEventsHub {
         if let Ok(mut streams) = self.streams.lock() {
             streams.insert(
                 deployment_id.to_string(),
-                StreamState { lines: VecDeque::new(), finished: None, tx },
+                StreamState {
+                    lines: VecDeque::new(),
+                    finished: None,
+                    tx,
+                },
             );
         }
-        Arc::new(HubSink { hub: Arc::clone(self), id: deployment_id.to_string() })
+        Arc::new(HubSink {
+            hub: Arc::clone(self),
+            id: deployment_id.to_string(),
+        })
     }
 
     pub fn subscribe(&self, deployment_id: &str) -> Option<Subscription> {
@@ -96,13 +105,19 @@ mod tests {
         sink.line("early-2");
 
         let mut sub = hub.subscribe("d1").unwrap();
-        assert_eq!(sub.backlog, vec!["early-1".to_string(), "early-2".to_string()]);
+        assert_eq!(
+            sub.backlog,
+            vec!["early-1".to_string(), "early-2".to_string()]
+        );
         assert!(sub.finished.is_none());
 
         sink.line("live-1");
         sink.finished(DeploymentStatus::Success);
         assert!(matches!(sub.live.recv().await.unwrap(), DeployEvent::Line(l) if l == "live-1"));
-        assert!(matches!(sub.live.recv().await.unwrap(), DeployEvent::Finished(DeploymentStatus::Success)));
+        assert!(matches!(
+            sub.live.recv().await.unwrap(),
+            DeployEvent::Finished(DeploymentStatus::Success)
+        ));
     }
 
     #[tokio::test]

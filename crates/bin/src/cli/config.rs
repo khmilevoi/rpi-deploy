@@ -46,10 +46,14 @@ impl ClientConfig {
             .or_else(|| std::env::var("PI_SERVER").ok())
             .or_else(|| self.default.clone())
             .or_else(|| {
-                (self.servers.len() == 1).then(|| self.servers.keys().next().cloned()).flatten()
+                (self.servers.len() == 1)
+                    .then(|| self.servers.keys().next().cloned())
+                    .flatten()
             })
             .ok_or_else(|| {
-                anyhow::anyhow!("no server selected: pass --server, set PI_SERVER, or set `default` in config")
+                anyhow::anyhow!(
+                    "no server selected: pass --server, set PI_SERVER, or set `default` in config"
+                )
             })?;
         self.servers
             .get(&name)

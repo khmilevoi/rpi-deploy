@@ -1,7 +1,12 @@
 use futures::StreamExt;
 
+use std::collections::BTreeMap;
+
 use crate::cli::sse::SseParser;
-use crate::proto::{DeployAccepted, DeployRequest, ProjectViewDto, VersionInfo};
+use crate::proto::{
+    DeployAccepted, DeployRequest, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
+    ProjectViewDto, VersionInfo,
+};
 
 async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
     if resp.status().is_success() {
@@ -24,11 +29,18 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(base: String) -> ApiClient {
-        ApiClient { http: reqwest::Client::new(), base }
+        ApiClient {
+            http: reqwest::Client::new(),
+            base,
+        }
     }
 
     pub async fn version(&self) -> anyhow::Result<VersionInfo> {
-        let resp = self.http.get(format!("{}/v1/version", self.base)).send().await?;
+        let resp = self
+            .http
+            .get(format!("{}/v1/version", self.base))
+            .send()
+            .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             anyhow::bail!("agent does not expose /v1 — incompatible agent; update it on the Pi");
         }
@@ -36,14 +48,23 @@ impl ApiClient {
     }
 
     pub async fn deploy(&self, req: &DeployRequest) -> anyhow::Result<DeployAccepted> {
-        let resp = self.http.post(format!("{}/v1/deployments", self.base)).json(req).send().await?;
+        let resp = self
+            .http
+            .post(format!("{}/v1/deployments", self.base))
+            .json(req)
+            .send()
+            .await?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
             anyhow::bail!("deploy of this project is already in progress on the agent");
         }
         Ok(extract_error(resp).await?.json().await?)
     }
 
-    pub async fn follow_logs(&self, id: &str, mut on_line: impl FnMut(&str)) -> anyhow::Result<String> {
+    pub async fn follow_logs(
+        &self,
+        id: &str,
+        mut on_line: impl FnMut(&str),
+    ) -> anyhow::Result<String> {
         let resp = self
             .http
             .get(format!("{}/v1/deployments/{id}/logs", self.base))
@@ -77,7 +98,36 @@ impl ApiClient {
     }
 
     pub async fn projects(&self) -> anyhow::Result<Vec<ProjectViewDto>> {
-        let resp = self.http.get(format!("{}/v1/projects", self.base)).send().await?;
+        let resp = self
+            .http
+            .get(format!("{}/v1/projects", self.base))
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn send_env(
+        &self,
+        project: &str,
+        vars: BTreeMap<String, String>,
+        apply: bool,
+    ) -> anyhow::Result<EnvSendResponse> {
+        let req = EnvSendRequest { vars, apply };
+        let resp = self
+            .http
+            .put(format!("{}/v1/projects/{project}/env", self.base))
+            .json(&req)
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn env_keys(&self, project: &str) -> anyhow::Result<EnvKeysResponse> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/projects/{project}/env", self.base))
+            .send()
+            .await?;
         Ok(extract_error(resp).await?.json().await?)
     }
 }

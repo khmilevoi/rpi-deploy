@@ -1,11 +1,20 @@
+use std::collections::BTreeMap;
+
 use pi_application::list::ProjectView;
-use pi_domain::entities::{Deployment, ProjectConfig};
+use pi_domain::entities::{Deployment, HealthcheckConfig, ProjectConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionInfo {
     pub version: String,
     pub api: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthcheckDto {
+    pub path: Option<String>,
+    pub expect: Option<String>,
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +26,8 @@ pub struct ProjectDto {
     pub service: String,
     pub port: u16,
     pub hostname: Option<String>,
+    #[serde(default)]
+    pub healthcheck: Option<HealthcheckDto>,
 }
 
 impl From<ProjectDto> for ProjectConfig {
@@ -29,6 +40,14 @@ impl From<ProjectDto> for ProjectConfig {
             service: dto.service,
             container_port: dto.port,
             hostname: dto.hostname,
+            healthcheck: dto
+                .healthcheck
+                .map(|h| HealthcheckConfig {
+                    path: h.path,
+                    expect: h.expect,
+                    timeout_secs: h.timeout_secs.unwrap_or(60),
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -43,8 +62,31 @@ impl From<&ProjectConfig> for ProjectDto {
             service: config.service.clone(),
             port: config.container_port,
             hostname: config.hostname.clone(),
+            healthcheck: Some(HealthcheckDto {
+                path: config.healthcheck.path.clone(),
+                expect: config.healthcheck.expect.clone(),
+                timeout_secs: Some(config.healthcheck.timeout_secs),
+            }),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvSendRequest {
+    pub vars: BTreeMap<String, String>,
+    #[serde(default)]
+    pub apply: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvSendResponse {
+    pub saved_keys: usize,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvKeysResponse {
+    pub keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,8 +156,44 @@ impl From<ProjectView> for ProjectViewDto {
             services: v
                 .services
                 .into_iter()
-                .map(|s| ServiceStateDto { service: s.service, state: s.state })
+                .map(|s| ServiceStateDto {
+                    service: s.service,
+                    state: s.state,
+                })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v01_deploy_request_without_healthcheck_still_deserializes() {
+        let json = r#"{"project":{"name":"a","repo":"r","branch":"main","compose":"docker-compose.yml","service":"web","port":3000,"hostname":null},"ref":null}"#;
+        let req: DeployRequest = serde_json::from_str(json).unwrap();
+        let config: ProjectConfig = req.project.into();
+        assert_eq!(config.healthcheck.timeout_secs, 60);
+    }
+
+    #[test]
+    fn healthcheck_roundtrips_through_dto() {
+        let mut config: ProjectConfig = ProjectDto {
+            name: "a".into(),
+            repo: "r".into(),
+            branch: "main".into(),
+            compose: "docker-compose.yml".into(),
+            service: "web".into(),
+            port: 3000,
+            hostname: None,
+            healthcheck: None,
+        }
+        .into();
+        config.healthcheck.path = Some("/health".into());
+        config.healthcheck.timeout_secs = 120;
+        let dto = ProjectDto::from(&config);
+        let back: ProjectConfig = dto.into();
+        assert_eq!(back.healthcheck, config.healthcheck);
     }
 }

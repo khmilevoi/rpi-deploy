@@ -55,7 +55,7 @@ impl ListProjects {
 mod tests {
     use super::*;
     use pi_domain::contracts::{MockContainerRuntime, MockProjectRepository};
-    use pi_domain::entities::{Project, ProjectConfig, ServiceState};
+    use pi_domain::entities::{HealthcheckConfig, Project, ProjectConfig, ServiceState};
     use pi_domain::error::DomainError;
 
     fn project(name: &str, host_port: u16) -> Project {
@@ -68,6 +68,7 @@ mod tests {
                 service: "web".into(),
                 container_port: 3000,
                 hostname: None,
+                healthcheck: HealthcheckConfig::default(),
             },
             host_port,
             created_at: 1,
@@ -86,6 +87,7 @@ mod tests {
             Ok(vec![ServiceState {
                 service: "web".into(),
                 state: "running".into(),
+                health: None,
             }])
         });
         // ps for "b" fails (stack never been up) - show empty list of services.
@@ -104,7 +106,8 @@ mod tests {
             views[0].services,
             vec![ServiceState {
                 service: "web".into(),
-                state: "running".into()
+                state: "running".into(),
+                health: None,
             }]
         );
         assert_eq!(views[1].name, "b");

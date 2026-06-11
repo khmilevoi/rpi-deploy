@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "pi", version, about = "deploy tool for Raspberry Pi (CLI + agent)")]
+#[command(
+    name = "pi",
+    version,
+    about = "deploy tool for Raspberry Pi (CLI + agent)"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -30,10 +34,34 @@ enum Cmd {
         #[arg(long)]
         server: Option<String>,
     },
+    /// Manage project secrets
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
+    },
     /// Agent management
     Agent {
         #[command(subcommand)]
         cmd: AgentCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// Send secrets from local .env file to the agent
+    Send {
+        /// Also apply the new secrets to running containers
+        #[arg(long)]
+        apply: bool,
+        /// Server profile from ~/.config/pi/config.toml
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// List secret keys stored on the agent (values are never transmitted)
+    Ls {
+        /// Server profile from ~/.config/pi/config.toml
+        #[arg(long)]
+        server: Option<String>,
     },
 }
 
@@ -59,6 +87,14 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         Cmd::Deploy { git_ref, server } => cli::commands::deploy(git_ref, server).await,
         Cmd::Ls { server } => cli::commands::ls(server).await,
-        Cmd::Agent { cmd: AgentCmd::Run { config } } => agent::run::run(config).await,
+        Cmd::Env {
+            cmd: EnvCmd::Send { apply, server },
+        } => cli::commands::env_send(apply, server).await,
+        Cmd::Env {
+            cmd: EnvCmd::Ls { server },
+        } => cli::commands::env_ls(server).await,
+        Cmd::Agent {
+            cmd: AgentCmd::Run { config },
+        } => agent::run::run(config).await,
     }
 }

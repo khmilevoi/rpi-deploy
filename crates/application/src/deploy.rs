@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{
-    Clock, ContainerRuntime, DeploymentHistory, LogSink, OverrideStore, ProjectRepository, Source,
+    Clock, ContainerRuntime, DeploymentHistory, EnvFileWriter, HealthGate, Ingress, LogSink,
+    OverrideStore, ProjectRepository, SecretStore, Source,
 };
 use pi_domain::entities::{ComposeStack, DeployRef, Deployment, DeploymentStatus, ProjectConfig};
 use pi_domain::error::DomainError;
 
 use crate::locks::{DeployLocks, DeployPermit};
+use crate::mask::MaskingSink;
 use crate::tail::TailSink;
 
 const LOG_TAIL_LINES: usize = 400;
@@ -44,17 +46,26 @@ pub struct DeployProject {
     projects: Arc<dyn ProjectRepository>,
     history: Arc<dyn DeploymentHistory>,
     overrides: Arc<dyn OverrideStore>,
+    secrets: Arc<dyn SecretStore>,
+    env_files: Arc<dyn EnvFileWriter>,
+    health: Arc<dyn HealthGate>,
+    ingress: Arc<dyn Ingress>,
     clock: Arc<dyn Clock>,
     locks: Arc<DeployLocks>,
 }
 
 impl DeployProject {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source: Arc<dyn Source>,
         runtime: Arc<dyn ContainerRuntime>,
         projects: Arc<dyn ProjectRepository>,
         history: Arc<dyn DeploymentHistory>,
         overrides: Arc<dyn OverrideStore>,
+        secrets: Arc<dyn SecretStore>,
+        env_files: Arc<dyn EnvFileWriter>,
+        health: Arc<dyn HealthGate>,
+        ingress: Arc<dyn Ingress>,
         clock: Arc<dyn Clock>,
     ) -> Arc<DeployProject> {
         Arc::new(DeployProject {
@@ -63,6 +74,10 @@ impl DeployProject {
             projects,
             history,
             overrides,
+            secrets,
+            env_files,
+            health,
+            ingress,
             clock,
             locks: DeployLocks::new(),
         })
@@ -85,8 +100,10 @@ impl DeployProject {
     ) -> Result<Deployment, DomainError> {
         let _permit = permit; // keep lock until deploy finishes, released by Drop
 
+        // chain: stages write to masker → masks secrets → tail stores masked lines → sink (SSE hub)
         let tail = TailSink::new(Arc::clone(&sink), LOG_TAIL_LINES);
-        let log: Arc<dyn LogSink> = tail.clone();
+        let masker = MaskingSink::new(tail.clone());
+        let log: Arc<dyn LogSink> = masker.clone();
         let mut guard = FinishGuard::new(sink);
 
         let mut deployment = Deployment {
@@ -101,7 +118,9 @@ impl DeployProject {
         };
         self.history.record_started(&deployment).await?;
 
-        let result = self.run_stages(&config, &git_ref, log.clone()).await;
+        let result = self
+            .run_stages(&config, &git_ref, log.clone(), &masker)
+            .await;
         let finished_at = self.clock.now_unix();
 
         match result {
@@ -151,6 +170,7 @@ impl DeployProject {
         config: &ProjectConfig,
         git_ref: &DeployRef,
         log: Arc<dyn LogSink>,
+        masker: &MaskingSink,
     ) -> Result<String, DomainError> {
         let project = self.projects.upsert(config).await?;
         log.line(&format!(
@@ -160,6 +180,14 @@ impl DeployProject {
 
         let fetched = self.source.fetch(config, git_ref, log.clone()).await?;
         log.line(&format!("fetched {}", fetched.commit_sha));
+
+        // §10: decrypt -> arm masking -> inject .env (skip when nothing stored)
+        let bundle = self.secrets.load(&config.name).await?;
+        if !bundle.is_empty() {
+            masker.arm(&bundle);
+            self.env_files.write(&fetched.workdir, &bundle).await?;
+            log.line(&format!(".env injected ({} keys)", bundle.vars.len()));
+        }
 
         let override_file = self
             .overrides
@@ -179,6 +207,19 @@ impl DeployProject {
         };
         self.runtime.build(&stack, log.clone()).await?;
         self.runtime.up(&stack, log.clone()).await?;
+
+        // §8: health gate — on failure the deploy is failed, stack stays up
+        self.health
+            .check(config, project.host_port, log.clone())
+            .await?;
+
+        // §11: route hostname only when configured
+        if let Some(hostname) = &config.hostname {
+            self.ingress
+                .upsert(hostname, project.host_port, log.clone())
+                .await?;
+        }
+
         Ok(fetched.commit_sha)
     }
 }
@@ -188,13 +229,16 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
-        MockClock, MockContainerRuntime, MockDeploymentHistory, MockOverrideStore,
-        MockProjectRepository, MockSource,
+        MockClock, MockContainerRuntime, MockDeploymentHistory, MockEnvFileWriter, MockHealthGate,
+        MockIngress, MockOverrideStore, MockProjectRepository, MockSecretStore, MockSource,
     };
-    use pi_domain::entities::{DeployRef, DeploymentStatus, FetchedSource, Project, ProjectConfig};
+    use pi_domain::entities::{
+        DeployRef, DeploymentStatus, EnvBundle, FetchedSource, HealthcheckConfig, Project,
+        ProjectConfig,
+    };
     use pi_domain::error::DomainError;
     use std::{
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
 
@@ -207,6 +251,7 @@ mod tests {
             service: "web".into(),
             container_port: 3000,
             hostname: Some("rateme.isskelo.com".into()),
+            healthcheck: HealthcheckConfig::default(),
         }
     }
 
@@ -216,6 +261,10 @@ mod tests {
         pub projects: MockProjectRepository,
         pub history: MockDeploymentHistory,
         pub overrides: MockOverrideStore,
+        pub secrets: MockSecretStore,
+        pub env_files: MockEnvFileWriter,
+        pub health: MockHealthGate,
+        pub ingress: MockIngress,
         pub clock: MockClock,
     }
 
@@ -228,6 +277,10 @@ mod tests {
             projects: MockProjectRepository::new(),
             history: MockDeploymentHistory::new(),
             overrides: MockOverrideStore::new(),
+            secrets: MockSecretStore::new(),
+            env_files: MockEnvFileWriter::new(),
+            health: MockHealthGate::new(),
+            ingress: MockIngress::new(),
             clock,
         }
     }
@@ -239,6 +292,10 @@ mod tests {
             Arc::new(m.projects),
             Arc::new(m.history),
             Arc::new(m.overrides),
+            Arc::new(m.secrets),
+            Arc::new(m.env_files),
+            Arc::new(m.health),
+            Arc::new(m.ingress),
             Arc::new(m.clock),
         )
     }
@@ -268,6 +325,13 @@ mod tests {
                 commit_sha: SHA.into(),
             })
         });
+        let stage_order = Arc::clone(&order);
+        m.secrets.expect_load().times(1).returning(move |_| {
+            stage_order.lock().unwrap().push("secrets");
+            Ok(EnvBundle::default())
+        });
+        // empty bundle -> .env must NOT be written
+        m.env_files.expect_write().times(0);
         let stage_order = Arc::clone(&order);
         m.overrides
             .expect_write()
@@ -303,6 +367,24 @@ mod tests {
             .times(1)
             .returning(move |_, _| {
                 stage_order.lock().unwrap().push("up");
+                Ok(())
+            });
+        let stage_order = Arc::clone(&order);
+        m.health
+            .expect_check()
+            .withf(|c, hp, _| c.name == "rateme" && *hp == 8000)
+            .times(1)
+            .returning(move |_, _, _| {
+                stage_order.lock().unwrap().push("health");
+                Ok(())
+            });
+        let stage_order = Arc::clone(&order);
+        m.ingress
+            .expect_upsert()
+            .withf(|h, hp, _| h == "rateme.isskelo.com" && *hp == 8000)
+            .times(1)
+            .returning(move |_, _, _| {
+                stage_order.lock().unwrap().push("ingress");
                 Ok(())
             });
         let stage_order = Arc::clone(&order);
@@ -356,7 +438,10 @@ mod tests {
         );
         assert_eq!(
             *order.lock().unwrap(),
-            vec!["started", "upsert", "fetch", "override", "build", "up", "finished"]
+            vec![
+                "started", "upsert", "fetch", "secrets", "override", "build", "up", "health",
+                "ingress", "finished"
+            ]
         );
     }
 
@@ -376,14 +461,19 @@ mod tests {
                 commit_sha: SHA.into(),
             })
         });
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
         m.overrides
             .expect_write()
             .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.runtime
             .expect_build()
             .returning(|_, _| Err(DomainError::Runtime("compose build exited with 1".into())));
-        // up should not be called at all
         m.runtime.expect_up().times(0);
+        m.health.expect_check().times(0);
+        m.ingress.expect_upsert().times(0);
         m.history.expect_record_started().returning(|_| Ok(()));
         m.history
             .expect_record_finished()
@@ -448,11 +538,17 @@ mod tests {
                 commit_sha: SHA.into(),
             })
         });
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
         m.overrides
             .expect_write()
             .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
         m.history.expect_record_started().returning(|_| Ok(()));
         m.history
             .expect_record_finished()
@@ -474,5 +570,152 @@ mod tests {
             deploy.try_begin("rateme").is_ok(),
             "lock must be free after deploy"
         );
+    }
+
+    fn secret_bundle() -> EnvBundle {
+        let mut b = EnvBundle::default();
+        b.vars.insert("DB_PASSWORD".into(), "hunter2-long".into());
+        b
+    }
+
+    fn ok_pre_stages(m: &mut Mocks) {
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
+        });
+        m.source.expect_fetch().returning(|_, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.history.expect_record_started().returning(|_| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
+    }
+
+    #[tokio::test]
+    async fn stored_bundle_is_written_to_workdir_and_masked_in_logs() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets.expect_load().returning(|_| Ok(secret_bundle()));
+        m.env_files
+            .expect_write()
+            .withf(|wd, b| wd == Path::new("/wd") && b.vars.contains_key("DB_PASSWORD"))
+            .times(1)
+            .returning(|_, _| Ok(()));
+        m.runtime.expect_build().returning(|_, log| {
+            log.line("connecting with hunter2-long");
+            Ok(())
+        });
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
+
+        let deploy = build(m);
+        let sink = CollectSink::new();
+        let permit = deploy.try_begin("rateme").unwrap();
+        let result = deploy
+            .execute(
+                permit,
+                "dep-env".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        assert!(result.log_tail.contains(".env injected (1 keys)"));
+        assert!(
+            result.log_tail.contains("***DB_PASSWORD***"),
+            "tail: {}",
+            result.log_tail
+        );
+        assert!(
+            !result.log_tail.contains("hunter2-long"),
+            "secret leaked into tail"
+        );
+        let lines = sink.lines.lock().unwrap();
+        assert!(lines.iter().any(|l| l.contains("***DB_PASSWORD***")));
+        assert!(
+            !lines.iter().any(|l| l.contains("hunter2-long")),
+            "secret leaked into stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_gate_failure_fails_deploy_and_skips_ingress() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health
+            .expect_check()
+            .returning(|_, _, _| Err(DomainError::HealthCheck("timed out after 60s".into())));
+        m.ingress.expect_upsert().times(0);
+
+        let deploy = build(m);
+        let sink = CollectSink::new();
+        let permit = deploy.try_begin("rateme").unwrap();
+        let err = deploy
+            .execute(
+                permit,
+                "dep-hc".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, DomainError::HealthCheck(_)));
+        assert_eq!(
+            *sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Failed]
+        );
+    }
+
+    #[tokio::test]
+    async fn project_without_hostname_skips_ingress() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+
+        let mut config = sample_config();
+        config.hostname = None;
+
+        let deploy = build(m);
+        let permit = deploy.try_begin("rateme").unwrap();
+        let result = deploy
+            .execute(
+                permit,
+                "dep-nh".into(),
+                config,
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeploymentStatus::Success);
     }
 }

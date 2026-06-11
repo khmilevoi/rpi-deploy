@@ -11,7 +11,8 @@ pub struct SseParser {
 
 impl SseParser {
     pub fn push(&mut self, chunk: &str) -> Vec<SseEvent> {
-        self.buf.push_str(&chunk.replace("\r\n", "\n").replace('\r', "\n"));
+        self.buf
+            .push_str(&chunk.replace("\r\n", "\n").replace('\r', "\n"));
         let mut events = Vec::new();
         while let Some(pos) = self.buf.find("\n\n") {
             let record: String = self.buf.drain(..pos + 2).collect();
@@ -25,7 +26,10 @@ impl SseParser {
                 }
             }
             if !data_lines.is_empty() || event != "message" {
-                events.push(SseEvent { event, data: data_lines.join("\n") });
+                events.push(SseEvent {
+                    event,
+                    data: data_lines.join("\n"),
+                });
             }
         }
         events
@@ -44,8 +48,14 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                SseEvent { event: "log".into(), data: "hello".into() },
-                SseEvent { event: "finished".into(), data: "success".into() },
+                SseEvent {
+                    event: "log".into(),
+                    data: "hello".into()
+                },
+                SseEvent {
+                    event: "finished".into(),
+                    data: "success".into()
+                },
             ]
         );
     }
@@ -55,6 +65,12 @@ mod tests {
         let mut p = SseParser::default();
         assert!(p.push(":\r\n\r\n").is_empty());
         let events = p.push("event: log\r\ndata: line\r\n\r\n");
-        assert_eq!(events, vec![SseEvent { event: "log".into(), data: "line".into() }]);
+        assert_eq!(
+            events,
+            vec![SseEvent {
+                event: "log".into(),
+                data: "line".into()
+            }]
+        );
     }
 }

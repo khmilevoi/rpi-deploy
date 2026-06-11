@@ -47,7 +47,11 @@ impl GitSource {
         cmd
     }
 
-    async fn ensure_key(&self, project: &str, log: &Arc<dyn LogSink>) -> Result<PathBuf, DomainError> {
+    async fn ensure_key(
+        &self,
+        project: &str,
+        log: &Arc<dyn LogSink>,
+    ) -> Result<PathBuf, DomainError> {
         let src_err = |e: std::io::Error| DomainError::Source(format!("deploy key: {e}"));
         let dir = self.keys.join(project);
         let key = dir.join("id_ed25519");
@@ -59,7 +63,9 @@ impl GitSource {
                 .arg("-f")
                 .arg(&key);
             run_capture(cmd).await.map_err(DomainError::Source)?;
-            let pubkey = tokio::fs::read_to_string(key.with_extension("pub")).await.map_err(src_err)?;
+            let pubkey = tokio::fs::read_to_string(key.with_extension("pub"))
+                .await
+                .map_err(src_err)?;
             log.line("generated deploy key for this project; add it to GitHub -> repo Settings -> Deploy keys (read-only), then re-run deploy if fetch fails:");
             log.line(pubkey.trim());
         }
@@ -69,6 +75,10 @@ impl GitSource {
 
 #[async_trait]
 impl Source for GitSource {
+    fn workdir(&self, project_name: &str) -> PathBuf {
+        self.workdirs.join(project_name)
+    }
+
     async fn fetch(
         &self,
         project: &ProjectConfig,
@@ -76,7 +86,7 @@ impl Source for GitSource {
         log: Arc<dyn LogSink>,
     ) -> Result<FetchedSource, DomainError> {
         let src_err = |e: std::io::Error| DomainError::Source(e.to_string());
-        let workdir = self.workdirs.join(&project.name);
+        let workdir = self.workdir(&project.name);
 
         let key = if is_ssh_repo(&project.repo) {
             Some(self.ensure_key(&project.name, &log).await?)
@@ -86,16 +96,22 @@ impl Source for GitSource {
         let key = key.as_deref();
 
         if !workdir.join(".git").exists() {
-            tokio::fs::create_dir_all(&self.workdirs).await.map_err(src_err)?;
+            tokio::fs::create_dir_all(&self.workdirs)
+                .await
+                .map_err(src_err)?;
             log.line(&format!("cloning {} ...", project.repo));
             let mut cmd = self.git(key, None);
             cmd.arg("clone").arg(&project.repo).arg(&workdir);
-            run_streamed(cmd, Arc::clone(&log)).await.map_err(DomainError::Source)?;
+            run_streamed(cmd, Arc::clone(&log))
+                .await
+                .map_err(DomainError::Source)?;
         }
 
         let mut cmd = self.git(key, Some(&workdir));
         cmd.args(["fetch", "origin", "--prune"]);
-        run_streamed(cmd, Arc::clone(&log)).await.map_err(DomainError::Source)?;
+        run_streamed(cmd, Arc::clone(&log))
+            .await
+            .map_err(DomainError::Source)?;
 
         let sha = match git_ref {
             DeployRef::Sha(sha) => sha.clone(),
@@ -108,9 +124,14 @@ impl Source for GitSource {
 
         let mut cmd = self.git(None, Some(&workdir));
         cmd.args(["reset", "--hard", &sha]);
-        run_streamed(cmd, Arc::clone(&log)).await.map_err(DomainError::Source)?;
+        run_streamed(cmd, Arc::clone(&log))
+            .await
+            .map_err(DomainError::Source)?;
 
-        Ok(FetchedSource { workdir, commit_sha: sha })
+        Ok(FetchedSource {
+            workdir,
+            commit_sha: sha,
+        })
     }
 }
 
@@ -137,12 +158,21 @@ mod tests {
             "ssh -i \"/var/lib/pi/keys/rateme/id_ed25519\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=\"/var/lib/pi/known_hosts\""
         );
     }
+
+    #[test]
+    fn workdir_is_under_data_dir_workdirs() {
+        let source = GitSource::new(std::path::Path::new("/var/lib/pi"));
+        assert_eq!(
+            source.workdir("rateme"),
+            std::path::PathBuf::from("/var/lib/pi/workdirs/rateme")
+        );
+    }
 }
 
 #[cfg(test)]
 mod integration {
     use super::*;
-    use pi_domain::entities::{DeployRef, DeploymentStatus, ProjectConfig};
+    use pi_domain::entities::{DeployRef, DeploymentStatus, HealthcheckConfig, ProjectConfig};
     use std::path::Path;
 
     struct NullSink;
@@ -178,6 +208,7 @@ mod integration {
             service: "web".into(),
             container_port: 3000,
             hostname: None,
+            healthcheck: HealthcheckConfig::default(),
         }
     }
 
@@ -190,7 +221,11 @@ mod integration {
         let log = std::sync::Arc::new(NullSink);
 
         let first = source
-            .fetch(&cfg(origin.path()), &DeployRef::Branch("main".into()), log.clone())
+            .fetch(
+                &cfg(origin.path()),
+                &DeployRef::Branch("main".into()),
+                log.clone(),
+            )
             .await
             .unwrap();
         assert_eq!(first.commit_sha.len(), 40);
@@ -204,7 +239,11 @@ mod integration {
         sh(origin.path(), &["commit", "-m", "v2"]);
 
         let second = source
-            .fetch(&cfg(origin.path()), &DeployRef::Branch("main".into()), log.clone())
+            .fetch(
+                &cfg(origin.path()),
+                &DeployRef::Branch("main".into()),
+                log.clone(),
+            )
             .await
             .unwrap();
         assert_ne!(second.commit_sha, first.commit_sha);
@@ -214,7 +253,11 @@ mod integration {
         );
 
         let pinned = source
-            .fetch(&cfg(origin.path()), &DeployRef::Sha(first.commit_sha.clone()), log)
+            .fetch(
+                &cfg(origin.path()),
+                &DeployRef::Sha(first.commit_sha.clone()),
+                log,
+            )
             .await
             .unwrap();
         assert_eq!(pinned.commit_sha, first.commit_sha);

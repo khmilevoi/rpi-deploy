@@ -1,9 +1,14 @@
+pub mod cloudflared;
 pub mod docker;
+pub mod dotenv;
+pub mod envfile;
 pub mod events;
 pub mod git;
+pub mod health;
 pub mod history;
 pub mod overrides;
 pub mod process;
 pub mod repo;
+pub mod secrets;
 pub mod sqlite;
 pub mod sys;

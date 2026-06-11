@@ -12,7 +12,10 @@ pub struct SshTunnel {
 impl SshTunnel {
     pub async fn open(profile: &ServerProfile) -> anyhow::Result<SshTunnel> {
         if let Ok(url) = std::env::var("PI_AGENT_URL") {
-            return Ok(SshTunnel { child: None, base_url: url });
+            return Ok(SshTunnel {
+                child: None,
+                base_url: url,
+            });
         }
 
         let port = free_local_port()?;
@@ -32,10 +35,15 @@ impl SshTunnel {
         ]);
         cmd.stdin(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::inherit());
-        let child = cmd.spawn().map_err(|e| anyhow::anyhow!("cannot spawn ssh: {e}"))?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("cannot spawn ssh: {e}"))?;
 
         wait_port(port, Duration::from_secs(10)).await?;
-        Ok(SshTunnel { child: Some(child), base_url: format!("http://127.0.0.1:{port}") })
+        Ok(SshTunnel {
+            child: Some(child),
+            base_url: format!("http://127.0.0.1:{port}"),
+        })
     }
 }
 
@@ -62,7 +70,10 @@ fn expand_home(path: &str) -> String {
 async fn wait_port(port: u16, budget: Duration) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
