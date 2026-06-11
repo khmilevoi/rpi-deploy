@@ -132,6 +132,21 @@ impl ProjectRepository for SqliteProjectRepo {
             .await
     }
 
+    async fn get(&self, name: &str) -> Result<Option<Project>, DomainError> {
+        let name = name.to_string();
+        self.db
+            .call(move |conn| {
+                conn.query_row(
+                    &format!("{SELECT} WHERE name = ?1"),
+                    params![name],
+                    row_to_project,
+                )
+                .optional()
+                .map_err(storage_err)
+            })
+            .await
+    }
+
     async fn list(&self) -> Result<Vec<Project>, DomainError> {
         self.db
             .call(|conn| {
@@ -200,6 +215,17 @@ mod tests {
         );
         assert_eq!(project.config.branch, "develop");
         assert_eq!(repo.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_returns_upserted_project_and_none_for_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo(&dir, 8000, 8999);
+        repo.upsert(&cfg("a")).await.unwrap();
+        let found = repo.get("a").await.unwrap().unwrap();
+        assert_eq!(found.config.name, "a");
+        assert_eq!(found.host_port, 8000);
+        assert!(repo.get("nope").await.unwrap().is_none());
     }
 
     #[tokio::test]

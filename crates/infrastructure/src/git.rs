@@ -69,6 +69,10 @@ impl GitSource {
 
 #[async_trait]
 impl Source for GitSource {
+    fn workdir(&self, project_name: &str) -> PathBuf {
+        self.workdirs.join(project_name)
+    }
+
     async fn fetch(
         &self,
         project: &ProjectConfig,
@@ -76,7 +80,7 @@ impl Source for GitSource {
         log: Arc<dyn LogSink>,
     ) -> Result<FetchedSource, DomainError> {
         let src_err = |e: std::io::Error| DomainError::Source(e.to_string());
-        let workdir = self.workdirs.join(&project.name);
+        let workdir = self.workdir(&project.name);
 
         let key = if is_ssh_repo(&project.repo) {
             Some(self.ensure_key(&project.name, &log).await?)
@@ -135,6 +139,15 @@ mod tests {
         assert_eq!(
             cmd,
             "ssh -i \"/var/lib/pi/keys/rateme/id_ed25519\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=\"/var/lib/pi/known_hosts\""
+        );
+    }
+
+    #[test]
+    fn workdir_is_under_data_dir_workdirs() {
+        let source = GitSource::new(std::path::Path::new("/var/lib/pi"));
+        assert_eq!(
+            source.workdir("rateme"),
+            std::path::PathBuf::from("/var/lib/pi/workdirs/rateme")
         );
     }
 }

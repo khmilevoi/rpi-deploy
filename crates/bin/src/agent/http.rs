@@ -291,6 +291,10 @@ mod tests {
 
         #[async_trait::async_trait]
         impl Source for GatedSource {
+            fn workdir(&self, project_name: &str) -> std::path::PathBuf {
+                std::env::temp_dir().join(project_name)
+            }
+
             async fn fetch(
                 &self,
                 p: &ProjectConfig,
