@@ -1,5 +1,5 @@
 use pi_application::list::ProjectView;
-use pi_domain::entities::{Deployment, ProjectConfig};
+use pi_domain::entities::{Deployment, HealthcheckConfig, ProjectConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +29,7 @@ impl From<ProjectDto> for ProjectConfig {
             service: dto.service,
             container_port: dto.port,
             hostname: dto.hostname,
+            healthcheck: HealthcheckConfig::default(),
         }
     }
 }

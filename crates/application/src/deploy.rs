@@ -191,7 +191,9 @@ mod tests {
         MockClock, MockContainerRuntime, MockDeploymentHistory, MockOverrideStore,
         MockProjectRepository, MockSource,
     };
-    use pi_domain::entities::{DeployRef, DeploymentStatus, FetchedSource, Project, ProjectConfig};
+    use pi_domain::entities::{
+        DeployRef, DeploymentStatus, FetchedSource, HealthcheckConfig, Project, ProjectConfig,
+    };
     use pi_domain::error::DomainError;
     use std::{
         path::PathBuf,
@@ -207,6 +209,7 @@ mod tests {
             service: "web".into(),
             container_port: 3000,
             hostname: Some("rateme.isskelo.com".into()),
+            healthcheck: HealthcheckConfig::default(),
         }
     }
 

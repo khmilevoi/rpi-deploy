@@ -142,7 +142,7 @@ mod tests {
 #[cfg(test)]
 mod integration {
     use super::*;
-    use pi_domain::entities::{DeployRef, DeploymentStatus, ProjectConfig};
+    use pi_domain::entities::{DeployRef, DeploymentStatus, HealthcheckConfig, ProjectConfig};
     use std::path::Path;
 
     struct NullSink;
@@ -178,6 +178,7 @@ mod integration {
             service: "web".into(),
             container_port: 3000,
             hostname: None,
+            healthcheck: HealthcheckConfig::default(),
         }
     }
 

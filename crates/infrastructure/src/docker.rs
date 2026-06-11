@@ -47,6 +47,7 @@ fn service_state(v: &serde_json::Value) -> Option<ServiceState> {
     Some(ServiceState {
         service: v.get("Service")?.as_str()?.to_string(),
         state: v.get("State")?.as_str()?.to_string(),
+        health: None,
     })
 }
 
@@ -139,8 +140,8 @@ mod tests {
         assert_eq!(
             parse_ps_json(out),
             vec![
-                ServiceState { service: "web".into(), state: "running".into() },
-                ServiceState { service: "db".into(), state: "exited".into() },
+                ServiceState { service: "web".into(), state: "running".into(), health: None },
+                ServiceState { service: "db".into(), state: "exited".into(), health: None },
             ]
         );
     }
@@ -151,8 +152,8 @@ mod tests {
         assert_eq!(
             parse_ps_json(out),
             vec![
-                ServiceState { service: "web".into(), state: "running".into() },
-                ServiceState { service: "db".into(), state: "exited".into() },
+                ServiceState { service: "web".into(), state: "running".into(), health: None },
+                ServiceState { service: "db".into(), state: "exited".into(), health: None },
             ]
         );
     }

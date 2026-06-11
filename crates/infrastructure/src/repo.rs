@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_domain::contracts::ProjectRepository;
-use pi_domain::entities::{Project, ProjectConfig};
+use pi_domain::entities::{HealthcheckConfig, Project, ProjectConfig};
 use pi_domain::error::DomainError;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -36,6 +36,7 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> Result<Project, rusqlite::Error> {
             service: row.get(4)?,
             container_port: row.get(5)?,
             hostname: row.get(6)?,
+            healthcheck: HealthcheckConfig::default(), // per-deploy input, not stored
         },
         host_port: row.get(7)?,
         created_at: row.get(8)?,
@@ -153,7 +154,7 @@ mod tests {
     use super::*;
     use crate::sqlite::Db;
     use pi_domain::contracts::ProjectRepository;
-    use pi_domain::entities::ProjectConfig;
+    use pi_domain::entities::{HealthcheckConfig, ProjectConfig};
     use pi_domain::error::DomainError;
     use std::sync::Arc;
 
@@ -166,6 +167,7 @@ mod tests {
             service: "web".into(),
             container_port: 3000,
             hostname: None,
+            healthcheck: HealthcheckConfig::default(),
         }
     }
 

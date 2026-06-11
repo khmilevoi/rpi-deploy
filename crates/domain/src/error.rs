@@ -9,6 +9,12 @@ pub enum DomainError {
     Runtime(String),
     #[error("storage error: {0}")]
     Storage(String),
+    #[error("secret store error: {0}")]
+    Secrets(String),
+    #[error("ingress error: {0}")]
+    Ingress(String),
+    #[error("health check failed: {0}")]
+    HealthCheck(String),
     #[error("deploy already in progress for project '{0}'")]
     DeployInProgress(String),
     #[error("not found: {0}")]

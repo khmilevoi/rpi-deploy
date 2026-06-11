@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use pi_domain::entities::ProjectConfig;
+use pi_domain::entities::{HealthcheckConfig, ProjectConfig};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +76,7 @@ impl PiToml {
             service: self.ingress.service.clone(),
             container_port: self.ingress.port,
             hostname: self.ingress.hostname.clone(),
+            healthcheck: HealthcheckConfig::default(),
         }
     }
 }
