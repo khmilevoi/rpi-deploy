@@ -119,6 +119,27 @@ impl Ingress for CloudflaredIngress {
             .map_err(ingress_err)?;
         log.line(&format!("ingress: routing {hostname} -> {service}"));
 
+        // On dns/restart failure roll the config back: a persisted change
+        // would make the next deploy see "no diff" and never retry (§11).
+        if let Err(err) = self.route_dns_and_restart(hostname, &log).await {
+            if let Err(restore) = tokio::fs::write(&self.config_path, &text).await {
+                return Err(ingress_err(format!(
+                    "{err}; additionally failed to restore {}: {restore}",
+                    self.config_path.display()
+                )));
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+impl CloudflaredIngress {
+    async fn route_dns_and_restart(
+        &self,
+        hostname: &str,
+        log: &Arc<dyn LogSink>,
+    ) -> Result<(), DomainError> {
         let mut dns = Command::new("cloudflared");
         dns.args(["tunnel", "route", "dns", &self.tunnel, hostname]);
         match run_capture(dns).await {
@@ -305,7 +326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn diff_writes_config_before_running_commands() {
+    async fn failed_dns_restores_config_so_redeploy_retries() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yml");
         std::fs::write(&path, BASE).unwrap();
@@ -314,15 +335,24 @@ mod tests {
             "home".into(),
             vec!["pi-test-no-such-binary".into()],
         );
-        // `cloudflared` is not on PATH in tests -> route dns fails -> Err,
-        // but the config must already be updated (§11 order: config, dns, restart).
+        // `cloudflared` is not on PATH in tests -> route dns fails -> Err.
+        // The config write must be rolled back: otherwise the next deploy
+        // sees no diff and never retries dns/restart for this hostname.
         let err = ingress
             .upsert("new.example.com", 8002, VecSink::new())
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Ingress(_)));
-        assert!(std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("new.example.com"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            BASE,
+            "config restored after failure"
+        );
+        // a retry diffs again and re-attempts dns instead of silently passing
+        let err = ingress
+            .upsert("new.example.com", 8002, VecSink::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Ingress(_)), "retry re-runs dns");
     }
 }
