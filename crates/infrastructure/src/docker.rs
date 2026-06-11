@@ -44,10 +44,15 @@ pub(crate) fn parse_ps_json(output: &str) -> Vec<ServiceState> {
 }
 
 fn service_state(v: &serde_json::Value) -> Option<ServiceState> {
+    let health = v
+        .get("Health")
+        .and_then(|h| h.as_str())
+        .filter(|h| !h.is_empty())
+        .map(str::to_string);
     Some(ServiceState {
         service: v.get("Service")?.as_str()?.to_string(),
         state: v.get("State")?.as_str()?.to_string(),
-        health: None,
+        health,
     })
 }
 
@@ -144,6 +149,19 @@ mod tests {
                 ServiceState { service: "db".into(), state: "exited".into(), health: None },
             ]
         );
+    }
+
+    #[test]
+    fn parse_ps_json_reads_health_field() {
+        let out = concat!(
+            r#"{"Service":"web","State":"running","Health":"healthy"}"#, "\n",
+            r#"{"Service":"db","State":"running","Health":""}"#, "\n",
+            r#"{"Service":"worker","State":"running"}"#, "\n",
+        );
+        let states = parse_ps_json(out);
+        assert_eq!(states[0].health.as_deref(), Some("healthy"));
+        assert_eq!(states[1].health, None, "empty Health means no healthcheck");
+        assert_eq!(states[2].health, None);
     }
 
     #[test]

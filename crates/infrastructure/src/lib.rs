@@ -1,6 +1,7 @@
 pub mod docker;
 pub mod dotenv;
 pub mod envfile;
+pub mod health;
 pub mod events;
 pub mod git;
 pub mod history;
