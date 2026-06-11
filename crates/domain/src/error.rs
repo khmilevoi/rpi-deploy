@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+/// Domain errors. Infrastructure errors map to these variants at layer boundaries (§19).
 #[derive(Debug, Error)]
 pub enum DomainError {
     #[error("source error: {0}")]

@@ -1,1 +1,94 @@
+use std::process::Stdio;
+use std::sync::Arc;
 
+use pi_domain::contracts::LogSink;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::process::Command;
+
+pub async fn run_streamed(mut cmd: Command, log: Arc<dyn LogSink>) -> Result<(), String> {
+    let label = format!("{:?}", cmd.as_std());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| format!("spawn {label}: {e}"))?;
+
+    let stdout = child.stdout.take().ok_or("child stdout not captured")?;
+    let stderr = child.stderr.take().ok_or("child stderr not captured")?;
+    tokio::join!(forward_lines(stdout, Arc::clone(&log)), forward_lines(stderr, Arc::clone(&log)));
+
+    let status = child.wait().await.map_err(|e| format!("wait {label}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{label} exited with {status}"))
+    }
+}
+
+async fn forward_lines<R: AsyncRead + Unpin>(reader: R, log: Arc<dyn LogSink>) {
+    let mut lines = BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        log.line(&line);
+    }
+}
+
+pub async fn run_capture(mut cmd: Command) -> Result<String, String> {
+    let label = format!("{:?}", cmd.as_std());
+    cmd.stdin(Stdio::null());
+    let out = cmd.output().await.map_err(|e| format!("spawn {label}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{label} exited with {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_domain::entities::DeploymentStatus;
+    use std::sync::Mutex;
+
+    struct VecSink(Mutex<Vec<String>>);
+    impl LogSink for VecSink {
+        fn line(&self, line: &str) {
+            self.0.lock().unwrap().push(line.to_string());
+        }
+        fn finished(&self, _status: DeploymentStatus) {}
+    }
+
+    #[tokio::test]
+    async fn run_capture_returns_trimmed_stdout() {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("--version");
+        let out = run_capture(cmd).await.unwrap();
+        assert!(out.starts_with("git version"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn run_capture_reports_failure_with_stderr() {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("definitely-not-a-git-command");
+        let err = run_capture(cmd).await.unwrap_err();
+        assert!(err.contains("exited with"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn run_streamed_forwards_output_lines() {
+        let sink = Arc::new(VecSink(Mutex::new(vec![])));
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("--version");
+        run_streamed(cmd, sink.clone()).await.unwrap();
+        let lines = sink.0.lock().unwrap();
+        assert!(lines.iter().any(|l| l.starts_with("git version")), "got: {lines:?}");
+    }
+
+    #[tokio::test]
+    async fn run_streamed_fails_on_nonzero_exit() {
+        let sink = Arc::new(VecSink(Mutex::new(vec![])));
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("definitely-not-a-git-command");
+        let err = run_streamed(cmd, sink).await.unwrap_err();
+        assert!(err.contains("exited with"), "got: {err}");
+    }
+}
