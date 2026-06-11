@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use pi_application::deploy::DeployProject;
+use pi_application::env::{ListEnvKeys, SendEnv};
 use pi_application::list::ListProjects;
 use pi_domain::contracts::{DeploymentHistory, IdGen, Ingress};
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
@@ -25,6 +26,8 @@ pub struct AppState {
     pub history: Arc<dyn DeploymentHistory>,
     pub hub: Arc<DeployEventsHub>,
     pub ids: Arc<dyn IdGen>,
+    pub send_env: Arc<SendEnv>,
+    pub env_keys: Arc<ListEnvKeys>,
 }
 
 pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
@@ -37,7 +40,7 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
     let runtime = DockerComposeRuntime::new();
     let overrides = FsOverrideStore::new(config.data_dir.join("overrides"));
     let secrets = EncryptedFileStore::open(&config.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let env_files = FsEnvFileWriter::new();
+    let env_files: Arc<dyn pi_domain::contracts::EnvFileWriter> = FsEnvFileWriter::new();
     let health = HybridHealthGate::new(runtime.clone());
     let ingress: Arc<dyn Ingress> = match &config.cloudflared {
         Some(cf) => CloudflaredIngress::new(cf.config.clone(), cf.tunnel.clone(), cf.restart.clone()),
@@ -45,18 +48,35 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
     };
 
     let deploy = DeployProject::new(
-        source,
+        source.clone(),
         runtime.clone(),
         projects.clone(),
         Arc::clone(&history),
-        overrides,
-        secrets,
-        env_files,
+        overrides.clone(),
+        secrets.clone(),
+        Arc::clone(&env_files),
         health,
         ingress,
         SystemClock::new(),
     );
-    let list = ListProjects::new(projects, runtime);
+    let list = ListProjects::new(projects.clone(), runtime.clone());
+    let send_env = SendEnv::new(
+        secrets.clone(),
+        projects,
+        source,
+        env_files,
+        overrides,
+        runtime,
+    );
+    let env_keys = ListEnvKeys::new(secrets);
 
-    Ok(AppState { deploy, list, history, hub: DeployEventsHub::new(), ids: UuidGen::new() })
+    Ok(AppState {
+        deploy,
+        list,
+        history,
+        hub: DeployEventsHub::new(),
+        ids: UuidGen::new(),
+        send_env,
+        env_keys,
+    })
 }

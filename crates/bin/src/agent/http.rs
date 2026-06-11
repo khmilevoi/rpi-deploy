@@ -5,14 +5,17 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use pi_domain::entities::{DeployRef, ProjectConfig};
+use pi_domain::entities::{DeployRef, DeploymentStatus, EnvBundle, ProjectConfig};
 use pi_domain::error::DomainError;
 use pi_infrastructure::events::DeployEvent;
 
 use crate::agent::state::AppState;
-use crate::proto::{DeployAccepted, DeployRequest, DeploymentDto, ProjectViewDto, VersionInfo};
+use crate::proto::{
+    DeployAccepted, DeployRequest, DeploymentDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
+    ProjectViewDto, VersionInfo,
+};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -21,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/deployments/{id}", get(get_deployment))
         .route("/v1/deployments/{id}/logs", get(deployment_logs))
         .route("/v1/projects", get(list_projects))
+        .route("/v1/projects/{name}/env", put(send_env_handler).get(env_keys_handler))
         .with_state(state)
 }
 
@@ -150,12 +154,66 @@ async fn deployment_logs(
     }
 }
 
+/// `pi env send --apply` runs `up -d` synchronously; its output goes to the
+/// agent log (journald), the CLI gets a compact JSON summary.
+struct TracingSink;
+
+impl pi_domain::contracts::LogSink for TracingSink {
+    fn line(&self, line: &str) {
+        tracing::info!("{line}");
+    }
+    fn finished(&self, _status: DeploymentStatus) {}
+}
+
+async fn send_env_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<EnvSendRequest>,
+) -> Result<Json<EnvSendResponse>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    for (key, value) in &req.vars {
+        if !pi_infrastructure::dotenv::is_valid_key(key) {
+            return Err(ApiError(DomainError::Invalid(format!("invalid env key '{key}'"))));
+        }
+        if value.contains('\n') {
+            return Err(ApiError(DomainError::Invalid(format!(
+                "value of '{key}' contains a newline (multi-line values are unsupported)"
+            ))));
+        }
+    }
+    let bundle = EnvBundle { vars: req.vars };
+    let saved = state
+        .send_env
+        .execute(&name, bundle, req.apply, Arc::new(TracingSink))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(EnvSendResponse { saved_keys: saved.keys, applied: saved.applied }))
+}
+
+async fn env_keys_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<EnvKeysResponse>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    let keys = state.env_keys.execute(&name).await.map_err(ApiError)?;
+    Ok(Json(EnvKeysResponse { keys }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::state::AppState;
     use http_body_util::BodyExt;
     use pi_application::deploy::DeployProject;
+    use pi_application::env::{ListEnvKeys, SendEnv};
     use pi_application::list::ListProjects;
     use pi_domain::contracts::{ContainerRuntime, LogSink, MockContainerRuntime, MockSource, Source};
     use pi_domain::entities::FetchedSource;
@@ -211,19 +269,36 @@ mod tests {
             std::time::Duration::from_millis(10),
         );
         let deploy = DeployProject::new(
-            source,
+            source.clone(),
             Arc::clone(&runtime),
             projects.clone(),
             Arc::clone(&history),
-            overrides,
-            secrets,
+            overrides.clone(),
+            secrets.clone(),
             FsEnvFileWriter::new(),
             health,
             DisabledIngress::new(),
             SystemClock::new(),
         );
-        let list = ListProjects::new(projects, runtime);
-        AppState { deploy, list, history, hub: DeployEventsHub::new(), ids: UuidGen::new() }
+        let list = ListProjects::new(projects.clone(), Arc::clone(&runtime));
+        let send_env = SendEnv::new(
+            secrets.clone(),
+            projects,
+            source,
+            FsEnvFileWriter::new(),
+            overrides,
+            runtime,
+        );
+        let env_keys = ListEnvKeys::new(secrets);
+        AppState {
+            deploy,
+            list,
+            history,
+            hub: DeployEventsHub::new(),
+            ids: UuidGen::new(),
+            send_env,
+            env_keys,
+        }
     }
 
     fn deploy_body(name: &str) -> serde_json::Value {
@@ -343,5 +418,60 @@ mod tests {
         let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
         let (status, _) = request(app, get_req("/v1/deployments/nope")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    fn put_json(uri: &str, body: &serde_json::Value) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::put(uri)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn env_send_then_ls_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+
+        let body = serde_json::json!({ "vars": { "DB_PASSWORD": "hunter2-long" }, "apply": false });
+        let (status, json) = request(app.clone(), put_json("/v1/projects/rateme/env", &body)).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["saved_keys"], 1);
+        assert_eq!(json["applied"], false);
+
+        let (status, json) = request(app.clone(), get_req("/v1/projects/rateme/env")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["keys"], serde_json::json!(["DB_PASSWORD"]));
+    }
+
+    #[tokio::test]
+    async fn env_send_rejects_bad_keys_and_multiline_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+
+        let bad_key = serde_json::json!({ "vars": { "BAD-DASH": "x" } });
+        let (status, _) = request(app.clone(), put_json("/v1/projects/rateme/env", &bad_key)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let bad_value = serde_json::json!({ "vars": { "OK": "line1\nline2" } });
+        let (status, _) = request(app.clone(), put_json("/v1/projects/rateme/env", &bad_value)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn env_apply_for_unknown_project_is_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let body = serde_json::json!({ "vars": { "A_KEY": "value-long-enough" }, "apply": true });
+        let (status, _) = request(app, put_json("/v1/projects/ghost/env", &body)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn env_keys_for_project_without_env_is_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let (status, json) = request(app, get_req("/v1/projects/ghost/env")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["keys"], serde_json::json!([]));
     }
 }
