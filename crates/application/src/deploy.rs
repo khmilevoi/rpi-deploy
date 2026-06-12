@@ -16,6 +16,7 @@ use crate::mask::MaskingSink;
 use crate::tail::TailSink;
 
 const LOG_TAIL_LINES: usize = 400;
+const GC_TIMEOUT_SECS: u64 = 300;
 
 /// Guarantees sending `finished(Failed)` on drop if `disarm()` is not called.
 /// Protects against panics and early returns via `?`.
@@ -126,9 +127,21 @@ impl DeployProject {
         let mut guard = FinishGuard::new(sink);
 
         let started_at = self.clock.now_unix();
-        self.history
-            .mark_running(&deployment_id, started_at)
-            .await?;
+        if let Err(err) = self.history.mark_running(&deployment_id, started_at).await {
+            // DB record stays queued without this; write a Failed terminal row so
+            // the record is consistent without waiting for the next startup sweep.
+            let _ = self
+                .history
+                .record_finished(
+                    &deployment_id,
+                    DeploymentStatus::Failed,
+                    None,
+                    started_at,
+                    &err.to_string(),
+                )
+                .await;
+            return Err(err);
+        }
         let mut deployment = Deployment {
             id: deployment_id,
             project: config.name.clone(),
@@ -261,7 +274,7 @@ impl DeployProject {
                 .await?;
         }
 
-        if let Err(err) = self.gc.execute(log.clone()).await {
+        if let Err(err) = staged("gc", GC_TIMEOUT_SECS, self.gc.execute(log.clone())).await {
             log.line(&format!("gc skipped: {err}"));
         }
 
@@ -507,6 +520,40 @@ mod tests {
                 "running", "upsert", "fetch", "secrets", "override", "build", "up", "health",
                 "ingress", "gc", "finished"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_running_failure_writes_failed_to_db_and_emits_finished() {
+        let mut m = mocks();
+        m.history
+            .expect_mark_running()
+            .returning(|_, _| Err(DomainError::Storage("db locked".into())));
+        m.history
+            .expect_record_finished()
+            .withf(|id, status, _sha, _at, _tail| {
+                id == "dep-mr" && *status == DeploymentStatus::Failed
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let deploy = build(m);
+        let sink = CollectSink::new();
+        let err = deploy
+            .execute(
+                "dep-mr".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, DomainError::Storage(_)));
+        assert_eq!(
+            *sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Failed]
         );
     }
 

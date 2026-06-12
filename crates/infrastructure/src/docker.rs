@@ -14,8 +14,8 @@ use crate::process::{run_capture, run_streamed};
 /// rebuilds stay fast; only the disk threshold is configurable (§22).
 pub(crate) const BUILDER_PRUNE_MAX_AGE: &str = "24h";
 
-pub(crate) fn prune_images_args() -> Vec<&'static str> {
-    vec!["image", "prune", "-f"]
+pub(crate) fn prune_images_args() -> Vec<String> {
+    vec!["image".to_string(), "prune".to_string(), "-f".to_string()]
 }
 
 pub(crate) fn prune_builder_args() -> Vec<String> {
@@ -184,7 +184,10 @@ mod tests {
 
     #[test]
     fn prune_args_shapes() {
-        assert_eq!(prune_images_args(), vec!["image", "prune", "-f"]);
+        assert_eq!(
+            prune_images_args(),
+            vec!["image".to_string(), "prune".to_string(), "-f".to_string()]
+        );
         assert_eq!(
             prune_builder_args(),
             vec![

@@ -111,13 +111,22 @@ async fn create_deployment(
         .into_response())
 }
 
+const GC_TIMEOUT_SECS: u64 = 300;
+
 /// POST /v1/gc (§8.1): same RunGc as the post-deploy stage, on demand.
 async fn run_gc(State(state): State<AppState>) -> Result<Json<GcResponse>, ApiError> {
-    let report = state
-        .gc
-        .execute(Arc::new(TracingSink))
-        .await
-        .map_err(ApiError)?;
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(GC_TIMEOUT_SECS),
+        state.gc.execute(Arc::new(TracingSink)),
+    )
+    .await
+    .map_err(|_| {
+        ApiError(DomainError::Timeout {
+            stage: "gc".to_string(),
+            secs: GC_TIMEOUT_SECS,
+        })
+    })?
+    .map_err(ApiError)?;
     Ok(Json(GcResponse {
         disk_used_percent: report.disk_used_percent,
         builder_pruned: report.builder_pruned,

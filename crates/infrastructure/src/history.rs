@@ -73,6 +73,7 @@ impl DeploymentHistory for SqliteHistory {
                        AND id NOT IN (
                            SELECT id FROM deployments
                            WHERE project = ?1
+                             AND status NOT IN ('queued', 'running')
                            ORDER BY started_at DESC, id DESC
                            LIMIT ?2
                        )",
@@ -377,9 +378,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_prunes_old_terminal_rows_but_never_active_ones() {
+    async fn retention_active_rows_do_not_consume_keep_slots() {
+        // keep=2 with 2 active rows: all 2 terminal rows must survive because
+        // active rows must not count toward the LIMIT in the inner SELECT.
         let dir = tempfile::tempdir().unwrap();
         let h = SqliteHistory::new(Db::open(&dir.path().join("state.db")).unwrap(), 2);
+
+        for (id, at) in [("d1", 10), ("d2", 20), ("d3", 30), ("d4", 40)] {
+            h.record_queued(&queued(id, at)).await.unwrap();
+        }
+        h.record_finished("d1", DeploymentStatus::Success, None, 11, "")
+            .await
+            .unwrap();
+        h.record_finished("d2", DeploymentStatus::Failed, None, 21, "")
+            .await
+            .unwrap();
+        h.mark_running("d3", 31).await.unwrap();
+        // d4 is queued (active); inserting d5 triggers retention
+
+        h.record_queued(&queued("d5", 50)).await.unwrap();
+
+        assert!(h.get("d1").await.unwrap().is_some(), "d1 should survive (keep=2, 2 terminal rows)");
+        assert!(h.get("d2").await.unwrap().is_some(), "d2 should survive");
+        assert!(h.get("d3").await.unwrap().is_some(), "running row always survives");
+        assert!(h.get("d4").await.unwrap().is_some(), "queued row always survives");
+        assert!(h.get("d5").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn retention_prunes_old_terminal_rows_but_never_active_ones() {
+        // keep=1: d1 (oldest terminal) must be pruned; d2 (running) must survive.
+        let dir = tempfile::tempdir().unwrap();
+        let h = SqliteHistory::new(Db::open(&dir.path().join("state.db")).unwrap(), 1);
         for (id, at) in [("d1", 10), ("d2", 20), ("d3", 30)] {
             h.record_queued(&queued(id, at)).await.unwrap();
         }
