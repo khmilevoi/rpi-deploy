@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
 use pi_application::list::ProjectView;
-use pi_domain::entities::{
-    Deployment, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides,
-};
+use pi_domain::entities::{Deployment, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,7 +234,11 @@ mod tests {
         let json = r#"{"project":{"name":"a","repo":"r","branch":"main","compose":"docker-compose.yml","service":"web","port":3000,"hostname":null},"ref":null}"#;
         let req: DeployRequest = serde_json::from_str(json).unwrap();
         let config: ProjectConfig = req.project.into();
-        assert_eq!(config.timeouts, Default::default(), "v0.2 payloads still work");
+        assert_eq!(
+            config.timeouts,
+            Default::default(),
+            "v0.2 payloads still work"
+        );
 
         let mut config = config;
         config.timeouts.build_secs = Some(3600);

@@ -286,7 +286,10 @@ file = ".env"
         assert_eq!(config.timeouts.build_secs, None, "not set -> agent default");
         assert_eq!(config.timeouts.up_secs, Some(120));
 
-        let bad = SAMPLE.replace("[healthcheck]", "[timeouts]\nbuild = \"soon\"\n\n[healthcheck]");
+        let bad = SAMPLE.replace(
+            "[healthcheck]",
+            "[timeouts]\nbuild = \"soon\"\n\n[healthcheck]",
+        );
         assert!(PiToml::parse(&bad).is_err());
     }
 

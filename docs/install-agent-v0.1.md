@@ -40,6 +40,14 @@
     socket = "/run/pi/agent.sock"
     # port_min = 8000
     # port_max = 8999
+    # build_concurrency = 1        # global build semaphore (§8.1)
+    # history_keep = 50            # deployments kept per project (§18)
+    # [timeouts]                   # stage timeout defaults (§8.1)
+    # fetch = "2m"
+    # build = "30m"
+    # up = "5m"
+    # [gc]
+    # disk_threshold_percent = 85  # builder prune above this disk usage (§8.1)
     EOF
 
     sudo tee /etc/systemd/system/pi-agent.service >/dev/null <<'EOF'
@@ -126,3 +134,15 @@
 6. `pi deploy` при выключенном docker → `failed`, причина видна в логах CLI.
 7. `sudo systemctl restart pi-agent` → `pi ls` снова работает; история
    деплоев на месте (SQLite пережил рестарт).
+
+## Приёмка v0.3 (CI-ready, §23)
+
+1. Два `pi deploy` подряд: второй отвечает `queued`; третий вытесняет второй
+   (`superseded`), деплоится самый свежий.
+2. `pi deploy --cancel` во время build → деплой `canceled`, docker-процесс убит.
+3. Перезапуск агента во время деплоя (`sudo systemctl restart pi-agent`) →
+   деплой помечен `interrupted` (виден в `GET /v1/deployments/{id}`).
+4. `pi gc` отвечает процентом диска; после успешного деплоя в journald виден
+   `docker image prune`.
+5. Деплой из GitHub Actions по `docs/ci-github-actions.md` проходит без
+   клиентского конфига на раннере.

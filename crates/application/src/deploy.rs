@@ -126,7 +126,9 @@ impl DeployProject {
         let mut guard = FinishGuard::new(sink);
 
         let started_at = self.clock.now_unix();
-        self.history.mark_running(&deployment_id, started_at).await?;
+        self.history
+            .mark_running(&deployment_id, started_at)
+            .await?;
         let mut deployment = Deployment {
             id: deployment_id,
             project: config.name.clone(),

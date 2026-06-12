@@ -646,7 +646,8 @@ mod tests {
             }
         }
 
-        let (status, json) = request(app.clone(), delete_req(&format!("/v1/deployments/{id}"))).await;
+        let (status, json) =
+            request(app.clone(), delete_req(&format!("/v1/deployments/{id}"))).await;
         assert_eq!(status, StatusCode::CONFLICT, "{json}");
     }
 

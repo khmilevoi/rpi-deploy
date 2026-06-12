@@ -62,10 +62,7 @@ mod tests {
     #[tokio::test]
     async fn below_threshold_prunes_images_only() {
         let mut runtime = MockContainerRuntime::new();
-        runtime
-            .expect_prune_images()
-            .times(1)
-            .returning(|_| Ok(()));
+        runtime.expect_prune_images().times(1).returning(|_| Ok(()));
         runtime.expect_prune_builder().times(0);
         let mut disk = MockDiskProbe::new();
         disk.expect_used_percent().returning(|| Ok(60));
@@ -86,10 +83,7 @@ mod tests {
     #[tokio::test]
     async fn at_or_above_threshold_also_prunes_builder() {
         let mut runtime = MockContainerRuntime::new();
-        runtime
-            .expect_prune_images()
-            .times(1)
-            .returning(|_| Ok(()));
+        runtime.expect_prune_images().times(1).returning(|_| Ok(()));
         runtime
             .expect_prune_builder()
             .times(1)

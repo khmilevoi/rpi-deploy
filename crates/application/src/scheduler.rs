@@ -207,7 +207,7 @@ impl DeployScheduler {
 
     pub async fn cancel(&self, deployment_id: &str) -> Result<CancelOutcome, DomainError> {
         enum Found {
-            Pending(Pending),
+            Pending(Box<Pending>),
             Running,
             No,
         }
@@ -218,13 +218,9 @@ impl DeployScheduler {
                 .map_err(|_| DomainError::Storage("scheduler lock poisoned".into()))?;
             let mut found = Found::No;
             for slot in slots.values_mut() {
-                if slot
-                    .pending
-                    .as_ref()
-                    .is_some_and(|p| p.id == deployment_id)
-                {
+                if slot.pending.as_ref().is_some_and(|p| p.id == deployment_id) {
                     if let Some(p) = slot.pending.take() {
-                        found = Found::Pending(p);
+                        found = Found::Pending(Box::new(p));
                     }
                     break;
                 }
@@ -429,9 +425,7 @@ mod tests {
         history
             .expect_record_finished()
             .withf(|id, status, _sha, _at, tail| {
-                id == "d2"
-                    && *status == DeploymentStatus::Superseded
-                    && tail.contains("superseded")
+                id == "d2" && *status == DeploymentStatus::Superseded && tail.contains("superseded")
             })
             .times(1)
             .returning(|_, _, _, _, _| Ok(()));

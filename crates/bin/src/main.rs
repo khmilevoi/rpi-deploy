@@ -129,7 +129,14 @@ mod tests {
     #[test]
     fn deploy_ci_flags_parse() {
         let cli = Cli::try_parse_from([
-            "pi", "deploy", "--host", "203.0.113.7", "--user", "pi", "--key", "./k",
+            "pi",
+            "deploy",
+            "--host",
+            "203.0.113.7",
+            "--user",
+            "pi",
+            "--key",
+            "./k",
         ])
         .unwrap();
         match cli.cmd {
@@ -145,7 +152,14 @@ mod tests {
     #[test]
     fn server_flag_conflicts_with_host() {
         assert!(Cli::try_parse_from([
-            "pi", "deploy", "--server", "home", "--host", "203.0.113.7", "--user", "pi",
+            "pi",
+            "deploy",
+            "--server",
+            "home",
+            "--host",
+            "203.0.113.7",
+            "--user",
+            "pi",
         ])
         .is_err());
     }

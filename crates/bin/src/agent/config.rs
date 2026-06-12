@@ -177,7 +177,10 @@ mod tests {
     fn v03_defaults_for_resilience_options() {
         let config = AgentConfig::parse("").unwrap();
         assert_eq!(config.build_concurrency, 1, "build semaphore size (§8.1)");
-        assert_eq!(config.history_keep, 50, "deployments kept per project (§18)");
+        assert_eq!(
+            config.history_keep, 50,
+            "deployments kept per project (§18)"
+        );
         assert_eq!(config.gc.disk_threshold_percent, 85, "§8.1");
         let t = config.stage_timeouts().unwrap();
         assert_eq!((t.fetch_secs, t.build_secs, t.up_secs), (120, 1800, 300));
