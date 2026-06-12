@@ -54,9 +54,6 @@ impl ApiClient {
             .json(req)
             .send()
             .await?;
-        if resp.status() == reqwest::StatusCode::CONFLICT {
-            anyhow::bail!("deploy of this project is already in progress on the agent");
-        }
         Ok(extract_error(resp).await?.json().await?)
     }
 

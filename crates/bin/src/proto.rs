@@ -123,6 +123,9 @@ pub struct DeployRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployAccepted {
     pub deployment_id: String,
+    /// true when the deploy waits behind an active one (latest wins, §8.1).
+    #[serde(default)]
+    pub queued: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

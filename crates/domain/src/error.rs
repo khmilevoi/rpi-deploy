@@ -15,8 +15,6 @@ pub enum DomainError {
     Ingress(String),
     #[error("health check failed: {0}")]
     HealthCheck(String),
-    #[error("deploy already in progress for project '{0}'")]
-    DeployInProgress(String),
     #[error("deployment canceled")]
     Canceled,
     #[error("timeout: {stage} after {secs}s")]

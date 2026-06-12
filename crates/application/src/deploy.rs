@@ -12,7 +12,6 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::gc::RunGc;
-use crate::locks::{DeployLocks, DeployPermit};
 use crate::mask::MaskingSink;
 use crate::tail::TailSink;
 
@@ -43,8 +42,7 @@ impl Drop for FinishGuard {
     }
 }
 
-/// Deploy use-case (§7, §8.2). Project lock is acquired via try_begin BEFORE
-/// spawning the async task, so the HTTP handler can immediately respond with 409.
+/// Deploy use-case (§7, §8.2). Per-project serialization is owned by DeployScheduler.
 pub struct DeployProject {
     source: Arc<dyn Source>,
     runtime: Arc<dyn ContainerRuntime>,
@@ -60,7 +58,6 @@ pub struct DeployProject {
     timeouts: StageTimeouts,
     /// §8.1: global build semaphore — parallel builds OOM the Pi.
     build_sem: Semaphore,
-    locks: Arc<DeployLocks>,
 }
 
 /// Wraps a deploy stage with its timeout (§8.1). On expiry the stage future is
@@ -111,51 +108,35 @@ impl DeployProject {
             gc,
             timeouts,
             build_sem: Semaphore::new(build_slots),
-            locks: DeployLocks::new(),
         })
-    }
-
-    /// Err(DeployInProgress) — deploy of this project is already in progress (MVP: no queue, §23 v0.1).
-    pub fn try_begin(&self, project: &str) -> Result<DeployPermit, DomainError> {
-        self.locks
-            .try_acquire(project)
-            .ok_or_else(|| DomainError::DeployInProgress(project.to_string()))
     }
 
     pub async fn execute(
         &self,
-        permit: DeployPermit,
         deployment_id: String,
         config: ProjectConfig,
         git_ref: DeployRef,
         sink: Arc<dyn LogSink>,
         cancel: CancellationToken,
     ) -> Result<Deployment, DomainError> {
-        let _permit = permit; // keep lock until deploy finishes, released by Drop
-
         // chain: stages write to masker → masks secrets → tail stores masked lines → sink (SSE hub)
         let tail = TailSink::new(Arc::clone(&sink), LOG_TAIL_LINES);
         let masker = MaskingSink::new(tail.clone());
         let log: Arc<dyn LogSink> = masker.clone();
         let mut guard = FinishGuard::new(sink);
 
+        let started_at = self.clock.now_unix();
+        self.history.mark_running(&deployment_id, started_at).await?;
         let mut deployment = Deployment {
             id: deployment_id,
             project: config.name.clone(),
             git_ref: git_ref.as_str().to_string(),
             commit_sha: None,
-            status: DeploymentStatus::Queued,
-            started_at: self.clock.now_unix(),
+            status: DeploymentStatus::Running,
+            started_at,
             finished_at: None,
             log_tail: String::new(),
         };
-        self.history.record_queued(&deployment).await?;
-        let started_at = self.clock.now_unix();
-        deployment.started_at = started_at;
-        deployment.status = DeploymentStatus::Running;
-        self.history
-            .mark_running(&deployment.id, started_at)
-            .await?;
 
         let result = tokio::select! {
             _ = cancel.cancelled() => Err(DomainError::Canceled),
@@ -474,17 +455,6 @@ mod tests {
             });
         let stage_order = Arc::clone(&order);
         m.history
-            .expect_record_queued()
-            .withf(|d| {
-                d.id == "dep-1" && d.status == DeploymentStatus::Queued && d.git_ref == "main"
-            })
-            .times(1)
-            .returning(move |_| {
-                stage_order.lock().unwrap().push("queued");
-                Ok(())
-            });
-        let stage_order = Arc::clone(&order);
-        m.history
             .expect_mark_running()
             .withf(|id, started_at| id == "dep-1" && *started_at == 100)
             .times(1)
@@ -511,10 +481,8 @@ mod tests {
 
         let deploy = build(m);
         let sink = CollectSink::new();
-        let permit = deploy.try_begin("rateme").unwrap();
         let result = deploy
             .execute(
-                permit,
                 "dep-1".into(),
                 cfg,
                 DeployRef::Branch("main".into()),
@@ -534,8 +502,8 @@ mod tests {
         assert_eq!(
             *order.lock().unwrap(),
             vec![
-                "queued", "running", "upsert", "fetch", "secrets", "override", "build", "up",
-                "health", "ingress", "gc", "finished"
+                "running", "upsert", "fetch", "secrets", "override", "build", "up", "health",
+                "ingress", "gc", "finished"
             ]
         );
     }
@@ -569,7 +537,6 @@ mod tests {
         m.runtime.expect_up().times(0);
         m.health.expect_check().times(0);
         m.ingress.expect_upsert().times(0);
-        m.history.expect_record_queued().returning(|_| Ok(()));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -584,10 +551,8 @@ mod tests {
 
         let deploy = build(m);
         let sink = CollectSink::new();
-        let permit = deploy.try_begin("rateme").unwrap();
         let err = deploy
             .execute(
-                permit,
                 "dep-2".into(),
                 sample_config(),
                 DeployRef::Branch("main".into()),
@@ -601,73 +566,6 @@ mod tests {
         assert_eq!(
             *sink.finished.lock().unwrap(),
             vec![DeploymentStatus::Failed]
-        );
-        assert!(
-            deploy.try_begin("rateme").is_ok(),
-            "lock must be free after failed deploy"
-        );
-    }
-
-    #[tokio::test]
-    async fn try_begin_twice_returns_deploy_in_progress() {
-        let deploy = build(mocks());
-        let _permit = deploy.try_begin("rateme").unwrap();
-        let err = match deploy.try_begin("rateme") {
-            Ok(_) => panic!("second try_begin must fail while deploy is in progress"),
-            Err(err) => err,
-        };
-        assert!(matches!(err, DomainError::DeployInProgress(p) if p == "rateme"));
-    }
-
-    #[tokio::test]
-    async fn lock_released_after_execute_finishes() {
-        let mut m = mocks();
-        m.projects.expect_upsert().returning(|c| {
-            Ok(Project {
-                config: c.clone(),
-                host_port: 8000,
-                created_at: 1,
-            })
-        });
-        m.source.expect_fetch().returning(|_, _, _| {
-            Ok(FetchedSource {
-                workdir: PathBuf::from("/wd"),
-                commit_sha: SHA.into(),
-            })
-        });
-        m.secrets
-            .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
-        m.overrides
-            .expect_write()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
-        m.runtime.expect_build().returning(|_, _| Ok(()));
-        m.runtime.expect_up().returning(|_, _| Ok(()));
-        m.health.expect_check().returning(|_, _, _| Ok(()));
-        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
-        m.history.expect_record_queued().returning(|_| Ok(()));
-        m.history.expect_mark_running().returning(|_, _| Ok(()));
-        m.history
-            .expect_record_finished()
-            .returning(|_, _, _, _, _| Ok(()));
-
-        let deploy = build(m);
-        let permit = deploy.try_begin("rateme").unwrap();
-        deploy
-            .execute(
-                permit,
-                "dep-3".into(),
-                sample_config(),
-                DeployRef::Branch("main".into()),
-                CollectSink::new(),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            deploy.try_begin("rateme").is_ok(),
-            "lock must be free after deploy"
         );
     }
 
@@ -694,7 +592,6 @@ mod tests {
         m.overrides
             .expect_write()
             .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
-        m.history.expect_record_queued().returning(|_| Ok(()));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -762,10 +659,8 @@ mod tests {
 
         let deploy = build(m);
         let sink = CollectSink::new();
-        let permit = deploy.try_begin("rateme").unwrap();
         let result = deploy
             .execute(
-                permit,
                 "dep-env".into(),
                 sample_config(),
                 DeployRef::Branch("main".into()),
@@ -811,10 +706,8 @@ mod tests {
 
         let deploy = build(m);
         let sink = CollectSink::new();
-        let permit = deploy.try_begin("rateme").unwrap();
         let err = deploy
             .execute(
-                permit,
                 "dep-hc".into(),
                 sample_config(),
                 DeployRef::Branch("main".into()),
@@ -848,10 +741,8 @@ mod tests {
         config.hostname = None;
 
         let deploy = build(m);
-        let permit = deploy.try_begin("rateme").unwrap();
         let result = deploy
             .execute(
-                permit,
                 "dep-nh".into(),
                 config,
                 DeployRef::Branch("main".into()),
@@ -873,7 +764,6 @@ mod tests {
                 created_at: 1,
             })
         });
-        m.history.expect_record_queued().returning(|_| Ok(()));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -891,10 +781,8 @@ mod tests {
         };
         let deploy = build_with_source(m, Arc::new(HangingSource), timeouts);
         let sink = CollectSink::new();
-        let permit = deploy.try_begin("rateme").unwrap();
         let err = deploy
             .execute(
-                permit,
                 "dep-t".into(),
                 sample_config(),
                 DeployRef::Branch("main".into()),
@@ -915,7 +803,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_token_marks_deployment_canceled_and_frees_lock() {
+    async fn cancel_token_marks_deployment_canceled() {
         let mut m = mocks();
         m.projects.expect_upsert().returning(|c| {
             Ok(Project {
@@ -924,7 +812,6 @@ mod tests {
                 created_at: 1,
             })
         });
-        m.history.expect_record_queued().returning(|_| Ok(()));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -936,7 +823,6 @@ mod tests {
 
         let deploy = build_with_source(m, Arc::new(HangingSource), StageTimeouts::default());
         let sink = CollectSink::new();
-        let permit = deploy.try_begin("rateme").unwrap();
         let cancel = CancellationToken::new();
         let task = tokio::spawn({
             let deploy = Arc::clone(&deploy);
@@ -945,7 +831,6 @@ mod tests {
             async move {
                 deploy
                     .execute(
-                        permit,
                         "dep-c".into(),
                         sample_config(),
                         DeployRef::Branch("main".into()),
@@ -964,10 +849,6 @@ mod tests {
         assert_eq!(
             *sink.finished.lock().unwrap(),
             vec![DeploymentStatus::Canceled]
-        );
-        assert!(
-            deploy.try_begin("rateme").is_ok(),
-            "lock must be free after canceled deploy"
         );
     }
 
@@ -1040,7 +921,6 @@ mod tests {
             .returning(|p, _, _, _| Ok(PathBuf::from("/ov").join(p)));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
-        m.history.expect_record_queued().returning(|_| Ok(()));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -1074,11 +954,8 @@ mod tests {
         config_b.name = "b".into();
         config_b.hostname = None;
 
-        let permit_a = deploy.try_begin("a").unwrap();
-        let permit_b = deploy.try_begin("b").unwrap();
         let (ra, rb) = tokio::join!(
             deploy.execute(
-                permit_a,
                 "dep-a".into(),
                 config_a,
                 DeployRef::Branch("main".into()),
@@ -1086,7 +963,6 @@ mod tests {
                 CancellationToken::new(),
             ),
             deploy.execute(
-                permit_b,
                 "dep-b".into(),
                 config_b,
                 DeployRef::Branch("main".into()),
@@ -1121,10 +997,8 @@ mod tests {
             .returning(|_| Err(DomainError::Runtime("docker daemon hiccup".into())));
 
         let deploy = build(m);
-        let permit = deploy.try_begin("rateme").unwrap();
         let result = deploy
             .execute(
-                permit,
                 "dep-gc".into(),
                 sample_config(),
                 DeployRef::Branch("main".into()),

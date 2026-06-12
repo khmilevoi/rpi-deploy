@@ -36,7 +36,7 @@ pub struct ApiError(pub DomainError);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self.0 {
-            DomainError::DeployInProgress(_) => StatusCode::CONFLICT,
+            DomainError::Conflict(_) => StatusCode::CONFLICT,
             DomainError::NotFound(_) => StatusCode::NOT_FOUND,
             DomainError::Invalid(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -84,20 +84,23 @@ async fn create_deployment(
     }
     let git_ref = DeployRef::parse(req.git_ref.as_deref().unwrap_or(&config.branch));
 
-    let permit = state.deploy.try_begin(&config.name).map_err(ApiError)?;
     let deployment_id = state.ids.new_id();
     let sink = state.hub.register(&deployment_id);
+    let outcome = state
+        .scheduler
+        .submit(deployment_id.clone(), config, git_ref, sink)
+        .await
+        .map_err(ApiError)?;
+    let queued = !matches!(outcome, pi_application::scheduler::SubmitOutcome::Started);
 
-    let deploy = Arc::clone(&state.deploy);
-    let id = deployment_id.clone();
-    tokio::spawn(async move {
-        let cancel = tokio_util::sync::CancellationToken::new();
-        if let Err(err) = deploy.execute(permit, id, config, git_ref, sink, cancel).await {
-            tracing::warn!("deploy failed: {err}");
-        }
-    });
-
-    Ok((StatusCode::ACCEPTED, Json(DeployAccepted { deployment_id })).into_response())
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(DeployAccepted {
+            deployment_id,
+            queued,
+        }),
+    )
+        .into_response())
 }
 
 async fn get_deployment(
@@ -316,6 +319,11 @@ mod tests {
             StageTimeouts::default(),
             1,
         );
+        let scheduler = pi_application::scheduler::DeployScheduler::new(
+            deploy as Arc<dyn pi_application::scheduler::DeployRunner>,
+            Arc::clone(&history),
+            SystemClock::new(),
+        );
         let list = ListProjects::new(projects.clone(), Arc::clone(&runtime));
         let send_env = SendEnv::new(
             secrets.clone(),
@@ -327,7 +335,7 @@ mod tests {
         );
         let env_keys = ListEnvKeys::new(secrets);
         AppState {
-            deploy,
+            scheduler,
             list,
             history,
             hub: DeployEventsHub::new(),
@@ -419,7 +427,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             let (status, json) =
                 request(app.clone(), get_req(&format!("/v1/deployments/{id}"))).await;
-            // 404 is OK briefly while record_started hasn't committed yet
+            // 404 is OK briefly while the async deploy task is still starting.
             if status == StatusCode::NOT_FOUND {
                 continue;
             }
@@ -438,7 +446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_deploy_of_same_project_is_409() {
+    async fn concurrent_deploys_queue_with_latest_wins() {
         struct GatedSource(Arc<tokio::sync::Notify>);
 
         #[async_trait::async_trait]
@@ -469,18 +477,40 @@ mod tests {
             Arc::new(ok_runtime()),
         ));
 
-        let (status, _) = request(
-            app.clone(),
-            post_json("/v1/deployments", &deploy_body("rateme")),
-        )
-        .await;
-        assert_eq!(status, StatusCode::ACCEPTED);
         let (status, json) = request(
             app.clone(),
             post_json("/v1/deployments", &deploy_body("rateme")),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(json["queued"], false);
+
+        let (status, json) = request(
+            app.clone(),
+            post_json("/v1/deployments", &deploy_body("rateme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        assert_eq!(json["queued"], true);
+        let superseded_id = json["deployment_id"].as_str().unwrap().to_string();
+
+        let (status, json) = request(
+            app.clone(),
+            post_json("/v1/deployments", &deploy_body("rateme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(json["queued"], true);
+
+        let (status, json) = request(
+            app.clone(),
+            get_req(&format!("/v1/deployments/{superseded_id}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "superseded");
+
+        gate.notify_one();
         gate.notify_one();
     }
 

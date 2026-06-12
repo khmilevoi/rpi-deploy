@@ -4,6 +4,7 @@ use pi_application::deploy::DeployProject;
 use pi_application::env::{ListEnvKeys, SendEnv};
 use pi_application::gc::RunGc;
 use pi_application::list::ListProjects;
+use pi_application::scheduler::{DeployRunner, DeployScheduler};
 use pi_domain::contracts::{DeploymentHistory, IdGen, Ingress};
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
 use pi_infrastructure::disk::SysinfoDiskProbe;
@@ -23,7 +24,7 @@ use crate::agent::config::AgentConfig;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub deploy: Arc<DeployProject>,
+    pub scheduler: Arc<DeployScheduler>,
     pub list: Arc<ListProjects>,
     pub history: Arc<dyn DeploymentHistory>,
     pub hub: Arc<DeployEventsHub>,
@@ -68,6 +69,11 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
         config.stage_timeouts()?,
         config.build_concurrency,
     );
+    let scheduler = DeployScheduler::new(
+        deploy as Arc<dyn DeployRunner>,
+        Arc::clone(&history),
+        SystemClock::new(),
+    );
     let list = ListProjects::new(projects.clone(), runtime.clone());
     let send_env = SendEnv::new(
         secrets.clone(),
@@ -80,7 +86,7 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
     let env_keys = ListEnvKeys::new(secrets);
 
     Ok(AppState {
-        deploy,
+        scheduler,
         list,
         history,
         hub: DeployEventsHub::new(),
