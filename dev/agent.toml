@@ -5,3 +5,14 @@ tcp = "127.0.0.1:7700"
 # [cloudflared]                 # v0.2: auto-ingress; omit to disable
 # config = "/var/lib/pi/cloudflared/config.yml"
 # tunnel = "home"
+
+# build_concurrency = 1          # global build semaphore size (§8.1)
+# history_keep = 50              # deployments kept per project (§18)
+
+# [timeouts]                     # agent-wide stage timeout defaults (§8.1)
+# fetch = "2m"
+# build = "30m"
+# up = "5m"
+
+# [gc]
+# disk_threshold_percent = 85    # builder prune above this disk usage (§8.1)

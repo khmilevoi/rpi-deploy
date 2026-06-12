@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::duration::parse_duration_secs;
 use pi_domain::entities::{HealthcheckConfig, ProjectConfig, StageTimeoutOverrides};
 use serde::Deserialize;
 
@@ -11,6 +12,8 @@ pub struct PiToml {
     #[serde(default)]
     pub build: BuildSection,
     pub ingress: IngressSection,
+    #[serde(default)]
+    pub timeouts: TimeoutsSection,
     #[serde(default)]
     pub healthcheck: HealthcheckSection,
     #[serde(default)]
@@ -58,6 +61,14 @@ pub struct IngressSection {
     pub port: u16,
 }
 
+/// [timeouts] in pi.toml — per-project stage overrides (§12, §8.1).
+#[derive(Debug, Default, Deserialize)]
+pub struct TimeoutsSection {
+    pub fetch: Option<String>,
+    pub build: Option<String>,
+    pub up: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct HealthcheckSection {
     pub path: Option<String>,
@@ -86,22 +97,6 @@ fn default_env_file() -> String {
     ".env".into()
 }
 
-pub(crate) fn parse_duration_secs(s: &str) -> Result<u64, String> {
-    let s = s.trim();
-    let (digits, mult) = if let Some(d) = s.strip_suffix('m') {
-        (d, 60)
-    } else if let Some(d) = s.strip_suffix('s') {
-        (d, 1)
-    } else {
-        (s, 1)
-    };
-    digits
-        .trim()
-        .parse::<u64>()
-        .map(|n| n * mult)
-        .map_err(|_| format!("invalid duration '{s}' (expected like \"60s\" or \"2m\")"))
-}
-
 fn validate_expect(expect: &str) -> Result<(), String> {
     let ok = matches!(expect, "2xx" | "3xx")
         || (expect.len() == 3 && expect.chars().all(|c| c.is_ascii_digit()));
@@ -126,6 +121,16 @@ impl PiToml {
         if let Some(timeout) = &parsed.healthcheck.timeout {
             parse_duration_secs(timeout)
                 .map_err(|e| anyhow::anyhow!("pi.toml [healthcheck]: {e}"))?;
+        }
+        for (field, value) in [
+            ("fetch", &parsed.timeouts.fetch),
+            ("build", &parsed.timeouts.build),
+            ("up", &parsed.timeouts.up),
+        ] {
+            if let Some(timeout) = value {
+                parse_duration_secs(timeout)
+                    .map_err(|e| anyhow::anyhow!("pi.toml [timeouts].{field}: {e}"))?;
+            }
         }
         if let Some(expect) = &parsed.healthcheck.expect {
             validate_expect(expect).map_err(|e| anyhow::anyhow!("pi.toml [healthcheck]: {e}"))?;
@@ -162,7 +167,23 @@ impl PiToml {
                     .and_then(|t| parse_duration_secs(t).ok())
                     .unwrap_or(60),
             },
-            timeouts: StageTimeoutOverrides::default(),
+            timeouts: StageTimeoutOverrides {
+                fetch_secs: self
+                    .timeouts
+                    .fetch
+                    .as_deref()
+                    .and_then(|t| parse_duration_secs(t).ok()),
+                build_secs: self
+                    .timeouts
+                    .build
+                    .as_deref()
+                    .and_then(|t| parse_duration_secs(t).ok()),
+                up_secs: self
+                    .timeouts
+                    .up
+                    .as_deref()
+                    .and_then(|t| parse_duration_secs(t).ok()),
+            },
         }
     }
 }
@@ -255,10 +276,23 @@ file = ".env"
     }
 
     #[test]
-    fn parse_duration_secs_supports_s_m_and_bare_numbers() {
-        assert_eq!(parse_duration_secs("60s").unwrap(), 60);
-        assert_eq!(parse_duration_secs("2m").unwrap(), 120);
-        assert_eq!(parse_duration_secs("90").unwrap(), 90);
-        assert!(parse_duration_secs("soon").is_err());
+    fn timeouts_section_maps_to_overrides_and_is_validated() {
+        let toml = SAMPLE.replace(
+            "[healthcheck]",
+            "[timeouts]\nfetch = \"3m\"\nup = \"120s\"\n\n[healthcheck]",
+        );
+        let config = PiToml::parse(&toml).unwrap().to_project_config();
+        assert_eq!(config.timeouts.fetch_secs, Some(180));
+        assert_eq!(config.timeouts.build_secs, None, "not set -> agent default");
+        assert_eq!(config.timeouts.up_secs, Some(120));
+
+        let bad = SAMPLE.replace("[healthcheck]", "[timeouts]\nbuild = \"soon\"\n\n[healthcheck]");
+        assert!(PiToml::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn missing_timeouts_section_means_no_overrides() {
+        let config = PiToml::parse(SAMPLE).unwrap().to_project_config();
+        assert_eq!(config.timeouts, Default::default());
     }
 }

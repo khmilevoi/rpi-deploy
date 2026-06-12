@@ -20,6 +20,13 @@ pub struct HealthcheckDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeoutsDto {
+    pub fetch_secs: Option<u64>,
+    pub build_secs: Option<u64>,
+    pub up_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectDto {
     pub name: String,
     pub repo: String,
@@ -30,6 +37,8 @@ pub struct ProjectDto {
     pub hostname: Option<String>,
     #[serde(default)]
     pub healthcheck: Option<HealthcheckDto>,
+    #[serde(default)]
+    pub timeouts: Option<TimeoutsDto>,
 }
 
 impl From<ProjectDto> for ProjectConfig {
@@ -50,7 +59,14 @@ impl From<ProjectDto> for ProjectConfig {
                     timeout_secs: h.timeout_secs.unwrap_or(60),
                 })
                 .unwrap_or_default(),
-            timeouts: StageTimeoutOverrides::default(),
+            timeouts: dto
+                .timeouts
+                .map(|t| StageTimeoutOverrides {
+                    fetch_secs: t.fetch_secs,
+                    build_secs: t.build_secs,
+                    up_secs: t.up_secs,
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -69,6 +85,11 @@ impl From<&ProjectConfig> for ProjectDto {
                 path: config.healthcheck.path.clone(),
                 expect: config.healthcheck.expect.clone(),
                 timeout_secs: Some(config.healthcheck.timeout_secs),
+            }),
+            timeouts: Some(TimeoutsDto {
+                fetch_secs: config.timeouts.fetch_secs,
+                build_secs: config.timeouts.build_secs,
+                up_secs: config.timeouts.up_secs,
             }),
         }
     }
@@ -191,6 +212,7 @@ mod tests {
             port: 3000,
             hostname: None,
             healthcheck: None,
+            timeouts: None,
         }
         .into();
         config.healthcheck.path = Some("/health".into());
@@ -198,5 +220,19 @@ mod tests {
         let dto = ProjectDto::from(&config);
         let back: ProjectConfig = dto.into();
         assert_eq!(back.healthcheck, config.healthcheck);
+    }
+
+    #[test]
+    fn timeouts_roundtrip_through_dto_and_default_when_absent() {
+        let json = r#"{"project":{"name":"a","repo":"r","branch":"main","compose":"docker-compose.yml","service":"web","port":3000,"hostname":null},"ref":null}"#;
+        let req: DeployRequest = serde_json::from_str(json).unwrap();
+        let config: ProjectConfig = req.project.into();
+        assert_eq!(config.timeouts, Default::default(), "v0.2 payloads still work");
+
+        let mut config = config;
+        config.timeouts.build_secs = Some(3600);
+        let dto = ProjectDto::from(&config);
+        let back: ProjectConfig = dto.into();
+        assert_eq!(back.timeouts.build_secs, Some(3600));
     }
 }
