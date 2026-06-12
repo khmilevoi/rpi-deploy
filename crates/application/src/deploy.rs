@@ -111,12 +111,17 @@ impl DeployProject {
             project: config.name.clone(),
             git_ref: git_ref.as_str().to_string(),
             commit_sha: None,
-            status: DeploymentStatus::Running,
+            status: DeploymentStatus::Queued,
             started_at: self.clock.now_unix(),
             finished_at: None,
             log_tail: String::new(),
         };
-        self.history.record_started(&deployment).await?;
+        self.history.record_queued(&deployment).await?;
+        deployment.started_at = self.clock.now_unix();
+        deployment.status = DeploymentStatus::Running;
+        self.history
+            .mark_running(&deployment.id, deployment.started_at)
+            .await?;
 
         let result = self
             .run_stages(&config, &git_ref, log.clone(), &masker)
@@ -390,13 +395,22 @@ mod tests {
             });
         let stage_order = Arc::clone(&order);
         m.history
-            .expect_record_started()
+            .expect_record_queued()
             .withf(|d| {
-                d.id == "dep-1" && d.status == DeploymentStatus::Running && d.git_ref == "main"
+                d.id == "dep-1" && d.status == DeploymentStatus::Queued && d.git_ref == "main"
             })
             .times(1)
             .returning(move |_| {
-                stage_order.lock().unwrap().push("started");
+                stage_order.lock().unwrap().push("queued");
+                Ok(())
+            });
+        let stage_order = Arc::clone(&order);
+        m.history
+            .expect_mark_running()
+            .withf(|id, started_at| id == "dep-1" && *started_at == 100)
+            .times(1)
+            .returning(move |_, _| {
+                stage_order.lock().unwrap().push("running");
                 Ok(())
             });
         let stage_order = Arc::clone(&order);
@@ -440,8 +454,8 @@ mod tests {
         assert_eq!(
             *order.lock().unwrap(),
             vec![
-                "started", "upsert", "fetch", "secrets", "override", "build", "up", "health",
-                "ingress", "finished"
+                "queued", "running", "upsert", "fetch", "secrets", "override", "build", "up",
+                "health", "ingress", "finished"
             ]
         );
     }
@@ -475,7 +489,8 @@ mod tests {
         m.runtime.expect_up().times(0);
         m.health.expect_check().times(0);
         m.ingress.expect_upsert().times(0);
-        m.history.expect_record_started().returning(|_| Ok(()));
+        m.history.expect_record_queued().returning(|_| Ok(()));
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
             .withf(|id, status, sha, _at, tail| {
@@ -550,7 +565,8 @@ mod tests {
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
-        m.history.expect_record_started().returning(|_| Ok(()));
+        m.history.expect_record_queued().returning(|_| Ok(()));
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
             .returning(|_, _, _, _, _| Ok(()));
@@ -596,7 +612,8 @@ mod tests {
         m.overrides
             .expect_write()
             .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
-        m.history.expect_record_started().returning(|_| Ok(()));
+        m.history.expect_record_queued().returning(|_| Ok(()));
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
             .returning(|_, _, _, _, _| Ok(()));

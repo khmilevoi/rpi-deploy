@@ -287,7 +287,7 @@ mod tests {
 
         let db = Db::open(&dir.join("state.db")).unwrap();
         let projects = SqliteProjectRepo::new(db.clone(), 8000, 8999);
-        let history: Arc<dyn pi_domain::contracts::DeploymentHistory> = SqliteHistory::new(db);
+        let history: Arc<dyn pi_domain::contracts::DeploymentHistory> = SqliteHistory::new(db, 50);
         let overrides = FsOverrideStore::new(dir.join("overrides"));
         let secrets = EncryptedFileStore::open(dir).unwrap();
         let health = HybridHealthGate::with_interval(

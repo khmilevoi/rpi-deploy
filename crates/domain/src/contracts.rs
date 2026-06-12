@@ -54,11 +54,15 @@ pub trait ProjectRepository: Send + Sync {
     async fn list(&self) -> Result<Vec<Project>, DomainError>;
 }
 
-/// Deployment history (§6).
+/// Deployment history (§6, §18).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait DeploymentHistory: Send + Sync {
-    async fn record_started(&self, deployment: &Deployment) -> Result<(), DomainError>;
+    /// INSERT the deployment row (normally status Queued). The adapter prunes
+    /// old terminal rows of the project beyond its retention right after (§18).
+    async fn record_queued(&self, deployment: &Deployment) -> Result<(), DomainError>;
+    /// Queued -> Running; refreshes started_at to the actual start moment.
+    async fn mark_running(&self, id: &str, started_at: i64) -> Result<(), DomainError>;
     async fn record_finished<'a>(
         &self,
         id: &str,
@@ -68,6 +72,11 @@ pub trait DeploymentHistory: Send + Sync {
         log_tail: &str,
     ) -> Result<(), DomainError>;
     async fn get(&self, id: &str) -> Result<Option<Deployment>, DomainError>;
+    /// Non-terminal deployments of a project (queued/running), newest first.
+    async fn active(&self, project: &str) -> Result<Vec<Deployment>, DomainError>;
+    /// Crash-recovery sweep at agent start (§8.1): queued/running -> interrupted.
+    /// Returns the number of rows swept.
+    async fn sweep_interrupted(&self, finished_at: i64) -> Result<u64, DomainError>;
 }
 
 /// Writes compose-override with mapping 127.0.0.1:<host> → <container> (§12.1).

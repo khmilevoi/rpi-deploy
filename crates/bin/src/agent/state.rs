@@ -35,7 +35,7 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
     let db = Db::open(&config.data_dir.join("state.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let projects = SqliteProjectRepo::new(db.clone(), config.port_min, config.port_max);
-    let history: Arc<dyn DeploymentHistory> = SqliteHistory::new(db);
+    let history: Arc<dyn DeploymentHistory> = SqliteHistory::new(db, config.history_keep);
     let source = GitSource::new(&config.data_dir);
     let runtime = DockerComposeRuntime::new();
     let overrides = FsOverrideStore::new(config.data_dir.join("overrides"));
