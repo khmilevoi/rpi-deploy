@@ -95,6 +95,20 @@ pub async fn env_send(apply: bool, server: Option<String>) -> anyhow::Result<()>
     Ok(())
 }
 
+pub async fn gc(server: Option<String>) -> anyhow::Result<()> {
+    let profile = ClientConfig::load()?.select(server.as_deref())?;
+    let tunnel = SshTunnel::open(&profile).await?;
+    let api = ApiClient::new(tunnel.base_url.clone());
+
+    let resp = api.gc().await?;
+    eprintln!(
+        "gc done: disk {}% used; build cache pruned: {}",
+        resp.disk_used_percent,
+        if resp.builder_pruned { "yes" } else { "no" }
+    );
+    Ok(())
+}
+
 pub async fn env_ls(server: Option<String>) -> anyhow::Result<()> {
     let pitoml = PiToml::load(Path::new("pi.toml"))?;
     let project_name = pitoml.project.name.clone();

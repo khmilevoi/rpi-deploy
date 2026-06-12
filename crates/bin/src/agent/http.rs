@@ -14,12 +14,13 @@ use pi_infrastructure::events::DeployEvent;
 use crate::agent::state::AppState;
 use crate::proto::{
     DeployAccepted, DeployRequest, DeploymentDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
-    ProjectViewDto, VersionInfo,
+    GcResponse, ProjectViewDto, VersionInfo,
 };
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/version", get(version))
+        .route("/v1/gc", post(run_gc))
         .route("/v1/deployments", post(create_deployment))
         .route(
             "/v1/deployments/{id}",
@@ -108,6 +109,19 @@ async fn create_deployment(
         }),
     )
         .into_response())
+}
+
+/// POST /v1/gc (§8.1): same RunGc as the post-deploy stage, on demand.
+async fn run_gc(State(state): State<AppState>) -> Result<Json<GcResponse>, ApiError> {
+    let report = state
+        .gc
+        .execute(Arc::new(TracingSink))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(GcResponse {
+        disk_used_percent: report.disk_used_percent,
+        builder_pruned: report.builder_pruned,
+    }))
 }
 
 async fn get_deployment(
@@ -356,7 +370,7 @@ mod tests {
             health,
             DisabledIngress::new(),
             SystemClock::new(),
-            gc,
+            Arc::clone(&gc),
             StageTimeouts::default(),
             1,
         );
@@ -383,6 +397,7 @@ mod tests {
             ids: UuidGen::new(),
             send_env,
             env_keys,
+            gc,
         }
     }
 
@@ -425,6 +440,12 @@ mod tests {
 
     fn get_req(uri: &str) -> axum::http::Request<axum::body::Body> {
         axum::http::Request::get(uri)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    fn post_empty(uri: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::post(uri)
             .body(axum::body::Body::empty())
             .unwrap()
     }
@@ -559,6 +580,20 @@ mod tests {
 
         gate.notify_one();
         gate.notify_one();
+    }
+
+    #[tokio::test]
+    async fn gc_endpoint_reports_disk_and_prune_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, json) = request(app, post_empty("/v1/gc")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["disk_used_percent"], 10);
+        assert_eq!(json["builder_pruned"], false);
     }
 
     #[tokio::test]

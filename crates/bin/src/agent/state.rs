@@ -31,6 +31,7 @@ pub struct AppState {
     pub ids: Arc<dyn IdGen>,
     pub send_env: Arc<SendEnv>,
     pub env_keys: Arc<ListEnvKeys>,
+    pub gc: Arc<RunGc>,
 }
 
 pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
@@ -93,5 +94,6 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
         ids: UuidGen::new(),
         send_env,
         env_keys,
+        gc,
     })
 }

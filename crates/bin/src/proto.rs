@@ -114,6 +114,12 @@ pub struct EnvKeysResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GcResponse {
+    pub disk_used_percent: u8,
+    pub builder_pruned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployRequest {
     pub project: ProjectDto,
     #[serde(rename = "ref")]

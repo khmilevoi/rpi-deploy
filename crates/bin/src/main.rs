@@ -38,6 +38,11 @@ enum Cmd {
         #[arg(long)]
         server: Option<String>,
     },
+    /// Prune docker images and build cache on the agent (§8.1)
+    Gc {
+        #[arg(long)]
+        server: Option<String>,
+    },
     /// Manage project secrets
     Env {
         #[command(subcommand)]
@@ -101,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Ls { server } => cli::commands::ls(server).await,
+        Cmd::Gc { server } => cli::commands::gc(server).await,
         Cmd::Env {
             cmd: EnvCmd::Send { apply, server },
         } => cli::commands::env_send(apply, server).await,

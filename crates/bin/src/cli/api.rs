@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::cli::sse::SseParser;
 use crate::proto::{
     DeployAccepted, DeployRequest, DeploymentDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
-    ProjectViewDto, VersionInfo,
+    GcResponse, ProjectViewDto, VersionInfo,
 };
 
 async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
@@ -77,6 +77,15 @@ impl ApiClient {
             .await?;
         let json: serde_json::Value = extract_error(resp).await?.json().await?;
         Ok(json["status"].as_str().unwrap_or("unknown").to_string())
+    }
+
+    pub async fn gc(&self) -> anyhow::Result<GcResponse> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/gc", self.base))
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
     }
 
     pub async fn follow_logs(
