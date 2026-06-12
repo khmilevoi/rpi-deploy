@@ -548,6 +548,10 @@ mod tests {
                     commit_sha: SHA.into(),
                 })
             }
+
+            async fn cleanup(&self, _project_name: &str) -> Result<(), DomainError> {
+                Ok(())
+            }
         }
 
         let dir = tempfile::tempdir().unwrap();
@@ -710,6 +714,10 @@ mod tests {
                 _l: Arc<dyn LogSink>,
             ) -> Result<FetchedSource, DomainError> {
                 std::future::pending().await
+            }
+
+            async fn cleanup(&self, _project_name: &str) -> Result<(), DomainError> {
+                Ok(())
             }
         }
 

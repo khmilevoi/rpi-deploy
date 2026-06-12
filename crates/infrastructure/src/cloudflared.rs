@@ -60,6 +60,27 @@ pub(crate) fn upsert_ingress_rule(
     Ok(true)
 }
 
+pub(crate) fn remove_ingress_rule(
+    doc: &mut serde_yaml::Value,
+    hostname: &str,
+) -> Result<bool, String> {
+    let map = doc
+        .as_mapping_mut()
+        .ok_or("config.yml: top level must be a mapping")?;
+    let key = serde_yaml::Value::from("ingress");
+    let Some(rules) = map.get_mut(&key).and_then(|v| v.as_sequence_mut()) else {
+        return Ok(false);
+    };
+    let Some(pos) = rules
+        .iter()
+        .position(|r| r.get("hostname").and_then(|h| h.as_str()) == Some(hostname))
+    else {
+        return Ok(false);
+    };
+    rules.remove(pos);
+    Ok(true)
+}
+
 /// `cloudflared tunnel route dns` fails when the record exists — tolerated.
 pub(crate) fn is_already_exists(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
@@ -132,6 +153,41 @@ impl Ingress for CloudflaredIngress {
         }
         Ok(())
     }
+
+    async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
+        let text = tokio::fs::read_to_string(&self.config_path)
+            .await
+            .map_err(|e| ingress_err(format!("cannot read {}: {e}", self.config_path.display())))?;
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(&text).map_err(ingress_err)?;
+        let changed = remove_ingress_rule(&mut doc, hostname).map_err(ingress_err)?;
+        if !changed {
+            log.line(&format!("ingress: no route for {hostname}; cloudflared untouched"));
+            return Ok(());
+        }
+        let updated = serde_yaml::to_string(&doc).map_err(ingress_err)?;
+        tokio::fs::write(&self.config_path, updated)
+            .await
+            .map_err(ingress_err)?;
+        log.line(&format!("ingress: removed route for {hostname}"));
+
+        let (program, args) = self
+            .restart
+            .split_first()
+            .ok_or_else(|| ingress_err("empty cloudflared restart command"))?;
+        let mut restart_cmd = Command::new(program);
+        restart_cmd.args(args);
+        if let Err(err) = run_capture(restart_cmd).await {
+            if let Err(restore) = tokio::fs::write(&self.config_path, &text).await {
+                return Err(ingress_err(format!(
+                    "restart cloudflared: {err}; additionally failed to restore {}: {restore}",
+                    self.config_path.display()
+                )));
+            }
+            return Err(ingress_err(format!("restart cloudflared: {err}")));
+        }
+        log.line("ingress: cloudflared restarted");
+        Ok(())
+    }
 }
 
 impl CloudflaredIngress {
@@ -186,6 +242,13 @@ impl Ingress for DisabledIngress {
         log.line(&format!(
             "ingress: [cloudflared] is not configured in agent.toml; \
              route {hostname} -> http://127.0.0.1:{host_port} manually"
+        ));
+        Ok(())
+    }
+
+    async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
+        log.line(&format!(
+            "ingress: [cloudflared] is not configured; remove DNS/routing for {hostname} manually"
         ));
         Ok(())
     }

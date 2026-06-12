@@ -1,10 +1,11 @@
 use std::ffi::OsString;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_domain::contracts::{ContainerRuntime, LogSink};
-use pi_domain::entities::{ComposeStack, ServiceState};
+use pi_domain::entities::{ComposeStack, LifecycleAction, ServiceState, ServiceStats};
 use pi_domain::error::DomainError;
 use tokio::process::Command;
 
@@ -28,6 +29,44 @@ pub(crate) fn prune_builder_args() -> Vec<String> {
     ]
 }
 
+pub(crate) fn logs_args(project_name: &str, tail: usize, follow: bool) -> Vec<String> {
+    let mut args = vec![
+        "compose".to_string(),
+        "-p".to_string(),
+        project_name.to_string(),
+        "logs".to_string(),
+        "--tail".to_string(),
+        tail.to_string(),
+    ];
+    if follow {
+        args.push("-f".to_string());
+    }
+    args
+}
+
+pub(crate) fn lifecycle_args(project_name: &str, action: LifecycleAction) -> Vec<String> {
+    vec![
+        "compose".to_string(),
+        "-p".to_string(),
+        project_name.to_string(),
+        action.as_str().to_string(),
+    ]
+}
+
+pub(crate) fn down_args(project_name: &str, remove_volumes: bool) -> Vec<String> {
+    let mut args = vec![
+        "compose".to_string(),
+        "-p".to_string(),
+        project_name.to_string(),
+        "down".to_string(),
+        "--remove-orphans".to_string(),
+    ];
+    if remove_volumes {
+        args.push("--volumes".to_string());
+    }
+    args
+}
+
 pub(crate) fn file_chain(stack: &ComposeStack) -> Vec<PathBuf> {
     let mut files = vec![stack.compose_file.clone()];
     let repo_override = stack.workdir.join("docker-compose.override.yml");
@@ -49,15 +88,18 @@ pub(crate) fn compose_args(project_name: &str, files: &[PathBuf], tail: &[&str])
 }
 
 pub(crate) fn parse_ps_json(output: &str) -> Vec<ServiceState> {
+    json_lines(output).iter().filter_map(service_state).collect()
+}
+
+/// One JSON document per line (modern compose/docker) or a legacy array.
+pub(crate) fn json_lines(output: &str) -> Vec<serde_json::Value> {
     let trimmed = output.trim_start();
     if trimmed.starts_with('[') {
-        return serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
-            .map(|items| items.iter().filter_map(service_state).collect())
-            .unwrap_or_default();
+        return serde_json::from_str::<Vec<serde_json::Value>>(trimmed).unwrap_or_default();
     }
     output
         .lines()
-        .filter_map(|line| service_state(&serde_json::from_str(line).ok()?))
+        .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
 }
 
@@ -72,6 +114,82 @@ fn service_state(v: &serde_json::Value) -> Option<ServiceState> {
         state: v.get("State")?.as_str()?.to_string(),
         health,
     })
+}
+
+pub(crate) fn container_names(ps_output: &str) -> Vec<String> {
+    json_lines(ps_output)
+        .iter()
+        .filter_map(|v| v.get("Name").and_then(|n| n.as_str()).map(str::to_string))
+        .collect()
+}
+
+pub(crate) fn parse_percent(s: &str) -> Option<f64> {
+    s.strip_suffix('%')?.parse().ok()
+}
+
+pub(crate) fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let split = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let value: f64 = num.parse().ok()?;
+    let factor = match unit.trim() {
+        "B" | "" => 1.0,
+        "kB" | "KB" => 1_000.0,
+        "MB" => 1_000_000.0,
+        "GB" => 1_000_000_000.0,
+        "KiB" => 1024.0,
+        "MiB" => 1024.0 * 1024.0,
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((value * factor) as u64)
+}
+
+pub(crate) fn parse_mem_usage(s: &str) -> Option<(u64, u64)> {
+    let (used, limit) = s.split_once('/')?;
+    Some((parse_size(used.trim())?, parse_size(limit.trim())?))
+}
+
+pub(crate) fn parse_stats_json(ps_output: &str, stats_output: &str) -> Vec<ServiceStats> {
+    let services: HashMap<String, String> = json_lines(ps_output)
+        .iter()
+        .filter_map(|v| {
+            Some((
+                v.get("Name")?.as_str()?.to_string(),
+                v.get("Service")?.as_str()?.to_string(),
+            ))
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for v in json_lines(stats_output) {
+        let Some(name) = v.get("Name").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        let Some(service) = services.get(name) else {
+            continue;
+        };
+        let Some(cpu_percent) = v.get("CPUPerc").and_then(|p| p.as_str()).and_then(parse_percent)
+        else {
+            continue;
+        };
+        let Some((mem_used_bytes, mem_limit_bytes)) = v
+            .get("MemUsage")
+            .and_then(|m| m.as_str())
+            .and_then(parse_mem_usage)
+        else {
+            continue;
+        };
+        out.push(ServiceStats {
+            service: service.clone(),
+            cpu_percent,
+            mem_used_bytes,
+            mem_limit_bytes,
+        });
+    }
+    out
 }
 
 pub struct DockerComposeRuntime;
@@ -127,12 +245,69 @@ impl ContainerRuntime for DockerComposeRuntime {
         cmd.args(prune_builder_args());
         run_streamed(cmd, log).await.map_err(DomainError::Runtime)
     }
+
+    async fn logs(
+        &self,
+        project_name: &str,
+        tail: usize,
+        follow: bool,
+        log: Arc<dyn LogSink>,
+    ) -> Result<(), DomainError> {
+        log.line(&format!("docker compose logs --tail {tail} ..."));
+        let mut cmd = Command::new("docker");
+        cmd.args(logs_args(project_name, tail, follow));
+        run_streamed(cmd, log).await.map_err(DomainError::Runtime)
+    }
+
+    async fn stats(&self, project_name: &str) -> Result<Vec<ServiceStats>, DomainError> {
+        let mut ps = Command::new("docker");
+        ps.args(["compose", "-p", project_name, "ps", "--format", "json"]);
+        let ps_output = run_capture(ps).await.map_err(DomainError::Runtime)?;
+        let names = container_names(&ps_output);
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut stats = Command::new("docker");
+        stats.args(["stats", "--no-stream", "--format", "json"]);
+        stats.args(names);
+        let stats_output = run_capture(stats).await.map_err(DomainError::Runtime)?;
+        Ok(parse_stats_json(&ps_output, &stats_output))
+    }
+
+    async fn lifecycle(
+        &self,
+        project_name: &str,
+        action: LifecycleAction,
+        log: Arc<dyn LogSink>,
+    ) -> Result<(), DomainError> {
+        log.line(&format!("docker compose {} ...", action.as_str()));
+        let mut cmd = Command::new("docker");
+        cmd.args(lifecycle_args(project_name, action));
+        run_streamed(cmd, log).await.map_err(DomainError::Runtime)
+    }
+
+    async fn down(
+        &self,
+        project_name: &str,
+        remove_volumes: bool,
+        log: Arc<dyn LogSink>,
+    ) -> Result<(), DomainError> {
+        log.line("docker compose down ...");
+        let mut cmd = Command::new("docker");
+        cmd.args(down_args(project_name, remove_volumes));
+        run_streamed(cmd, log).await.map_err(DomainError::Runtime)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
 
     fn stack(workdir: &std::path::Path) -> ComposeStack {
         ComposeStack {
@@ -198,6 +373,87 @@ mod tests {
                 format!("until={BUILDER_PRUNE_MAX_AGE}"),
             ]
         );
+    }
+
+    #[test]
+    fn logs_lifecycle_down_args_shapes() {
+        use pi_domain::entities::LifecycleAction;
+        assert_eq!(
+            logs_args("rateme", 100, false),
+            strings(&["compose", "-p", "rateme", "logs", "--tail", "100"])
+        );
+        assert_eq!(
+            logs_args("rateme", 50, true),
+            strings(&["compose", "-p", "rateme", "logs", "--tail", "50", "-f"])
+        );
+        assert_eq!(
+            lifecycle_args("rateme", LifecycleAction::Restart),
+            strings(&["compose", "-p", "rateme", "restart"])
+        );
+        assert_eq!(
+            down_args("rateme", false),
+            strings(&["compose", "-p", "rateme", "down", "--remove-orphans"])
+        );
+        assert_eq!(
+            down_args("rateme", true),
+            strings(&[
+                "compose",
+                "-p",
+                "rateme",
+                "down",
+                "--remove-orphans",
+                "--volumes"
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_docker_sizes_and_percents() {
+        assert_eq!(parse_percent("0.50%"), Some(0.5));
+        assert_eq!(parse_percent("nope"), None);
+        assert_eq!(parse_size("512B"), Some(512));
+        assert_eq!(parse_size("1.5KiB"), Some(1536));
+        assert_eq!(parse_size("12.5MiB"), Some(13_107_200));
+        assert_eq!(parse_size("1.9GiB"), Some(2_040_109_465));
+        assert_eq!(parse_size("2MB"), Some(2_000_000));
+        assert_eq!(parse_size("weird"), None);
+        assert_eq!(
+            parse_mem_usage("12.5MiB / 1.9GiB"),
+            Some((13_107_200, 2_040_109_465))
+        );
+    }
+
+    #[test]
+    fn parse_stats_json_joins_services_by_container_name() {
+        let ps = concat!(
+            r#"{"Name":"rateme-web-1","Service":"web","State":"running"}"#,
+            "\n",
+            r#"{"Name":"rateme-db-1","Service":"db","State":"running"}"#,
+            "\n",
+        );
+        let stats = concat!(
+            r#"{"Name":"rateme-web-1","CPUPerc":"1.25%","MemUsage":"100MiB / 1GiB"}"#,
+            "\n",
+            r#"{"Name":"rateme-db-1","CPUPerc":"0.00%","MemUsage":"50MiB / 1GiB"}"#,
+            "\n",
+            r#"{"Name":"other-app-1","CPUPerc":"9.99%","MemUsage":"1MiB / 1GiB"}"#,
+            "\n",
+        );
+        let out = parse_stats_json(ps, stats);
+        assert_eq!(out.len(), 2, "foreign containers are ignored");
+        assert_eq!(out[0].service, "web");
+        assert_eq!(out[0].cpu_percent, 1.25);
+        assert_eq!(out[0].mem_used_bytes, 100 * 1024 * 1024);
+        assert_eq!(out[0].mem_limit_bytes, 1024 * 1024 * 1024);
+        assert_eq!(out[1].service, "db");
+    }
+
+    #[test]
+    fn container_names_reads_both_ndjson_and_array() {
+        let ndjson = "{\"Name\":\"a-web-1\",\"Service\":\"web\"}\n";
+        assert_eq!(container_names(ndjson), vec!["a-web-1".to_string()]);
+        let array = r#"[{"Name":"a-web-1","Service":"web"}]"#;
+        assert_eq!(container_names(array), vec!["a-web-1".to_string()]);
     }
 
     #[test]

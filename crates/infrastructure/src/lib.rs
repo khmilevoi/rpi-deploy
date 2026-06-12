@@ -10,9 +10,11 @@ pub mod health;
 pub mod history;
 pub mod overrides;
 pub mod process;
+pub mod probe;
 pub mod repo;
 pub mod secrets;
 pub mod sqlite;
+pub mod stats;
 pub mod sys;
 #[cfg(test)]
 pub(crate) mod test_sink;

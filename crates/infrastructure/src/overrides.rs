@@ -39,6 +39,15 @@ impl OverrideStore for FsOverrideStore {
             .map_err(io_err)?;
         Ok(path)
     }
+
+    async fn remove(&self, project: &str) -> Result<(), DomainError> {
+        let io_err = |e: std::io::Error| DomainError::Storage(format!("override remove: {e}"));
+        match tokio::fs::remove_file(self.dir.join(format!("{project}.yml"))).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(e)),
+        }
+    }
 }
 
 #[cfg(test)]
