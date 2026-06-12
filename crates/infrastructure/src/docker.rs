@@ -10,6 +10,24 @@ use tokio::process::Command;
 
 use crate::process::{run_capture, run_streamed};
 
+/// Age filter for `docker builder prune` (§8.1): recent cache survives so
+/// rebuilds stay fast; only the disk threshold is configurable (§22).
+pub(crate) const BUILDER_PRUNE_MAX_AGE: &str = "24h";
+
+pub(crate) fn prune_images_args() -> Vec<&'static str> {
+    vec!["image", "prune", "-f"]
+}
+
+pub(crate) fn prune_builder_args() -> Vec<String> {
+    vec![
+        "builder".to_string(),
+        "prune".to_string(),
+        "-f".to_string(),
+        "--filter".to_string(),
+        format!("until={BUILDER_PRUNE_MAX_AGE}"),
+    ]
+}
+
 pub(crate) fn file_chain(stack: &ComposeStack) -> Vec<PathBuf> {
     let mut files = vec![stack.compose_file.clone()];
     let repo_override = stack.workdir.join("docker-compose.override.yml");
@@ -93,6 +111,22 @@ impl ContainerRuntime for DockerComposeRuntime {
         let out = run_capture(cmd).await.map_err(DomainError::Runtime)?;
         Ok(parse_ps_json(&out))
     }
+
+    async fn prune_images(&self, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
+        log.line("docker image prune -f ...");
+        let mut cmd = Command::new("docker");
+        cmd.args(prune_images_args());
+        run_streamed(cmd, log).await.map_err(DomainError::Runtime)
+    }
+
+    async fn prune_builder(&self, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
+        log.line(&format!(
+            "docker builder prune -f --filter until={BUILDER_PRUNE_MAX_AGE} ..."
+        ));
+        let mut cmd = Command::new("docker");
+        cmd.args(prune_builder_args());
+        run_streamed(cmd, log).await.map_err(DomainError::Runtime)
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +180,21 @@ mod tests {
         .map(Into::into)
         .collect();
         assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn prune_args_shapes() {
+        assert_eq!(prune_images_args(), vec!["image", "prune", "-f"]);
+        assert_eq!(
+            prune_builder_args(),
+            vec![
+                "builder".to_string(),
+                "prune".to_string(),
+                "-f".to_string(),
+                "--filter".to_string(),
+                format!("until={BUILDER_PRUNE_MAX_AGE}"),
+            ]
+        );
     }
 
     #[test]

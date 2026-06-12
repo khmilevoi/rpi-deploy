@@ -41,6 +41,11 @@ pub trait ContainerRuntime: Send + Sync {
     async fn build(&self, stack: &ComposeStack, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
     async fn up(&self, stack: &ComposeStack, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
     async fn ps(&self, project_name: &str) -> Result<Vec<ServiceState>, DomainError>;
+    /// `docker image prune -f` — dangling images only; build cache stays (§8.1).
+    async fn prune_images(&self, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
+    /// `docker builder prune -f` with an age filter — frees build cache when
+    /// the disk crosses the GC threshold (§8.1).
+    async fn prune_builder(&self, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
 }
 
 /// Project registry + port allocation (§6).
