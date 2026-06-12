@@ -91,7 +91,8 @@ async fn create_deployment(
     let deploy = Arc::clone(&state.deploy);
     let id = deployment_id.clone();
     tokio::spawn(async move {
-        if let Err(err) = deploy.execute(permit, id, config, git_ref, sink).await {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        if let Err(err) = deploy.execute(permit, id, config, git_ref, sink, cancel).await {
             tracing::warn!("deploy failed: {err}");
         }
     });
@@ -235,11 +236,12 @@ mod tests {
     use http_body_util::BodyExt;
     use pi_application::deploy::DeployProject;
     use pi_application::env::{ListEnvKeys, SendEnv};
+    use pi_application::gc::RunGc;
     use pi_application::list::ListProjects;
     use pi_domain::contracts::{
-        ContainerRuntime, LogSink, MockContainerRuntime, MockSource, Source,
+        ContainerRuntime, LogSink, MockContainerRuntime, MockDiskProbe, MockSource, Source,
     };
-    use pi_domain::entities::FetchedSource;
+    use pi_domain::entities::{FetchedSource, StageTimeouts};
     use pi_infrastructure::events::DeployEventsHub;
     use pi_infrastructure::history::SqliteHistory;
     use pi_infrastructure::overrides::FsOverrideStore;
@@ -265,6 +267,8 @@ mod tests {
         let mut runtime = MockContainerRuntime::new();
         runtime.expect_build().returning(|_, _| Ok(()));
         runtime.expect_up().returning(|_, _| Ok(()));
+        runtime.expect_prune_images().returning(|_| Ok(()));
+        runtime.expect_prune_builder().returning(|_| Ok(()));
         runtime.expect_ps().returning(|_| {
             Ok(vec![pi_domain::entities::ServiceState {
                 service: "web".into(),
@@ -294,6 +298,9 @@ mod tests {
             Arc::clone(&runtime),
             std::time::Duration::from_millis(10),
         );
+        let mut disk = MockDiskProbe::new();
+        disk.expect_used_percent().returning(|| Ok(10));
+        let gc = RunGc::new(Arc::clone(&runtime), Arc::new(disk), 85);
         let deploy = DeployProject::new(
             source.clone(),
             Arc::clone(&runtime),
@@ -305,6 +312,9 @@ mod tests {
             health,
             DisabledIngress::new(),
             SystemClock::new(),
+            gc,
+            StageTimeouts::default(),
+            1,
         );
         let list = ListProjects::new(projects.clone(), Arc::clone(&runtime));
         let send_env = SendEnv::new(

@@ -2,9 +2,11 @@ use std::sync::Arc;
 
 use pi_application::deploy::DeployProject;
 use pi_application::env::{ListEnvKeys, SendEnv};
+use pi_application::gc::RunGc;
 use pi_application::list::ListProjects;
 use pi_domain::contracts::{DeploymentHistory, IdGen, Ingress};
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
+use pi_infrastructure::disk::SysinfoDiskProbe;
 use pi_infrastructure::docker::DockerComposeRuntime;
 use pi_infrastructure::envfile::FsEnvFileWriter;
 use pi_infrastructure::events::DeployEventsHub;
@@ -38,6 +40,8 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
     let history: Arc<dyn DeploymentHistory> = SqliteHistory::new(db, config.history_keep);
     let source = GitSource::new(&config.data_dir);
     let runtime = DockerComposeRuntime::new();
+    let disk = SysinfoDiskProbe::new(&config.data_dir);
+    let gc = RunGc::new(runtime.clone(), disk, config.gc.disk_threshold_percent);
     let overrides = FsOverrideStore::new(config.data_dir.join("overrides"));
     let secrets = EncryptedFileStore::open(&config.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
     let env_files: Arc<dyn pi_domain::contracts::EnvFileWriter> = FsEnvFileWriter::new();
@@ -60,6 +64,9 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
         health,
         ingress,
         SystemClock::new(),
+        Arc::clone(&gc),
+        config.stage_timeouts()?,
+        config.build_concurrency,
     );
     let list = ListProjects::new(projects.clone(), runtime.clone());
     let send_env = SendEnv::new(

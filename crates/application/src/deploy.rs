@@ -4,9 +4,14 @@ use pi_domain::contracts::{
     Clock, ContainerRuntime, DeploymentHistory, EnvFileWriter, HealthGate, Ingress, LogSink,
     OverrideStore, ProjectRepository, SecretStore, Source,
 };
-use pi_domain::entities::{ComposeStack, DeployRef, Deployment, DeploymentStatus, ProjectConfig};
+use pi_domain::entities::{
+    ComposeStack, DeployRef, Deployment, DeploymentStatus, ProjectConfig, StageTimeouts,
+};
 use pi_domain::error::DomainError;
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
+use crate::gc::RunGc;
 use crate::locks::{DeployLocks, DeployPermit};
 use crate::mask::MaskingSink;
 use crate::tail::TailSink;
@@ -51,7 +56,28 @@ pub struct DeployProject {
     health: Arc<dyn HealthGate>,
     ingress: Arc<dyn Ingress>,
     clock: Arc<dyn Clock>,
+    gc: Arc<RunGc>,
+    timeouts: StageTimeouts,
+    /// §8.1: global build semaphore — parallel builds OOM the Pi.
+    build_sem: Semaphore,
     locks: Arc<DeployLocks>,
+}
+
+/// Wraps a deploy stage with its timeout (§8.1). On expiry the stage future is
+/// dropped — kill_on_drop in the process adapter kills the child — and the
+/// deploy fails as `timeout: <stage>`.
+async fn staged<T>(
+    stage: &str,
+    secs: u64,
+    fut: impl std::future::Future<Output = Result<T, DomainError>>,
+) -> Result<T, DomainError> {
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Ok(result) => result,
+        Err(_) => Err(DomainError::Timeout {
+            stage: stage.to_string(),
+            secs,
+        }),
+    }
 }
 
 impl DeployProject {
@@ -67,6 +93,9 @@ impl DeployProject {
         health: Arc<dyn HealthGate>,
         ingress: Arc<dyn Ingress>,
         clock: Arc<dyn Clock>,
+        gc: Arc<RunGc>,
+        timeouts: StageTimeouts,
+        build_slots: usize,
     ) -> Arc<DeployProject> {
         Arc::new(DeployProject {
             source,
@@ -79,6 +108,9 @@ impl DeployProject {
             health,
             ingress,
             clock,
+            gc,
+            timeouts,
+            build_sem: Semaphore::new(build_slots),
             locks: DeployLocks::new(),
         })
     }
@@ -97,6 +129,7 @@ impl DeployProject {
         config: ProjectConfig,
         git_ref: DeployRef,
         sink: Arc<dyn LogSink>,
+        cancel: CancellationToken,
     ) -> Result<Deployment, DomainError> {
         let _permit = permit; // keep lock until deploy finishes, released by Drop
 
@@ -117,15 +150,17 @@ impl DeployProject {
             log_tail: String::new(),
         };
         self.history.record_queued(&deployment).await?;
-        deployment.started_at = self.clock.now_unix();
+        let started_at = self.clock.now_unix();
+        deployment.started_at = started_at;
         deployment.status = DeploymentStatus::Running;
         self.history
-            .mark_running(&deployment.id, deployment.started_at)
+            .mark_running(&deployment.id, started_at)
             .await?;
 
-        let result = self
-            .run_stages(&config, &git_ref, log.clone(), &masker)
-            .await;
+        let result = tokio::select! {
+            _ = cancel.cancelled() => Err(DomainError::Canceled),
+            r = self.run_stages(&config, &git_ref, log.clone(), &masker) => r,
+        };
         let finished_at = self.clock.now_unix();
 
         match result {
@@ -150,19 +185,18 @@ impl DeployProject {
                 Ok(deployment)
             }
             Err(err) => {
-                log.line(&format!("deploy failed: {err}"));
+                let status = if matches!(err, DomainError::Canceled) {
+                    DeploymentStatus::Canceled
+                } else {
+                    DeploymentStatus::Failed
+                };
+                log.line(&format!("deploy {}: {err}", status.as_str()));
                 let log_tail = tail.tail();
                 let record_result = self
                     .history
-                    .record_finished(
-                        &deployment.id,
-                        DeploymentStatus::Failed,
-                        None,
-                        finished_at,
-                        &log_tail,
-                    )
+                    .record_finished(&deployment.id, status, None, finished_at, &log_tail)
                     .await;
-                log.finished(DeploymentStatus::Failed);
+                log.finished(status);
                 guard.disarm();
                 record_result?;
                 Err(err)
@@ -177,13 +211,20 @@ impl DeployProject {
         log: Arc<dyn LogSink>,
         masker: &MaskingSink,
     ) -> Result<String, DomainError> {
+        let timeouts = self.timeouts.with_overrides(&config.timeouts);
+
         let project = self.projects.upsert(config).await?;
         log.line(&format!(
             "project '{}': host port {}",
             project.config.name, project.host_port
         ));
 
-        let fetched = self.source.fetch(config, git_ref, log.clone()).await?;
+        let fetched = staged(
+            "fetch",
+            timeouts.fetch_secs,
+            self.source.fetch(config, git_ref, log.clone()),
+        )
+        .await?;
         log.line(&format!("fetched {}", fetched.commit_sha));
 
         // §10: decrypt -> arm masking -> inject .env (skip when nothing stored)
@@ -210,8 +251,20 @@ impl DeployProject {
             compose_file: fetched.workdir.join(&config.compose_path),
             override_file,
         };
-        self.runtime.build(&stack, log.clone()).await?;
-        self.runtime.up(&stack, log.clone()).await?;
+        {
+            let _build_slot = self
+                .build_sem
+                .acquire()
+                .await
+                .map_err(|_| DomainError::Runtime("build semaphore closed".into()))?;
+            staged(
+                "build",
+                timeouts.build_secs,
+                self.runtime.build(&stack, log.clone()),
+            )
+            .await?;
+        }
+        staged("up", timeouts.up_secs, self.runtime.up(&stack, log.clone())).await?;
 
         // §8: health gate — on failure the deploy is failed, stack stays up
         self.health
@@ -225,6 +278,10 @@ impl DeployProject {
                 .await?;
         }
 
+        if let Err(err) = self.gc.execute(log.clone()).await {
+            log.line(&format!("gc skipped: {err}"));
+        }
+
         Ok(fetched.commit_sha)
     }
 }
@@ -234,12 +291,13 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
-        MockClock, MockContainerRuntime, MockDeploymentHistory, MockEnvFileWriter, MockHealthGate,
-        MockIngress, MockOverrideStore, MockProjectRepository, MockSecretStore, MockSource,
+        MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe, MockEnvFileWriter,
+        MockHealthGate, MockIngress, MockOverrideStore, MockProjectRepository, MockSecretStore,
+        MockSource,
     };
     use pi_domain::entities::{
         DeployRef, DeploymentStatus, EnvBundle, FetchedSource, HealthcheckConfig, Project,
-        ProjectConfig, StageTimeoutOverrides,
+        ProjectConfig, StageTimeoutOverrides, StageTimeouts,
     };
     use pi_domain::error::DomainError;
     use std::{
@@ -264,6 +322,8 @@ mod tests {
     pub struct Mocks {
         pub source: MockSource,
         pub runtime: MockContainerRuntime,
+        pub gc_runtime: MockContainerRuntime,
+        pub disk: MockDiskProbe,
         pub projects: MockProjectRepository,
         pub history: MockDeploymentHistory,
         pub overrides: MockOverrideStore,
@@ -277,9 +337,15 @@ mod tests {
     pub fn mocks() -> Mocks {
         let mut clock = MockClock::new();
         clock.expect_now_unix().return_const(100i64);
+        let mut gc_runtime = MockContainerRuntime::new();
+        gc_runtime.expect_prune_images().returning(|_| Ok(()));
+        let mut disk = MockDiskProbe::new();
+        disk.expect_used_percent().returning(|| Ok(10));
         Mocks {
             source: MockSource::new(),
             runtime: MockContainerRuntime::new(),
+            gc_runtime,
+            disk,
             projects: MockProjectRepository::new(),
             history: MockDeploymentHistory::new(),
             overrides: MockOverrideStore::new(),
@@ -292,6 +358,7 @@ mod tests {
     }
 
     pub fn build(m: Mocks) -> Arc<DeployProject> {
+        let gc = RunGc::new(Arc::new(m.gc_runtime), Arc::new(m.disk), 85);
         DeployProject::new(
             Arc::new(m.source),
             Arc::new(m.runtime),
@@ -303,6 +370,9 @@ mod tests {
             Arc::new(m.health),
             Arc::new(m.ingress),
             Arc::new(m.clock),
+            gc,
+            StageTimeouts::default(),
+            1,
         )
     }
 
@@ -393,6 +463,15 @@ mod tests {
                 stage_order.lock().unwrap().push("ingress");
                 Ok(())
             });
+        m.gc_runtime.checkpoint();
+        let stage_order = Arc::clone(&order);
+        m.gc_runtime
+            .expect_prune_images()
+            .times(1)
+            .returning(move |_| {
+                stage_order.lock().unwrap().push("gc");
+                Ok(())
+            });
         let stage_order = Arc::clone(&order);
         m.history
             .expect_record_queued()
@@ -440,6 +519,7 @@ mod tests {
                 cfg,
                 DeployRef::Branch("main".into()),
                 sink.clone(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -455,7 +535,7 @@ mod tests {
             *order.lock().unwrap(),
             vec![
                 "queued", "running", "upsert", "fetch", "secrets", "override", "build", "up",
-                "health", "ingress", "finished"
+                "health", "ingress", "gc", "finished"
             ]
         );
     }
@@ -512,6 +592,7 @@ mod tests {
                 sample_config(),
                 DeployRef::Branch("main".into()),
                 sink.clone(),
+                CancellationToken::new(),
             )
             .await
             .unwrap_err();
@@ -580,6 +661,7 @@ mod tests {
                 sample_config(),
                 DeployRef::Branch("main".into()),
                 CollectSink::new(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -619,6 +701,47 @@ mod tests {
             .returning(|_, _, _, _, _| Ok(()));
     }
 
+    struct HangingSource;
+
+    #[async_trait::async_trait]
+    impl pi_domain::contracts::Source for HangingSource {
+        fn workdir(&self, project_name: &str) -> PathBuf {
+            PathBuf::from("/wd").join(project_name)
+        }
+
+        async fn fetch(
+            &self,
+            _p: &ProjectConfig,
+            _r: &DeployRef,
+            _l: Arc<dyn LogSink>,
+        ) -> Result<FetchedSource, DomainError> {
+            std::future::pending().await
+        }
+    }
+
+    fn build_with_source(
+        m: Mocks,
+        source: Arc<dyn pi_domain::contracts::Source>,
+        timeouts: StageTimeouts,
+    ) -> Arc<DeployProject> {
+        let gc = RunGc::new(Arc::new(m.gc_runtime), Arc::new(m.disk), 85);
+        DeployProject::new(
+            source,
+            Arc::new(m.runtime),
+            Arc::new(m.projects),
+            Arc::new(m.history),
+            Arc::new(m.overrides),
+            Arc::new(m.secrets),
+            Arc::new(m.env_files),
+            Arc::new(m.health),
+            Arc::new(m.ingress),
+            Arc::new(m.clock),
+            gc,
+            timeouts,
+            1,
+        )
+    }
+
     #[tokio::test]
     async fn stored_bundle_is_written_to_workdir_and_masked_in_logs() {
         let mut m = mocks();
@@ -647,6 +770,7 @@ mod tests {
                 sample_config(),
                 DeployRef::Branch("main".into()),
                 sink.clone(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -695,6 +819,7 @@ mod tests {
                 sample_config(),
                 DeployRef::Branch("main".into()),
                 sink.clone(),
+                CancellationToken::new(),
             )
             .await
             .unwrap_err();
@@ -731,9 +856,289 @@ mod tests {
                 config,
                 DeployRef::Branch("main".into()),
                 CollectSink::new(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
         assert_eq!(result.status, DeploymentStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn expired_fetch_stage_fails_with_timeout_and_stage_name() {
+        let mut m = mocks();
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
+        });
+        m.history.expect_record_queued().returning(|_| Ok(()));
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .withf(|id, status, _sha, _at, tail| {
+                id == "dep-t"
+                    && *status == DeploymentStatus::Failed
+                    && tail.contains("timeout: fetch")
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let timeouts = StageTimeouts {
+            fetch_secs: 0,
+            ..StageTimeouts::default()
+        };
+        let deploy = build_with_source(m, Arc::new(HangingSource), timeouts);
+        let sink = CollectSink::new();
+        let permit = deploy.try_begin("rateme").unwrap();
+        let err = deploy
+            .execute(
+                permit,
+                "dep-t".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, DomainError::Timeout { stage, .. } if stage == "fetch"),
+            "got: {err}"
+        );
+        assert_eq!(
+            *sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Failed]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_token_marks_deployment_canceled_and_frees_lock() {
+        let mut m = mocks();
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
+        });
+        m.history.expect_record_queued().returning(|_| Ok(()));
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .withf(|id, status, _sha, _at, _tail| {
+                id == "dep-c" && *status == DeploymentStatus::Canceled
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let deploy = build_with_source(m, Arc::new(HangingSource), StageTimeouts::default());
+        let sink = CollectSink::new();
+        let permit = deploy.try_begin("rateme").unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let deploy = Arc::clone(&deploy);
+            let sink = sink.clone();
+            let cancel = cancel.clone();
+            async move {
+                deploy
+                    .execute(
+                        permit,
+                        "dep-c".into(),
+                        sample_config(),
+                        DeployRef::Branch("main".into()),
+                        sink,
+                        cancel,
+                    )
+                    .await
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel.cancel();
+        let err = task.await.unwrap().unwrap_err();
+
+        assert!(matches!(err, DomainError::Canceled), "got: {err}");
+        assert_eq!(
+            *sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Canceled]
+        );
+        assert!(
+            deploy.try_begin("rateme").is_ok(),
+            "lock must be free after canceled deploy"
+        );
+    }
+
+    struct CountingRuntime {
+        active: std::sync::atomic::AtomicUsize,
+        max_seen: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl pi_domain::contracts::ContainerRuntime for CountingRuntime {
+        async fn build(
+            &self,
+            _stack: &pi_domain::entities::ComposeStack,
+            _log: Arc<dyn LogSink>,
+        ) -> Result<(), DomainError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let n = self.active.fetch_add(1, SeqCst) + 1;
+            self.max_seen.fetch_max(n, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.active.fetch_sub(1, SeqCst);
+            Ok(())
+        }
+
+        async fn up(
+            &self,
+            _stack: &pi_domain::entities::ComposeStack,
+            _log: Arc<dyn LogSink>,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        async fn ps(
+            &self,
+            _project_name: &str,
+        ) -> Result<Vec<pi_domain::entities::ServiceState>, DomainError> {
+            Ok(vec![])
+        }
+
+        async fn prune_images(&self, _log: Arc<dyn LogSink>) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        async fn prune_builder(&self, _log: Arc<dyn LogSink>) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn builds_of_different_projects_are_serialized_by_global_semaphore() {
+        let mut m = mocks();
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: if c.name == "a" { 8000 } else { 8001 },
+                created_at: 1,
+            })
+        });
+        m.source.expect_fetch().returning(|p, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd").join(&p.name),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.overrides
+            .expect_write()
+            .returning(|p, _, _, _| Ok(PathBuf::from("/ov").join(p)));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
+        m.history.expect_record_queued().returning(|_| Ok(()));
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let runtime = Arc::new(CountingRuntime {
+            active: std::sync::atomic::AtomicUsize::new(0),
+            max_seen: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let gc = RunGc::new(Arc::clone(&runtime) as _, Arc::new(m.disk), 85);
+        let deploy = DeployProject::new(
+            Arc::new(m.source),
+            Arc::clone(&runtime) as _,
+            Arc::new(m.projects),
+            Arc::new(m.history),
+            Arc::new(m.overrides),
+            Arc::new(m.secrets),
+            Arc::new(m.env_files),
+            Arc::new(m.health),
+            Arc::new(m.ingress),
+            Arc::new(m.clock),
+            gc,
+            StageTimeouts::default(),
+            1,
+        );
+
+        let mut config_a = sample_config();
+        config_a.name = "a".into();
+        config_a.hostname = None;
+        let mut config_b = sample_config();
+        config_b.name = "b".into();
+        config_b.hostname = None;
+
+        let permit_a = deploy.try_begin("a").unwrap();
+        let permit_b = deploy.try_begin("b").unwrap();
+        let (ra, rb) = tokio::join!(
+            deploy.execute(
+                permit_a,
+                "dep-a".into(),
+                config_a,
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+                CancellationToken::new(),
+            ),
+            deploy.execute(
+                permit_b,
+                "dep-b".into(),
+                config_b,
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+                CancellationToken::new(),
+            ),
+        );
+        ra.unwrap();
+        rb.unwrap();
+        assert_eq!(
+            runtime.max_seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "two builds must never run concurrently with a semaphore of 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_failure_does_not_fail_the_deploy() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
+        m.gc_runtime.checkpoint();
+        m.gc_runtime
+            .expect_prune_images()
+            .returning(|_| Err(DomainError::Runtime("docker daemon hiccup".into())));
+
+        let deploy = build(m);
+        let permit = deploy.try_begin("rateme").unwrap();
+        let result = deploy
+            .execute(
+                permit,
+                "dep-gc".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        assert!(
+            result.log_tail.contains("gc skipped"),
+            "tail: {}",
+            result.log_tail
+        );
     }
 }
