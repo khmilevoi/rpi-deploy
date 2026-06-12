@@ -234,7 +234,7 @@ mod tests {
     };
     use pi_domain::entities::{
         DeployRef, DeploymentStatus, EnvBundle, FetchedSource, HealthcheckConfig, Project,
-        ProjectConfig,
+        ProjectConfig, StageTimeoutOverrides,
     };
     use pi_domain::error::DomainError;
     use std::{
@@ -252,6 +252,7 @@ mod tests {
             container_port: 3000,
             hostname: Some("rateme.isskelo.com".into()),
             healthcheck: HealthcheckConfig::default(),
+            timeouts: StageTimeoutOverrides::default(),
         }
     }
 

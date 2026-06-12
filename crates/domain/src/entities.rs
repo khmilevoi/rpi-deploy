@@ -49,6 +49,44 @@ impl Default for HealthcheckConfig {
     }
 }
 
+/// Per-stage deploy timeouts (§8.1). Agent-wide defaults live in agent.toml.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageTimeouts {
+    pub fetch_secs: u64,
+    pub build_secs: u64,
+    pub up_secs: u64,
+}
+
+impl Default for StageTimeouts {
+    fn default() -> StageTimeouts {
+        StageTimeouts {
+            fetch_secs: 120,
+            build_secs: 1800,
+            up_secs: 300,
+        }
+    }
+}
+
+impl StageTimeouts {
+    /// Project overrides from [timeouts] in pi.toml win over agent defaults (§12).
+    pub fn with_overrides(&self, overrides: &StageTimeoutOverrides) -> StageTimeouts {
+        StageTimeouts {
+            fetch_secs: overrides.fetch_secs.unwrap_or(self.fetch_secs),
+            build_secs: overrides.build_secs.unwrap_or(self.build_secs),
+            up_secs: overrides.up_secs.unwrap_or(self.up_secs),
+        }
+    }
+}
+
+/// Optional per-project overrides ([timeouts] in pi.toml, §12).
+/// Travels with ProjectConfig like HealthcheckConfig; not persisted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StageTimeoutOverrides {
+    pub fetch_secs: Option<u64>,
+    pub build_secs: Option<u64>,
+    pub up_secs: Option<u64>,
+}
+
 /// Project config from pi.toml (received in deploy request, §12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectConfig {
@@ -65,6 +103,8 @@ pub struct ProjectConfig {
     pub hostname: Option<String>,
     /// Health gate settings ([healthcheck] from pi.toml). Not persisted in DB.
     pub healthcheck: HealthcheckConfig,
+    /// Stage timeout overrides ([timeouts] from pi.toml). Not persisted in DB.
+    pub timeouts: StageTimeoutOverrides,
 }
 
 /// Registered project: config + allocated host port (§4).
@@ -100,26 +140,33 @@ impl DeployRef {
     }
 }
 
-/// Statuses for v0.1. Others (`queued|canceled|interrupted|superseded`) — v0.3;
-/// in the DB status is stored as a string, extending enum does not require migration.
+/// All deployment statuses (§18). Stored as strings in the DB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentStatus {
+    Queued,
     Running,
     Success,
     Failed,
+    Canceled,
+    Interrupted,
+    Superseded,
 }
 
 impl DeploymentStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            DeploymentStatus::Queued => "queued",
             DeploymentStatus::Running => "running",
             DeploymentStatus::Success => "success",
             DeploymentStatus::Failed => "failed",
+            DeploymentStatus::Canceled => "canceled",
+            DeploymentStatus::Interrupted => "interrupted",
+            DeploymentStatus::Superseded => "superseded",
         }
     }
 
     pub fn is_terminal(&self) -> bool {
-        !matches!(self, DeploymentStatus::Running)
+        !matches!(self, DeploymentStatus::Queued | DeploymentStatus::Running)
     }
 }
 
@@ -127,9 +174,13 @@ impl std::str::FromStr for DeploymentStatus {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "queued" => Ok(DeploymentStatus::Queued),
             "running" => Ok(DeploymentStatus::Running),
             "success" => Ok(DeploymentStatus::Success),
             "failed" => Ok(DeploymentStatus::Failed),
+            "canceled" => Ok(DeploymentStatus::Canceled),
+            "interrupted" => Ok(DeploymentStatus::Interrupted),
+            "superseded" => Ok(DeploymentStatus::Superseded),
             _ => Err(()),
         }
     }
@@ -242,9 +293,13 @@ mod tests {
     #[test]
     fn status_roundtrips_through_str() {
         for s in [
+            DeploymentStatus::Queued,
             DeploymentStatus::Running,
             DeploymentStatus::Success,
             DeploymentStatus::Failed,
+            DeploymentStatus::Canceled,
+            DeploymentStatus::Interrupted,
+            DeploymentStatus::Superseded,
         ] {
             assert_eq!(s.as_str().parse::<DeploymentStatus>(), Ok(s));
         }
@@ -253,8 +308,33 @@ mod tests {
 
     #[test]
     fn terminal_statuses() {
+        assert!(!DeploymentStatus::Queued.is_terminal());
         assert!(!DeploymentStatus::Running.is_terminal());
-        assert!(DeploymentStatus::Success.is_terminal());
-        assert!(DeploymentStatus::Failed.is_terminal());
+        for s in [
+            DeploymentStatus::Success,
+            DeploymentStatus::Failed,
+            DeploymentStatus::Canceled,
+            DeploymentStatus::Interrupted,
+            DeploymentStatus::Superseded,
+        ] {
+            assert!(s.is_terminal(), "{s:?} must be terminal");
+        }
+    }
+
+    #[test]
+    fn stage_timeouts_defaults_match_spec_and_overrides_win() {
+        let defaults = StageTimeouts::default();
+        assert_eq!(defaults.fetch_secs, 120, "fetch 2m (§8.1)");
+        assert_eq!(defaults.build_secs, 1800, "build 30m (§8.1)");
+        assert_eq!(defaults.up_secs, 300, "up 5m (§8.1)");
+
+        let overrides = StageTimeoutOverrides {
+            build_secs: Some(3600),
+            ..StageTimeoutOverrides::default()
+        };
+        let effective = defaults.with_overrides(&overrides);
+        assert_eq!(effective.fetch_secs, 120, "no override -> default");
+        assert_eq!(effective.build_secs, 3600, "override wins");
+        assert_eq!(effective.up_secs, 300);
     }
 }

@@ -17,6 +17,12 @@ pub enum DomainError {
     HealthCheck(String),
     #[error("deploy already in progress for project '{0}'")]
     DeployInProgress(String),
+    #[error("deployment canceled")]
+    Canceled,
+    #[error("timeout: {stage} after {secs}s")]
+    Timeout { stage: String, secs: u64 },
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("invalid input: {0}")]

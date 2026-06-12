@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use pi_application::list::ProjectView;
-use pi_domain::entities::{Deployment, HealthcheckConfig, ProjectConfig};
+use pi_domain::entities::{
+    Deployment, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +50,7 @@ impl From<ProjectDto> for ProjectConfig {
                     timeout_secs: h.timeout_secs.unwrap_or(60),
                 })
                 .unwrap_or_default(),
+            timeouts: StageTimeoutOverrides::default(),
         }
     }
 }

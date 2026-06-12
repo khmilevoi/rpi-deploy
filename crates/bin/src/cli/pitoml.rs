@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use pi_domain::entities::{HealthcheckConfig, ProjectConfig};
+use pi_domain::entities::{HealthcheckConfig, ProjectConfig, StageTimeoutOverrides};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +162,7 @@ impl PiToml {
                     .and_then(|t| parse_duration_secs(t).ok())
                     .unwrap_or(60),
             },
+            timeouts: StageTimeoutOverrides::default(),
         }
     }
 }
