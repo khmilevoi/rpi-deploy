@@ -17,6 +17,38 @@ pub struct ServerProfile {
     pub key: Option<String>,
 }
 
+/// Connection selection shared by all remote commands (§16): a profile from
+/// the client config (--server / PI_SERVER / default), or a direct
+/// --host/--user/--key triple for CI that bypasses the config file entirely.
+#[derive(Debug, clap::Args)]
+pub struct ConnectOpts {
+    /// Server profile from ~/.config/pi/config.toml
+    #[arg(long, conflicts_with = "host")]
+    pub server: Option<String>,
+    /// Direct SSH host (CI mode; the client config file is not read)
+    #[arg(long, requires = "user")]
+    pub host: Option<String>,
+    /// SSH login user for --host
+    #[arg(long, requires = "host")]
+    pub user: Option<String>,
+    /// SSH private key path for --host
+    #[arg(long, requires = "host")]
+    pub key: Option<String>,
+}
+
+impl ConnectOpts {
+    pub fn resolve(&self) -> anyhow::Result<ServerProfile> {
+        if let (Some(host), Some(user)) = (&self.host, &self.user) {
+            return Ok(ServerProfile {
+                host: host.clone(),
+                user: user.clone(),
+                key: self.key.clone(),
+            });
+        }
+        ClientConfig::load()?.select(self.server.as_deref())
+    }
+}
+
 impl ClientConfig {
     pub fn parse(text: &str) -> anyhow::Result<ClientConfig> {
         Ok(toml::from_str(text)?)
@@ -90,5 +122,19 @@ user = "deploy"
     fn select_unknown_profile_is_error() {
         let config = ClientConfig::parse(SAMPLE).unwrap();
         assert!(config.select(Some("nope")).is_err());
+    }
+
+    #[test]
+    fn connect_opts_with_host_bypass_the_config_file() {
+        let opts = ConnectOpts {
+            server: None,
+            host: Some("203.0.113.7".into()),
+            user: Some("pi".into()),
+            key: Some("./deploy_key".into()),
+        };
+        let profile = opts.resolve().unwrap();
+        assert_eq!(profile.host, "203.0.113.7");
+        assert_eq!(profile.user, "pi");
+        assert_eq!(profile.key.as_deref(), Some("./deploy_key"));
     }
 }

@@ -2,21 +2,24 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::cli::api::ApiClient;
-use crate::cli::config::ClientConfig;
+use crate::cli::config::ConnectOpts;
 use crate::cli::pitoml::PiToml;
 use crate::cli::tunnel::SshTunnel;
 use crate::proto::DeployRequest;
 
-pub async fn deploy(git_ref: Option<String>, server: Option<String>) -> anyhow::Result<()> {
+pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Result<()> {
     let pitoml = PiToml::load(Path::new("pi.toml"))?;
     let project = pitoml.to_project_config();
 
-    let profile = ClientConfig::load()?.select(server.as_deref())?;
+    let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
 
     let version = api.version().await?;
     eprintln!("agent {} (api {})", version.version, version.api);
+    if let Some(warning) = version_mismatch_warning(env!("CARGO_PKG_VERSION"), &version.version) {
+        eprintln!("{warning}");
+    }
 
     let req = DeployRequest {
         project: (&project).into(),
@@ -49,12 +52,11 @@ pub async fn deploy(git_ref: Option<String>, server: Option<String>) -> anyhow::
     Ok(())
 }
 
-/// `pi deploy --cancel` (§8.1): cancels all active deploys of the project.
-pub async fn deploy_cancel(server: Option<String>) -> anyhow::Result<()> {
+pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
     let pitoml = PiToml::load(Path::new("pi.toml"))?;
     let project_name = pitoml.project.name.clone();
 
-    let profile = ClientConfig::load()?.select(server.as_deref())?;
+    let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
 
@@ -70,7 +72,7 @@ pub async fn deploy_cancel(server: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn env_send(apply: bool, server: Option<String>) -> anyhow::Result<()> {
+pub async fn env_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<()> {
     let pitoml = PiToml::load(Path::new("pi.toml"))?;
     let project_name = pitoml.project.name.clone();
     let env_file = Path::new(&pitoml.env.file).to_path_buf();
@@ -82,7 +84,7 @@ pub async fn env_send(apply: bool, server: Option<String>) -> anyhow::Result<()>
         anyhow::bail!("no variables found in {}", env_file.display());
     }
 
-    let profile = ClientConfig::load()?.select(server.as_deref())?;
+    let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
 
@@ -95,8 +97,8 @@ pub async fn env_send(apply: bool, server: Option<String>) -> anyhow::Result<()>
     Ok(())
 }
 
-pub async fn gc(server: Option<String>) -> anyhow::Result<()> {
-    let profile = ClientConfig::load()?.select(server.as_deref())?;
+pub async fn gc(connect: ConnectOpts) -> anyhow::Result<()> {
+    let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
 
@@ -109,11 +111,11 @@ pub async fn gc(server: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn env_ls(server: Option<String>) -> anyhow::Result<()> {
+pub async fn env_ls(connect: ConnectOpts) -> anyhow::Result<()> {
     let pitoml = PiToml::load(Path::new("pi.toml"))?;
     let project_name = pitoml.project.name.clone();
 
-    let profile = ClientConfig::load()?.select(server.as_deref())?;
+    let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
 
@@ -135,8 +137,8 @@ fn parse_env_file(text: &str) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(bundle.vars)
 }
 
-pub async fn ls(server: Option<String>) -> anyhow::Result<()> {
-    let profile = ClientConfig::load()?.select(server.as_deref())?;
+pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
+    let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
 
@@ -170,24 +172,35 @@ pub async fn ls(server: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// §9.1: differing CLI/agent binary versions are a warning, not an error.
+fn version_mismatch_warning(cli_version: &str, agent_version: &str) -> Option<String> {
+    (cli_version != agent_version).then(|| {
+        format!(
+            "warning: CLI v{cli_version} and agent v{agent_version} differ - \
+rebuild/update the agent on the Pi (`pi agent update` ships in v0.5)"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn env_file_parsing_matches_agent_rules() {
-        // Same dotenv dialect as the agent (§10, plan Task 3): the agent
-        // strips `export ` and rejects invalid keys with 400, so a file the
-        // CLI accepts must round-trip identically.
         let text = "# c\nexport TOKEN=\"abc=def\"\nNAME='single'\nDB=postgres://u:p@db/x\n";
         let vars = parse_env_file(text).unwrap();
         assert_eq!(vars["TOKEN"], "abc=def");
         assert_eq!(vars["NAME"], "single");
         assert_eq!(vars["DB"], "postgres://u:p@db/x");
         assert_eq!(vars.len(), 3);
-        assert!(
-            parse_env_file("1BAD=x").is_err(),
-            "agent rejects this key; the CLI must too"
-        );
+        assert!(parse_env_file("1BAD=x").is_err());
+    }
+
+    #[test]
+    fn version_mismatch_produces_warning_only_on_difference() {
+        assert!(version_mismatch_warning("0.3.0", "0.3.0").is_none());
+        let warning = version_mismatch_warning("0.3.0", "0.2.0").unwrap();
+        assert!(warning.contains("0.3.0") && warning.contains("0.2.0"));
     }
 }
