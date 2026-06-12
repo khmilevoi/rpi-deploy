@@ -23,8 +23,11 @@ enum Cmd {
     /// Deploy current project (reads ./pi.toml)
     Deploy {
         /// Branch or commit-sha (default — branch from pi.toml)
-        #[arg(long = "ref")]
+        #[arg(long = "ref", conflicts_with = "cancel")]
         git_ref: Option<String>,
+        /// Cancel the active deploy(s) of the current project instead
+        #[arg(long)]
+        cancel: bool,
         /// Server profile from ~/.config/pi/config.toml
         #[arg(long)]
         server: Option<String>,
@@ -86,7 +89,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Deploy { git_ref, server } => cli::commands::deploy(git_ref, server).await,
+        Cmd::Deploy {
+            git_ref,
+            cancel,
+            server,
+        } => {
+            if cancel {
+                cli::commands::deploy_cancel(server).await
+            } else {
+                cli::commands::deploy(git_ref, server).await
+            }
+        }
         Cmd::Ls { server } => cli::commands::ls(server).await,
         Cmd::Env {
             cmd: EnvCmd::Send { apply, server },

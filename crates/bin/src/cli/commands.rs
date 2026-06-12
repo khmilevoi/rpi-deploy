@@ -23,18 +23,49 @@ pub async fn deploy(git_ref: Option<String>, server: Option<String>) -> anyhow::
         git_ref,
     };
     let accepted = api.deploy(&req).await?;
-    eprintln!(
-        "deployment {} started; streaming logs:",
-        accepted.deployment_id
-    );
+    if accepted.queued {
+        eprintln!(
+            "deployment {} queued behind the active deploy (latest wins); waiting...",
+            accepted.deployment_id
+        );
+    } else {
+        eprintln!(
+            "deployment {} started; streaming logs:",
+            accepted.deployment_id
+        );
+    }
 
     let status = api
         .follow_logs(&accepted.deployment_id, |line| println!("{line}"))
         .await?;
     eprintln!("deploy finished: {status}");
-    if status != "success" {
+    if status == "superseded" {
+        eprintln!("note: a newer deploy request replaced this one - not an error");
+    }
+    if status != "success" && status != "superseded" {
         drop(tunnel);
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `pi deploy --cancel` (§8.1): cancels all active deploys of the project.
+pub async fn deploy_cancel(server: Option<String>) -> anyhow::Result<()> {
+    let pitoml = PiToml::load(Path::new("pi.toml"))?;
+    let project_name = pitoml.project.name.clone();
+
+    let profile = ClientConfig::load()?.select(server.as_deref())?;
+    let tunnel = SshTunnel::open(&profile).await?;
+    let api = ApiClient::new(tunnel.base_url.clone());
+
+    let active = api.active_deployments(&project_name).await?;
+    if active.is_empty() {
+        eprintln!("no active deployment for '{project_name}' - nothing to cancel");
+        return Ok(());
+    }
+    for d in active {
+        let decision = api.cancel_deployment(&d.id).await?;
+        eprintln!("deployment {} ({}): {decision}", d.id, d.status);
     }
     Ok(())
 }

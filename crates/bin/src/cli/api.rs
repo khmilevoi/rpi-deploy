@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::cli::sse::SseParser;
 use crate::proto::{
-    DeployAccepted, DeployRequest, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
+    DeployAccepted, DeployRequest, DeploymentDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
     ProjectViewDto, VersionInfo,
 };
 
@@ -55,6 +55,28 @@ impl ApiClient {
             .send()
             .await?;
         Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn active_deployments(&self, project: &str) -> anyhow::Result<Vec<DeploymentDto>> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/v1/projects/{project}/deployments/active",
+                self.base
+            ))
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn cancel_deployment(&self, id: &str) -> anyhow::Result<String> {
+        let resp = self
+            .http
+            .delete(format!("{}/v1/deployments/{id}", self.base))
+            .send()
+            .await?;
+        let json: serde_json::Value = extract_error(resp).await?.json().await?;
+        Ok(json["status"].as_str().unwrap_or("unknown").to_string())
     }
 
     pub async fn follow_logs(

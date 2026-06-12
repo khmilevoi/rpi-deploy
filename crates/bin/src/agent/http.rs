@@ -21,9 +21,16 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/version", get(version))
         .route("/v1/deployments", post(create_deployment))
-        .route("/v1/deployments/{id}", get(get_deployment))
+        .route(
+            "/v1/deployments/{id}",
+            get(get_deployment).delete(cancel_deployment),
+        )
         .route("/v1/deployments/{id}/logs", get(deployment_logs))
         .route("/v1/projects", get(list_projects))
+        .route(
+            "/v1/projects/{name}/deployments/active",
+            get(active_deployments),
+        )
         .route(
             "/v1/projects/{name}/env",
             put(send_env_handler).get(env_keys_handler),
@@ -113,11 +120,45 @@ async fn get_deployment(
     }
 }
 
+/// DELETE /v1/deployments/{id} (§8.1, §9.1): queued — removed immediately,
+/// running — the cancel token is signalled and the runner records `canceled`.
+async fn cancel_deployment(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use pi_application::scheduler::CancelOutcome;
+    match state.scheduler.cancel(&id).await.map_err(ApiError)? {
+        CancelOutcome::CanceledQueued => Ok(Json(serde_json::json!({ "status": "canceled" }))),
+        CancelOutcome::CancelRequested => Ok(Json(serde_json::json!({ "status": "canceling" }))),
+        CancelOutcome::NotActive => match state.history.get(&id).await.map_err(ApiError)? {
+            Some(d) => Err(ApiError(DomainError::Conflict(format!(
+                "deployment {id} already finished ({})",
+                d.status.as_str()
+            )))),
+            None => Err(ApiError(DomainError::NotFound(format!("deployment {id}")))),
+        },
+    }
+}
+
 async fn list_projects(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ProjectViewDto>>, ApiError> {
     let views = state.list.execute().await.map_err(ApiError)?;
     Ok(Json(views.into_iter().map(Into::into).collect()))
+}
+
+/// Active (queued/running) deployments of a project — used by `pi deploy --cancel`.
+async fn active_deployments(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<DeploymentDto>>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    let list = state.history.active(&name).await.map_err(ApiError)?;
+    Ok(Json(list.into_iter().map(Into::into).collect()))
 }
 
 fn sse_log(line: String) -> Result<Event, Infallible> {
@@ -388,6 +429,12 @@ mod tests {
             .unwrap()
     }
 
+    fn delete_req(uri: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::delete(uri)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn version_handshake() {
         let dir = tempfile::tempdir().unwrap();
@@ -524,6 +571,110 @@ mod tests {
         ));
         let (status, _) = request(app, get_req("/v1/deployments/nope")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_deployment_is_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, _) = request(app, delete_req("/v1/deployments/nope")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cancel_finished_deployment_is_409() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, json) = request(
+            app.clone(),
+            post_json("/v1/deployments", &deploy_body("rateme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = json["deployment_id"].as_str().unwrap().to_string();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            assert!(tokio::time::Instant::now() < deadline, "deploy hung");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let (_, json) = request(app.clone(), get_req(&format!("/v1/deployments/{id}"))).await;
+            if json["status"] == "success" {
+                break;
+            }
+        }
+
+        let (status, json) = request(app.clone(), delete_req(&format!("/v1/deployments/{id}"))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    }
+
+    #[tokio::test]
+    async fn cancel_running_deployment_marks_it_canceled() {
+        struct HangingSource;
+
+        #[async_trait::async_trait]
+        impl Source for HangingSource {
+            fn workdir(&self, project_name: &str) -> std::path::PathBuf {
+                std::env::temp_dir().join(project_name)
+            }
+
+            async fn fetch(
+                &self,
+                _p: &ProjectConfig,
+                _r: &DeployRef,
+                _l: Arc<dyn LogSink>,
+            ) -> Result<FetchedSource, DomainError> {
+                std::future::pending().await
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(HangingSource),
+            Arc::new(ok_runtime()),
+        ));
+
+        let (status, json) = request(
+            app.clone(),
+            post_json("/v1/deployments", &deploy_body("rateme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = json["deployment_id"].as_str().unwrap().to_string();
+
+        let (status, json) = request(
+            app.clone(),
+            get_req("/v1/projects/rateme/deployments/active"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json[0]["id"], id.as_str(), "{json}");
+
+        let (status, json) =
+            request(app.clone(), delete_req(&format!("/v1/deployments/{id}"))).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["status"], "canceling");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "cancel did not land"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let (_, json) = request(app.clone(), get_req(&format!("/v1/deployments/{id}"))).await;
+            if json["status"] == "canceled" {
+                break;
+            }
+        }
     }
 
     fn put_json(uri: &str, body: &serde_json::Value) -> axum::http::Request<axum::body::Body> {
