@@ -58,7 +58,7 @@
 
 | Команда | Поведение |
 |---|---|
-| `pi logs <project> [-f] [--tail N]` | стрим логов контейнеров проекта с агента; значения секретов маскируются (§8.1) |
+| `pi logs <project> [-f] [--tail N]` | стрим логов контейнеров проекта с агента (дефолт `--tail 100`, у `pi agent logs` тот же); значения секретов маскируются (§8.1) |
 | `pi stats [project]` | без аргумента — хост (CPU/RAM/диск/uptime) + все проекты; с проектом — его сервисы (CPU/mem) + last deploy |
 | `pi start\|stop\|restart <project>` | `compose start/stop/restart` |
 | `pi rm <project> [--volumes] [--yes]` | снос проекта (решение 2) + DNS-инструкция |
@@ -110,7 +110,8 @@ Rolling-логи агента: `tracing-appender`, ротация по дням,
 - `SecretStore` +: `remove(project)`.
 - `Source` +: `cleanup(project)` — workdir и deploy-key проекта.
 - `ProjectRepository` +: `remove(name)` — запись проекта + порт-аллокация.
-- `DeploymentHistory` +: `remove_project(project)`.
+- `DeploymentHistory` +: `remove_project(project)`,
+  `latest(project) -> Option<Deployment>` (последний деплой для `pi stats`).
 - Новый `StatsProvider` — `report(projects) -> StatsReport` (§6).
 - Новый `SystemProbe` — `run_checks() -> Vec<DiagnosticCheck>` (§6).
 
@@ -119,7 +120,7 @@ Rolling-логи агента: `tracing-appender`, ротация по дням,
 - `StreamLogs` — резолв проекта (`NotFound`, если нет) →
   `ContainerRuntime::logs` через `MaskingSink` с секретами проекта.
 - `GetStats` — проекты из репозитория (или один) → `StatsProvider::report`;
-  last deploy — из `DeploymentHistory`.
+  last deploy — `DeploymentHistory::latest`.
 - `ControlLifecycle` — резолв проекта → `ContainerRuntime::lifecycle`.
 - `RemoveProject` — порядок: `DeploymentHistory::active` не пуст → `Conflict`;
   затем `down(remove_volumes)` → `Ingress::remove` → `Source::cleanup` →
@@ -144,8 +145,9 @@ Rolling-логи агента: `tracing-appender`, ротация по дням,
 - `probe.rs` (новый) — `HostSystemProbe`. Чеки: `docker info`,
   `docker compose version`, `cloudflared` в PATH,
   `systemctl --user is-active cloudflared`, членство `pi-agent` в группе
-  docker (`id -nG`), linger (`loginctl show-user`), наличие `cert.pem`,
-  диск ниже порога. Команды выполняются через инжектируемый runner —
+  docker (`id -nG`), linger (`loginctl show-user`), наличие `cert.pem`.
+  Чек диска сюда не входит — его делает `RunDiagnostics` через уже
+  существующий `DiskProbe`. Команды выполняются через инжектируемый runner —
   юнит-тесты на Windows с фейковым выводом; реальная система —
   `#[ignore]`-интеграция.
 - `cloudflared.rs` — `remove`: убрать правило из `config.yml`, рестарт
