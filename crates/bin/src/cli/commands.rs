@@ -65,9 +65,20 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
         eprintln!("no active deployment for '{project_name}' - nothing to cancel");
         return Ok(());
     }
+    // One failed cancel (e.g. a deploy that finished in the meantime) must not
+    // leave the rest of the active list untouched.
+    let mut failures = 0usize;
     for d in active {
-        let decision = api.cancel_deployment(&d.id).await?;
-        eprintln!("deployment {} ({}): {decision}", d.id, d.status);
+        match api.cancel_deployment(&d.id).await {
+            Ok(decision) => eprintln!("deployment {} ({}): {decision}", d.id, d.status),
+            Err(err) => {
+                failures += 1;
+                eprintln!("deployment {} ({}): cancel failed: {err}", d.id, d.status);
+            }
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures} cancel request(s) failed");
     }
     Ok(())
 }

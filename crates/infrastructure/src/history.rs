@@ -398,10 +398,19 @@ mod tests {
 
         h.record_queued(&queued("d5", 50)).await.unwrap();
 
-        assert!(h.get("d1").await.unwrap().is_some(), "d1 should survive (keep=2, 2 terminal rows)");
+        assert!(
+            h.get("d1").await.unwrap().is_some(),
+            "d1 should survive (keep=2, 2 terminal rows)"
+        );
         assert!(h.get("d2").await.unwrap().is_some(), "d2 should survive");
-        assert!(h.get("d3").await.unwrap().is_some(), "running row always survives");
-        assert!(h.get("d4").await.unwrap().is_some(), "queued row always survives");
+        assert!(
+            h.get("d3").await.unwrap().is_some(),
+            "running row always survives"
+        );
+        assert!(
+            h.get("d4").await.unwrap().is_some(),
+            "queued row always survives"
+        );
         assert!(h.get("d5").await.unwrap().is_some());
     }
 

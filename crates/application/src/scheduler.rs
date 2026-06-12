@@ -108,7 +108,12 @@ impl DeployScheduler {
             finished_at: None,
             log_tail: String::new(),
         };
-        self.history.record_queued(&queued).await?;
+        if let Err(err) = self.history.record_queued(&queued).await {
+            // The deployment never becomes visible; finish the sink so the
+            // events hub drops its entry instead of leaking it.
+            sink.finished(DeploymentStatus::Failed);
+            return Err(err);
+        }
 
         let project = config.name.clone();
         let entry = Pending {
@@ -151,12 +156,19 @@ impl DeployScheduler {
             let now = self.clock.now_unix();
             let note = "superseded by a newer deploy request";
             old.sink.line(note);
-            let record = self
+            // The replacement is already in the slot and will run regardless,
+            // so a failed status write must not turn this submit into an error;
+            // the stale queued row is swept to interrupted on the next restart.
+            if let Err(err) = self
                 .history
                 .record_finished(&old.id, DeploymentStatus::Superseded, None, now, note)
-                .await;
+                .await
+            {
+                old.sink.line(&format!(
+                    "warning: failed to record superseded status: {err}"
+                ));
+            }
             old.sink.finished(DeploymentStatus::Superseded);
-            record?;
         }
         if let Some(first) = to_start {
             let scheduler = Arc::clone(self);
@@ -239,12 +251,18 @@ impl DeployScheduler {
                 let now = self.clock.now_unix();
                 let note = "canceled while queued";
                 p.sink.line(note);
-                let record = self
+                // The entry is already out of the slot and will never run; report
+                // the cancel as done even if the status write failed, so callers
+                // (pi deploy --cancel) do not retry or abort on a phantom error.
+                if let Err(err) = self
                     .history
                     .record_finished(&p.id, DeploymentStatus::Canceled, None, now, note)
-                    .await;
+                    .await
+                {
+                    p.sink
+                        .line(&format!("warning: failed to record canceled status: {err}"));
+                }
                 p.sink.finished(DeploymentStatus::Canceled);
-                record?;
                 Ok(CancelOutcome::CanceledQueued)
             }
             Found::Running => Ok(CancelOutcome::CancelRequested),
@@ -564,6 +582,144 @@ mod tests {
             runner.finished_count.load(Ordering::SeqCst) == 2
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn record_queued_failure_finishes_sink_and_returns_error() {
+        let runner = FakeRunner::new();
+        let mut history = MockDeploymentHistory::new();
+        history
+            .expect_record_queued()
+            .returning(|_| Err(DomainError::Storage("disk full".into())));
+        let scheduler = scheduler_with(&runner, history);
+
+        let sink = CollectSink::new();
+        let err = scheduler
+            .submit(
+                "d1".into(),
+                config("a"),
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, DomainError::Storage(_)));
+        assert_eq!(
+            *sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Failed],
+            "sink must be finished so the events hub frees its entry"
+        );
+        assert!(runner.started_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn superseded_record_failure_does_not_fail_submit() {
+        let runner = FakeRunner::new();
+        let mut history = MockDeploymentHistory::new();
+        history.expect_record_queued().returning(|_| Ok(()));
+        history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Err(DomainError::Storage("db locked".into())));
+        let scheduler = scheduler_with(&runner, history);
+
+        scheduler
+            .submit(
+                "d1".into(),
+                config("a"),
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+            )
+            .await
+            .unwrap();
+        wait_until("d1 started", || runner.started_ids() == vec!["d1"]).await;
+        let d2_sink = CollectSink::new();
+        scheduler
+            .submit(
+                "d2".into(),
+                config("a"),
+                DeployRef::Branch("main".into()),
+                d2_sink.clone(),
+            )
+            .await
+            .unwrap();
+
+        // d3 replaces d2; recording d2's superseded status fails, but the
+        // replacement is already effective, so submit must still succeed.
+        let outcome = scheduler
+            .submit(
+                "d3".into(),
+                config("a"),
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            SubmitOutcome::QueuedReplacing {
+                superseded_id: "d2".into()
+            }
+        );
+        assert_eq!(
+            *d2_sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Superseded]
+        );
+        assert!(
+            d2_sink
+                .lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("failed to record superseded status")),
+            "record failure must be visible in the superseded stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_queued_with_record_failure_still_reports_canceled() {
+        let runner = FakeRunner::new();
+        let mut history = MockDeploymentHistory::new();
+        history.expect_record_queued().returning(|_| Ok(()));
+        history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Err(DomainError::Storage("db locked".into())));
+        let scheduler = scheduler_with(&runner, history);
+
+        scheduler
+            .submit(
+                "d1".into(),
+                config("a"),
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+            )
+            .await
+            .unwrap();
+        wait_until("d1 started", || runner.started_ids() == vec!["d1"]).await;
+        let d2_sink = CollectSink::new();
+        scheduler
+            .submit(
+                "d2".into(),
+                config("a"),
+                DeployRef::Branch("main".into()),
+                d2_sink.clone(),
+            )
+            .await
+            .unwrap();
+
+        let outcome = scheduler.cancel("d2").await.unwrap();
+        assert_eq!(outcome, CancelOutcome::CanceledQueued);
+        assert_eq!(
+            *d2_sink.finished.lock().unwrap(),
+            vec![DeploymentStatus::Canceled]
+        );
+
+        runner.gate.add_permits(1);
+        wait_until("d1 finished alone", || {
+            runner.finished_count.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        assert_eq!(runner.started_ids(), vec!["d1"], "d2 must never start");
     }
 
     #[tokio::test]

@@ -154,8 +154,16 @@ async fn cancel_deployment(
         CancelOutcome::CanceledQueued => Ok(Json(serde_json::json!({ "status": "canceled" }))),
         CancelOutcome::CancelRequested => Ok(Json(serde_json::json!({ "status": "canceling" }))),
         CancelOutcome::NotActive => match state.history.get(&id).await.map_err(ApiError)? {
-            Some(d) => Err(ApiError(DomainError::Conflict(format!(
+            Some(d) if d.status.is_terminal() => Err(ApiError(DomainError::Conflict(format!(
                 "deployment {id} already finished ({})",
+                d.status.as_str()
+            )))),
+            // DB row is queued/running but the scheduler does not know it:
+            // either it is finishing this instant or a restart orphaned the row
+            // (the startup sweep will mark it interrupted).
+            Some(d) => Err(ApiError(DomainError::Conflict(format!(
+                "deployment {id} is recorded as {} but is not active in the scheduler; \
+it may be finishing right now or was orphaned by an agent restart",
                 d.status.as_str()
             )))),
             None => Err(ApiError(DomainError::NotFound(format!("deployment {id}")))),
@@ -200,10 +208,6 @@ async fn deployment_logs(
         let stream = async_stream::stream! {
             for line in sub.backlog {
                 yield sse_log(line);
-            }
-            if let Some(status) = sub.finished {
-                yield sse_finished(status.as_str());
-                return;
             }
             let mut live = sub.live;
             loop {
@@ -658,6 +662,35 @@ mod tests {
         let (status, json) =
             request(app.clone(), delete_req(&format!("/v1/deployments/{id}"))).await;
         assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    }
+
+    #[tokio::test]
+    async fn cancel_orphaned_db_row_explains_scheduler_mismatch() {
+        // A queued row in the DB with no scheduler entry (e.g. after an agent
+        // restart) must produce a 409 that does not claim "already finished".
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime()));
+        state
+            .history
+            .record_queued(&pi_domain::entities::Deployment {
+                id: "ghost-q".into(),
+                project: "rateme".into(),
+                git_ref: "main".into(),
+                commit_sha: None,
+                status: DeploymentStatus::Queued,
+                started_at: 1,
+                finished_at: None,
+                log_tail: String::new(),
+            })
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let (status, json) = request(app, delete_req("/v1/deployments/ghost-q")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("not active in the scheduler"), "{msg}");
+        assert!(!msg.contains("already finished"), "{msg}");
     }
 
     #[tokio::test]

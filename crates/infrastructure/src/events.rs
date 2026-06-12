@@ -18,9 +18,10 @@ struct StreamState {
     tx: broadcast::Sender<DeployEvent>,
 }
 
+/// Snapshot of an in-flight deployment's log stream. Finished deployments have
+/// no hub entry (subscribe returns None); their logs come from the DB log_tail.
 pub struct Subscription {
     pub backlog: Vec<String>,
-    pub finished: Option<DeploymentStatus>,
     pub live: broadcast::Receiver<DeployEvent>,
 }
 
@@ -57,7 +58,6 @@ impl DeployEventsHub {
         let s = streams.get(deployment_id)?;
         Some(Subscription {
             backlog: s.lines.iter().cloned().collect(),
-            finished: None,
             live: s.tx.subscribe(),
         })
     }
@@ -110,7 +110,6 @@ mod tests {
             sub.backlog,
             vec!["early-1".to_string(), "early-2".to_string()]
         );
-        assert!(sub.finished.is_none());
 
         sink.line("live-1");
         sink.finished(DeploymentStatus::Success);
