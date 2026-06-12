@@ -1,4 +1,4 @@
-# dev-режим (Windows/локально): TCP вместо unix-сокета, данные в ./.dev-data
+# Dev mode (Windows/local): TCP instead of a Unix socket, data in ./.dev-data
 data_dir = ".dev-data"
 tcp = "127.0.0.1:7700"
 

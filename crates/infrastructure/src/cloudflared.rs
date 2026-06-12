@@ -100,7 +100,7 @@ impl Ingress for CloudflaredIngress {
             .await
             .map_err(|e| {
                 ingress_err(format!(
-                    "cannot read {}: {e}; bootstrap the tunnel first (docs/install-agent-v0.1.md)",
+                    "cannot read {}: {e}; bootstrap the tunnel first (see README.md, section 'Cloudflare Tunnel')",
                     self.config_path.display()
                 ))
             })?;

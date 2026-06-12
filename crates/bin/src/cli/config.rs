@@ -65,7 +65,7 @@ impl ClientConfig {
         let path = ClientConfig::path()?;
         let text = std::fs::read_to_string(&path).map_err(|e| {
             anyhow::anyhow!(
-                "cannot read {}: {e}\ncreate it first (see docs/install-agent-v0.1.md, section 'client')",
+                "cannot read {}: {e}\ncreate it first (see README.md, section 'Configure A Client Profile')",
                 path.display()
             )
         })?;

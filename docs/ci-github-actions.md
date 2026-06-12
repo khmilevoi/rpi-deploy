@@ -1,16 +1,16 @@
-# CI: деплой из GitHub Actions (v0.3)
+# CI: Deploy From GitHub Actions (v0.3)
 
-`pi deploy` готов к CI (§23 v0.3): очередь latest-wins переживает два пуша
-подряд без ретраев, поэтапные таймауты не дают джобе зависнуть, а флаги
-`--host/--user/--key` не требуют клиентского конфига на раннере.
+`pi deploy` is CI-ready (§23 v0.3): the latest-wins queue handles two
+consecutive pushes without retries, staged timeouts prevent jobs from hanging,
+and the `--host/--user/--key` flags avoid requiring client config on the runner.
 
-## Секреты репозитория (Settings -> Secrets -> Actions)
+## Repository Secrets (Settings -> Secrets -> Actions)
 
-| Secret | Что это |
+| Secret | Description |
 |---|---|
-| `PI_HOST` | хост/IP Pi, доступный раннеру по SSH |
-| `PI_USER` | логин-юзер Pi (НЕ сервис-юзер `pi-agent`) |
-| `PI_SSH_KEY` | приватный ключ; его pubkey - в `authorized_keys` этого юзера |
+| `PI_HOST` | Pi host/IP reachable from the runner over SSH |
+| `PI_USER` | Pi login user, not the `pi-agent` service user |
+| `PI_SSH_KEY` | Private key; its public key must be in this user's `authorized_keys` |
 
 ## .github/workflows/deploy.yml
 
@@ -23,14 +23,14 @@ on:
 
 concurrency:
   group: deploy-production
-  cancel-in-progress: true # экономит минуты; очередь агента все равно latest-wins
+  cancel-in-progress: true # saves minutes; the agent queue is still latest-wins
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # ... тесты проекта ...
+      # ... project tests ...
 
   deploy:
     needs: test
@@ -39,8 +39,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pi CLI
-        # бинарные релизы + install.sh появятся в v0.5; пока - из исходников.
-        # Ускорение: actions/cache на ~/.cargo/bin по хешу ревизии тулы.
+        # Binary releases + install.sh arrive in v0.5; for now, install from source.
+        # Speed-up: use actions/cache for ~/.cargo/bin keyed by the tool revision hash.
         run: cargo install --git https://github.com/khmilevoi/pi --locked pi
 
       - name: Prepare SSH
@@ -59,18 +59,18 @@ jobs:
             --key ~/.ssh/deploy_key
 ```
 
-## Почему именно так
+## Why This Shape
 
-- **`--ref "$GITHUB_SHA"`** - деплоится ровно протестированный коммит, а не
-  "main на момент деплоя".
-- **`ssh-keyscan` обязателен**: SSH-туннель ходит с `BatchMode=yes` - без
-  known_hosts соединение упадет на проверке host key.
-- **Два пуша подряд**: деплой первого может завершиться `superseded` - CLI
-  выходит с кодом 0 и джоба остается зеленой (latest wins, §8.1). Красные
-  статусы: `failed`, `canceled`, `interrupted`.
-- **Секреты проекта** не шлются из CI на каждый деплой: bundle уже хранится на
-  Pi (`pi env send` делается вручную при смене значений, §10).
-- **Зависший build** убьет поэтапный таймаут агента (`timeout: build`, дефолт
-  30 минут) - джоба упадет с понятной причиной, а не по таймауту раннера.
-- **Отмена из CI не нужна**: новый пуш сам вытеснит ожидающий деплой; для
-  ручной отмены с рабочей машины есть `pi deploy --cancel`.
+- **`--ref "$GITHUB_SHA"`** deploys the exact tested commit, not "main at deploy time".
+- **`ssh-keyscan` is required**: the SSH tunnel runs with `BatchMode=yes`, so
+  without known_hosts the connection fails on host key verification.
+- **Two consecutive pushes**: the first deploy can finish as `superseded`; the
+  CLI exits with code 0 and the job stays green (latest wins, §8.1). Red
+  statuses are `failed`, `canceled`, and `interrupted`.
+- **Project secrets** are not sent from CI on every deploy: the bundle is
+  already stored on the Pi (`pi env send` is run manually when values change, §10).
+- **A stuck build** is killed by the agent's staged timeout (`timeout: build`,
+  default 30 minutes), so the job fails with a clear reason instead of the
+  runner timeout.
+- **CI cancellation is unnecessary**: a new push supersedes the queued deploy by
+  itself; use `pi deploy --cancel` from a workstation for manual cancellation.
