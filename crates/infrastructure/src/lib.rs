@@ -1,4 +1,5 @@
 pub mod cloudflared;
+pub mod disk;
 pub mod docker;
 pub mod dotenv;
 pub mod envfile;

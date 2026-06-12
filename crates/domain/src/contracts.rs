@@ -48,6 +48,13 @@ pub trait ContainerRuntime: Send + Sync {
     async fn prune_builder(&self, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
 }
 
+/// Disk fill probe for the GC threshold decision (§8.1). v1 — sysinfo.
+#[cfg_attr(feature = "mocks", automock)]
+pub trait DiskProbe: Send + Sync {
+    /// Used space of the filesystem holding the agent data dir, percent 0..=100.
+    fn used_percent(&self) -> Result<u8, DomainError>;
+}
+
 /// Project registry + port allocation (§6).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
