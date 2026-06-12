@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use pi_application::deploy::DeployProject;
 use pi_application::env::{ListEnvKeys, SendEnv};
+use pi_application::gc::RunGc;
 use pi_application::list::ListProjects;
+use pi_application::scheduler::{DeployRunner, DeployScheduler};
 use pi_domain::contracts::{DeploymentHistory, IdGen, Ingress};
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
+use pi_infrastructure::disk::SysinfoDiskProbe;
 use pi_infrastructure::docker::DockerComposeRuntime;
 use pi_infrastructure::envfile::FsEnvFileWriter;
 use pi_infrastructure::events::DeployEventsHub;
@@ -21,13 +24,14 @@ use crate::agent::config::AgentConfig;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub deploy: Arc<DeployProject>,
+    pub scheduler: Arc<DeployScheduler>,
     pub list: Arc<ListProjects>,
     pub history: Arc<dyn DeploymentHistory>,
     pub hub: Arc<DeployEventsHub>,
     pub ids: Arc<dyn IdGen>,
     pub send_env: Arc<SendEnv>,
     pub env_keys: Arc<ListEnvKeys>,
+    pub gc: Arc<RunGc>,
 }
 
 pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
@@ -35,9 +39,11 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
     let db = Db::open(&config.data_dir.join("state.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let projects = SqliteProjectRepo::new(db.clone(), config.port_min, config.port_max);
-    let history: Arc<dyn DeploymentHistory> = SqliteHistory::new(db);
+    let history: Arc<dyn DeploymentHistory> = SqliteHistory::new(db, config.history_keep);
     let source = GitSource::new(&config.data_dir);
     let runtime = DockerComposeRuntime::new();
+    let disk = SysinfoDiskProbe::new(&config.data_dir);
+    let gc = RunGc::new(runtime.clone(), disk, config.gc.disk_threshold_percent);
     let overrides = FsOverrideStore::new(config.data_dir.join("overrides"));
     let secrets = EncryptedFileStore::open(&config.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
     let env_files: Arc<dyn pi_domain::contracts::EnvFileWriter> = FsEnvFileWriter::new();
@@ -60,6 +66,14 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
         health,
         ingress,
         SystemClock::new(),
+        Arc::clone(&gc),
+        config.stage_timeouts()?,
+        config.build_concurrency,
+    );
+    let scheduler = DeployScheduler::new(
+        deploy as Arc<dyn DeployRunner>,
+        Arc::clone(&history),
+        SystemClock::new(),
     );
     let list = ListProjects::new(projects.clone(), runtime.clone());
     let send_env = SendEnv::new(
@@ -73,12 +87,13 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
     let env_keys = ListEnvKeys::new(secrets);
 
     Ok(AppState {
-        deploy,
+        scheduler,
         list,
         history,
         hub: DeployEventsHub::new(),
         ids: UuidGen::new(),
         send_env,
         env_keys,
+        gc,
     })
 }

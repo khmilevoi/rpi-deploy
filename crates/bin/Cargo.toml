@@ -13,6 +13,7 @@ pi-application = { workspace = true }
 pi-infrastructure = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 axum = { workspace = true }
 reqwest = { workspace = true }
 clap = { workspace = true }

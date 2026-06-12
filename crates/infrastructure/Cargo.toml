@@ -15,6 +15,7 @@ age = { workspace = true }
 reqwest = { workspace = true }
 serde_yaml = { workspace = true }
 tracing = { workspace = true }
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

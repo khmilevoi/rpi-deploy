@@ -15,13 +15,13 @@ pub enum DeployEvent {
 
 struct StreamState {
     lines: VecDeque<String>,
-    finished: Option<DeploymentStatus>,
     tx: broadcast::Sender<DeployEvent>,
 }
 
+/// Snapshot of an in-flight deployment's log stream. Finished deployments have
+/// no hub entry (subscribe returns None); their logs come from the DB log_tail.
 pub struct Subscription {
     pub backlog: Vec<String>,
-    pub finished: Option<DeploymentStatus>,
     pub live: broadcast::Receiver<DeployEvent>,
 }
 
@@ -43,7 +43,6 @@ impl DeployEventsHub {
                 deployment_id.to_string(),
                 StreamState {
                     lines: VecDeque::new(),
-                    finished: None,
                     tx,
                 },
             );
@@ -59,7 +58,6 @@ impl DeployEventsHub {
         let s = streams.get(deployment_id)?;
         Some(Subscription {
             backlog: s.lines.iter().cloned().collect(),
-            finished: s.finished,
             live: s.tx.subscribe(),
         })
     }
@@ -85,8 +83,11 @@ impl LogSink for HubSink {
 
     fn finished(&self, status: DeploymentStatus) {
         if let Ok(mut streams) = self.hub.streams.lock() {
-            if let Some(s) = streams.get_mut(&self.id) {
-                s.finished = Some(status);
+            // Remove the entry so its backlog (up to HUB_BACKLOG lines) is freed.
+            // Active live subscribers already hold a Receiver; they get the
+            // Finished event from the buffered channel before it closes.
+            // New subscribers after this point fall back to the DB log_tail path.
+            if let Some(s) = streams.remove(&self.id) {
                 let _ = s.tx.send(DeployEvent::Finished(status));
             }
         }
@@ -109,7 +110,6 @@ mod tests {
             sub.backlog,
             vec!["early-1".to_string(), "early-2".to_string()]
         );
-        assert!(sub.finished.is_none());
 
         sink.line("live-1");
         sink.finished(DeploymentStatus::Success);
@@ -121,15 +121,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn late_subscriber_sees_finished_in_snapshot() {
+    async fn subscribe_after_finished_returns_none() {
+        // finished() removes the entry so memory is freed. New subscribers
+        // after completion use the DB log_tail fallback path in the HTTP handler.
         let hub = DeployEventsHub::new();
         let sink = hub.register("d1");
         sink.line("a");
         sink.finished(DeploymentStatus::Failed);
 
-        let sub = hub.subscribe("d1").unwrap();
-        assert_eq!(sub.backlog, vec!["a".to_string()]);
-        assert_eq!(sub.finished, Some(DeploymentStatus::Failed));
+        assert!(hub.subscribe("d1").is_none());
     }
 
     #[tokio::test]

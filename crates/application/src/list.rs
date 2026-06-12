@@ -55,7 +55,9 @@ impl ListProjects {
 mod tests {
     use super::*;
     use pi_domain::contracts::{MockContainerRuntime, MockProjectRepository};
-    use pi_domain::entities::{HealthcheckConfig, Project, ProjectConfig, ServiceState};
+    use pi_domain::entities::{
+        HealthcheckConfig, Project, ProjectConfig, ServiceState, StageTimeoutOverrides,
+    };
     use pi_domain::error::DomainError;
 
     fn project(name: &str, host_port: u16) -> Project {
@@ -69,6 +71,7 @@ mod tests {
                 container_port: 3000,
                 hostname: None,
                 healthcheck: HealthcheckConfig::default(),
+                timeouts: StageTimeoutOverrides::default(),
             },
             host_port,
             created_at: 1,

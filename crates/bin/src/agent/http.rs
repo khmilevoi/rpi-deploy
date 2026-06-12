@@ -14,16 +14,24 @@ use pi_infrastructure::events::DeployEvent;
 use crate::agent::state::AppState;
 use crate::proto::{
     DeployAccepted, DeployRequest, DeploymentDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
-    ProjectViewDto, VersionInfo,
+    GcResponse, ProjectViewDto, VersionInfo,
 };
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/version", get(version))
+        .route("/v1/gc", post(run_gc))
         .route("/v1/deployments", post(create_deployment))
-        .route("/v1/deployments/{id}", get(get_deployment))
+        .route(
+            "/v1/deployments/{id}",
+            get(get_deployment).delete(cancel_deployment),
+        )
         .route("/v1/deployments/{id}/logs", get(deployment_logs))
         .route("/v1/projects", get(list_projects))
+        .route(
+            "/v1/projects/{name}/deployments/active",
+            get(active_deployments),
+        )
         .route(
             "/v1/projects/{name}/env",
             put(send_env_handler).get(env_keys_handler),
@@ -36,7 +44,7 @@ pub struct ApiError(pub DomainError);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self.0 {
-            DomainError::DeployInProgress(_) => StatusCode::CONFLICT,
+            DomainError::Conflict(_) => StatusCode::CONFLICT,
             DomainError::NotFound(_) => StatusCode::NOT_FOUND,
             DomainError::Invalid(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -84,19 +92,45 @@ async fn create_deployment(
     }
     let git_ref = DeployRef::parse(req.git_ref.as_deref().unwrap_or(&config.branch));
 
-    let permit = state.deploy.try_begin(&config.name).map_err(ApiError)?;
     let deployment_id = state.ids.new_id();
     let sink = state.hub.register(&deployment_id);
+    let outcome = state
+        .scheduler
+        .submit(deployment_id.clone(), config, git_ref, sink)
+        .await
+        .map_err(ApiError)?;
+    let queued = !matches!(outcome, pi_application::scheduler::SubmitOutcome::Started);
 
-    let deploy = Arc::clone(&state.deploy);
-    let id = deployment_id.clone();
-    tokio::spawn(async move {
-        if let Err(err) = deploy.execute(permit, id, config, git_ref, sink).await {
-            tracing::warn!("deploy failed: {err}");
-        }
-    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(DeployAccepted {
+            deployment_id,
+            queued,
+        }),
+    )
+        .into_response())
+}
 
-    Ok((StatusCode::ACCEPTED, Json(DeployAccepted { deployment_id })).into_response())
+const GC_TIMEOUT_SECS: u64 = 300;
+
+/// POST /v1/gc (§8.1): same RunGc as the post-deploy stage, on demand.
+async fn run_gc(State(state): State<AppState>) -> Result<Json<GcResponse>, ApiError> {
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(GC_TIMEOUT_SECS),
+        state.gc.execute(Arc::new(TracingSink)),
+    )
+    .await
+    .map_err(|_| {
+        ApiError(DomainError::Timeout {
+            stage: "gc".to_string(),
+            secs: GC_TIMEOUT_SECS,
+        })
+    })?
+    .map_err(ApiError)?;
+    Ok(Json(GcResponse {
+        disk_used_percent: report.disk_used_percent,
+        builder_pruned: report.builder_pruned,
+    }))
 }
 
 async fn get_deployment(
@@ -109,11 +143,53 @@ async fn get_deployment(
     }
 }
 
+/// DELETE /v1/deployments/{id} (§8.1, §9.1): queued — removed immediately,
+/// running — the cancel token is signalled and the runner records `canceled`.
+async fn cancel_deployment(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use pi_application::scheduler::CancelOutcome;
+    match state.scheduler.cancel(&id).await.map_err(ApiError)? {
+        CancelOutcome::CanceledQueued => Ok(Json(serde_json::json!({ "status": "canceled" }))),
+        CancelOutcome::CancelRequested => Ok(Json(serde_json::json!({ "status": "canceling" }))),
+        CancelOutcome::NotActive => match state.history.get(&id).await.map_err(ApiError)? {
+            Some(d) if d.status.is_terminal() => Err(ApiError(DomainError::Conflict(format!(
+                "deployment {id} already finished ({})",
+                d.status.as_str()
+            )))),
+            // DB row is queued/running but the scheduler does not know it:
+            // either it is finishing this instant or a restart orphaned the row
+            // (the startup sweep will mark it interrupted).
+            Some(d) => Err(ApiError(DomainError::Conflict(format!(
+                "deployment {id} is recorded as {} but is not active in the scheduler; \
+it may be finishing right now or was orphaned by an agent restart",
+                d.status.as_str()
+            )))),
+            None => Err(ApiError(DomainError::NotFound(format!("deployment {id}")))),
+        },
+    }
+}
+
 async fn list_projects(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ProjectViewDto>>, ApiError> {
     let views = state.list.execute().await.map_err(ApiError)?;
     Ok(Json(views.into_iter().map(Into::into).collect()))
+}
+
+/// Active (queued/running) deployments of a project — used by `pi deploy --cancel`.
+async fn active_deployments(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<DeploymentDto>>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    let list = state.history.active(&name).await.map_err(ApiError)?;
+    Ok(Json(list.into_iter().map(Into::into).collect()))
 }
 
 fn sse_log(line: String) -> Result<Event, Infallible> {
@@ -132,10 +208,6 @@ async fn deployment_logs(
         let stream = async_stream::stream! {
             for line in sub.backlog {
                 yield sse_log(line);
-            }
-            if let Some(status) = sub.finished {
-                yield sse_finished(status.as_str());
-                return;
             }
             let mut live = sub.live;
             loop {
@@ -235,11 +307,12 @@ mod tests {
     use http_body_util::BodyExt;
     use pi_application::deploy::DeployProject;
     use pi_application::env::{ListEnvKeys, SendEnv};
+    use pi_application::gc::RunGc;
     use pi_application::list::ListProjects;
     use pi_domain::contracts::{
-        ContainerRuntime, LogSink, MockContainerRuntime, MockSource, Source,
+        ContainerRuntime, LogSink, MockContainerRuntime, MockDiskProbe, MockSource, Source,
     };
-    use pi_domain::entities::FetchedSource;
+    use pi_domain::entities::{FetchedSource, StageTimeouts};
     use pi_infrastructure::events::DeployEventsHub;
     use pi_infrastructure::history::SqliteHistory;
     use pi_infrastructure::overrides::FsOverrideStore;
@@ -265,6 +338,8 @@ mod tests {
         let mut runtime = MockContainerRuntime::new();
         runtime.expect_build().returning(|_, _| Ok(()));
         runtime.expect_up().returning(|_, _| Ok(()));
+        runtime.expect_prune_images().returning(|_| Ok(()));
+        runtime.expect_prune_builder().returning(|_| Ok(()));
         runtime.expect_ps().returning(|_| {
             Ok(vec![pi_domain::entities::ServiceState {
                 service: "web".into(),
@@ -287,13 +362,16 @@ mod tests {
 
         let db = Db::open(&dir.join("state.db")).unwrap();
         let projects = SqliteProjectRepo::new(db.clone(), 8000, 8999);
-        let history: Arc<dyn pi_domain::contracts::DeploymentHistory> = SqliteHistory::new(db);
+        let history: Arc<dyn pi_domain::contracts::DeploymentHistory> = SqliteHistory::new(db, 50);
         let overrides = FsOverrideStore::new(dir.join("overrides"));
         let secrets = EncryptedFileStore::open(dir).unwrap();
         let health = HybridHealthGate::with_interval(
             Arc::clone(&runtime),
             std::time::Duration::from_millis(10),
         );
+        let mut disk = MockDiskProbe::new();
+        disk.expect_used_percent().returning(|| Ok(10));
+        let gc = RunGc::new(Arc::clone(&runtime), Arc::new(disk), 85);
         let deploy = DeployProject::new(
             source.clone(),
             Arc::clone(&runtime),
@@ -304,6 +382,14 @@ mod tests {
             FsEnvFileWriter::new(),
             health,
             DisabledIngress::new(),
+            SystemClock::new(),
+            Arc::clone(&gc),
+            StageTimeouts::default(),
+            1,
+        );
+        let scheduler = pi_application::scheduler::DeployScheduler::new(
+            deploy as Arc<dyn pi_application::scheduler::DeployRunner>,
+            Arc::clone(&history),
             SystemClock::new(),
         );
         let list = ListProjects::new(projects.clone(), Arc::clone(&runtime));
@@ -317,13 +403,14 @@ mod tests {
         );
         let env_keys = ListEnvKeys::new(secrets);
         AppState {
-            deploy,
+            scheduler,
             list,
             history,
             hub: DeployEventsHub::new(),
             ids: UuidGen::new(),
             send_env,
             env_keys,
+            gc,
         }
     }
 
@@ -370,6 +457,18 @@ mod tests {
             .unwrap()
     }
 
+    fn post_empty(uri: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::post(uri)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    fn delete_req(uri: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::delete(uri)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn version_handshake() {
         let dir = tempfile::tempdir().unwrap();
@@ -409,7 +508,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             let (status, json) =
                 request(app.clone(), get_req(&format!("/v1/deployments/{id}"))).await;
-            // 404 is OK briefly while record_started hasn't committed yet
+            // 404 is OK briefly while the async deploy task is still starting.
             if status == StatusCode::NOT_FOUND {
                 continue;
             }
@@ -428,7 +527,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_deploy_of_same_project_is_409() {
+    async fn concurrent_deploys_queue_with_latest_wins() {
         struct GatedSource(Arc<tokio::sync::Notify>);
 
         #[async_trait::async_trait]
@@ -459,19 +558,55 @@ mod tests {
             Arc::new(ok_runtime()),
         ));
 
-        let (status, _) = request(
-            app.clone(),
-            post_json("/v1/deployments", &deploy_body("rateme")),
-        )
-        .await;
-        assert_eq!(status, StatusCode::ACCEPTED);
         let (status, json) = request(
             app.clone(),
             post_json("/v1/deployments", &deploy_body("rateme")),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(json["queued"], false);
+
+        let (status, json) = request(
+            app.clone(),
+            post_json("/v1/deployments", &deploy_body("rateme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        assert_eq!(json["queued"], true);
+        let superseded_id = json["deployment_id"].as_str().unwrap().to_string();
+
+        let (status, json) = request(
+            app.clone(),
+            post_json("/v1/deployments", &deploy_body("rateme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(json["queued"], true);
+
+        let (status, json) = request(
+            app.clone(),
+            get_req(&format!("/v1/deployments/{superseded_id}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "superseded");
+
         gate.notify_one();
+        gate.notify_one();
+    }
+
+    #[tokio::test]
+    async fn gc_endpoint_reports_disk_and_prune_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, json) = request(app, post_empty("/v1/gc")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["disk_used_percent"], 10);
+        assert_eq!(json["builder_pruned"], false);
     }
 
     #[tokio::test]
@@ -484,6 +619,140 @@ mod tests {
         ));
         let (status, _) = request(app, get_req("/v1/deployments/nope")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_deployment_is_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, _) = request(app, delete_req("/v1/deployments/nope")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cancel_finished_deployment_is_409() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, json) = request(
+            app.clone(),
+            post_json("/v1/deployments", &deploy_body("rateme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = json["deployment_id"].as_str().unwrap().to_string();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            assert!(tokio::time::Instant::now() < deadline, "deploy hung");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let (_, json) = request(app.clone(), get_req(&format!("/v1/deployments/{id}"))).await;
+            if json["status"] == "success" {
+                break;
+            }
+        }
+
+        let (status, json) =
+            request(app.clone(), delete_req(&format!("/v1/deployments/{id}"))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    }
+
+    #[tokio::test]
+    async fn cancel_orphaned_db_row_explains_scheduler_mismatch() {
+        // A queued row in the DB with no scheduler entry (e.g. after an agent
+        // restart) must produce a 409 that does not claim "already finished".
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime()));
+        state
+            .history
+            .record_queued(&pi_domain::entities::Deployment {
+                id: "ghost-q".into(),
+                project: "rateme".into(),
+                git_ref: "main".into(),
+                commit_sha: None,
+                status: DeploymentStatus::Queued,
+                started_at: 1,
+                finished_at: None,
+                log_tail: String::new(),
+            })
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let (status, json) = request(app, delete_req("/v1/deployments/ghost-q")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("not active in the scheduler"), "{msg}");
+        assert!(!msg.contains("already finished"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn cancel_running_deployment_marks_it_canceled() {
+        struct HangingSource;
+
+        #[async_trait::async_trait]
+        impl Source for HangingSource {
+            fn workdir(&self, project_name: &str) -> std::path::PathBuf {
+                std::env::temp_dir().join(project_name)
+            }
+
+            async fn fetch(
+                &self,
+                _p: &ProjectConfig,
+                _r: &DeployRef,
+                _l: Arc<dyn LogSink>,
+            ) -> Result<FetchedSource, DomainError> {
+                std::future::pending().await
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(HangingSource),
+            Arc::new(ok_runtime()),
+        ));
+
+        let (status, json) = request(
+            app.clone(),
+            post_json("/v1/deployments", &deploy_body("rateme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = json["deployment_id"].as_str().unwrap().to_string();
+
+        let (status, json) = request(
+            app.clone(),
+            get_req("/v1/projects/rateme/deployments/active"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json[0]["id"], id.as_str(), "{json}");
+
+        let (status, json) =
+            request(app.clone(), delete_req(&format!("/v1/deployments/{id}"))).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["status"], "canceling");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "cancel did not land"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let (_, json) = request(app.clone(), get_req(&format!("/v1/deployments/{id}"))).await;
+            if json["status"] == "canceled" {
+                break;
+            }
+        }
     }
 
     fn put_json(uri: &str, body: &serde_json::Value) -> axum::http::Request<axum::body::Body> {

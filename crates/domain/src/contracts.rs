@@ -41,6 +41,18 @@ pub trait ContainerRuntime: Send + Sync {
     async fn build(&self, stack: &ComposeStack, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
     async fn up(&self, stack: &ComposeStack, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
     async fn ps(&self, project_name: &str) -> Result<Vec<ServiceState>, DomainError>;
+    /// `docker image prune -f` — dangling images only; build cache stays (§8.1).
+    async fn prune_images(&self, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
+    /// `docker builder prune -f` with an age filter — frees build cache when
+    /// the disk crosses the GC threshold (§8.1).
+    async fn prune_builder(&self, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
+}
+
+/// Disk fill probe for the GC threshold decision (§8.1). v1 — sysinfo.
+#[cfg_attr(feature = "mocks", automock)]
+pub trait DiskProbe: Send + Sync {
+    /// Used space of the filesystem holding the agent data dir, percent 0..=100.
+    fn used_percent(&self) -> Result<u8, DomainError>;
 }
 
 /// Project registry + port allocation (§6).
@@ -54,11 +66,15 @@ pub trait ProjectRepository: Send + Sync {
     async fn list(&self) -> Result<Vec<Project>, DomainError>;
 }
 
-/// Deployment history (§6).
+/// Deployment history (§6, §18).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait DeploymentHistory: Send + Sync {
-    async fn record_started(&self, deployment: &Deployment) -> Result<(), DomainError>;
+    /// INSERT the deployment row (normally status Queued). The adapter prunes
+    /// old terminal rows of the project beyond its retention right after (§18).
+    async fn record_queued(&self, deployment: &Deployment) -> Result<(), DomainError>;
+    /// Queued -> Running; refreshes started_at to the actual start moment.
+    async fn mark_running(&self, id: &str, started_at: i64) -> Result<(), DomainError>;
     async fn record_finished<'a>(
         &self,
         id: &str,
@@ -68,6 +84,11 @@ pub trait DeploymentHistory: Send + Sync {
         log_tail: &str,
     ) -> Result<(), DomainError>;
     async fn get(&self, id: &str) -> Result<Option<Deployment>, DomainError>;
+    /// Non-terminal deployments of a project (queued/running), newest first.
+    async fn active(&self, project: &str) -> Result<Vec<Deployment>, DomainError>;
+    /// Crash-recovery sweep at agent start (§8.1): queued/running -> interrupted.
+    /// Returns the number of rows swept.
+    async fn sweep_interrupted(&self, finished_at: i64) -> Result<u64, DomainError>;
 }
 
 /// Writes compose-override with mapping 127.0.0.1:<host> → <container> (§12.1).

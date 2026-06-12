@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::cli::sse::SseParser;
 use crate::proto::{
-    DeployAccepted, DeployRequest, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
-    ProjectViewDto, VersionInfo,
+    DeployAccepted, DeployRequest, DeploymentDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
+    GcResponse, ProjectViewDto, VersionInfo,
 };
 
 async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
@@ -54,9 +54,37 @@ impl ApiClient {
             .json(req)
             .send()
             .await?;
-        if resp.status() == reqwest::StatusCode::CONFLICT {
-            anyhow::bail!("deploy of this project is already in progress on the agent");
-        }
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn active_deployments(&self, project: &str) -> anyhow::Result<Vec<DeploymentDto>> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/v1/projects/{project}/deployments/active",
+                self.base
+            ))
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn cancel_deployment(&self, id: &str) -> anyhow::Result<String> {
+        let resp = self
+            .http
+            .delete(format!("{}/v1/deployments/{id}", self.base))
+            .send()
+            .await?;
+        let json: serde_json::Value = extract_error(resp).await?.json().await?;
+        Ok(json["status"].as_str().unwrap_or("unknown").to_string())
+    }
+
+    pub async fn gc(&self) -> anyhow::Result<GcResponse> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/gc", self.base))
+            .send()
+            .await?;
         Ok(extract_error(resp).await?.json().await?)
     }
 

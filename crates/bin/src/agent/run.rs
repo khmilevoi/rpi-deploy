@@ -3,10 +3,20 @@ use std::path::PathBuf;
 use crate::agent::config::AgentConfig;
 use crate::agent::http::router;
 use crate::agent::state::build_state;
+use pi_domain::contracts::Clock;
 
 pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let config = AgentConfig::load(config_path.as_deref())?;
     let state = build_state(&config)?;
+    let now = pi_infrastructure::sys::SystemClock::new().now_unix();
+    let swept = state
+        .history
+        .sweep_interrupted(now)
+        .await
+        .map_err(|e| anyhow::anyhow!("startup sweep: {e}"))?;
+    if swept > 0 {
+        tracing::warn!("marked {swept} unfinished deployment(s) as interrupted (agent restart)");
+    }
     let app = router(state);
 
     // windows

@@ -172,7 +172,9 @@ mod tests {
 #[cfg(test)]
 mod integration {
     use super::*;
-    use pi_domain::entities::{DeployRef, DeploymentStatus, HealthcheckConfig, ProjectConfig};
+    use pi_domain::entities::{
+        DeployRef, DeploymentStatus, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides,
+    };
     use std::path::Path;
 
     struct NullSink;
@@ -209,6 +211,7 @@ mod integration {
             container_port: 3000,
             hostname: None,
             healthcheck: HealthcheckConfig::default(),
+            timeouts: StageTimeoutOverrides::default(),
         }
     }
 

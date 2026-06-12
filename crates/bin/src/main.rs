@@ -1,5 +1,6 @@
 mod agent;
 mod cli;
+mod duration;
 mod proto;
 
 use std::path::PathBuf;
@@ -22,17 +23,24 @@ enum Cmd {
     /// Deploy current project (reads ./pi.toml)
     Deploy {
         /// Branch or commit-sha (default — branch from pi.toml)
-        #[arg(long = "ref")]
+        #[arg(long = "ref", conflicts_with = "cancel")]
         git_ref: Option<String>,
-        /// Server profile from ~/.config/pi/config.toml
+        /// Cancel the active deploy(s) of the current project instead
         #[arg(long)]
-        server: Option<String>,
+        cancel: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
     },
     /// List projects on the agent
     #[command(alias = "ps")]
     Ls {
-        #[arg(long)]
-        server: Option<String>,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Prune docker images and build cache on the agent (§8.1)
+    Gc {
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
     },
     /// Manage project secrets
     Env {
@@ -53,15 +61,13 @@ enum EnvCmd {
         /// Also apply the new secrets to running containers
         #[arg(long)]
         apply: bool,
-        /// Server profile from ~/.config/pi/config.toml
-        #[arg(long)]
-        server: Option<String>,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
     },
     /// List secret keys stored on the agent (values are never transmitted)
     Ls {
-        /// Server profile from ~/.config/pi/config.toml
-        #[arg(long)]
-        server: Option<String>,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
     },
 }
 
@@ -85,16 +91,76 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Deploy { git_ref, server } => cli::commands::deploy(git_ref, server).await,
-        Cmd::Ls { server } => cli::commands::ls(server).await,
+        Cmd::Deploy {
+            git_ref,
+            cancel,
+            connect,
+        } => {
+            if cancel {
+                cli::commands::deploy_cancel(connect).await
+            } else {
+                cli::commands::deploy(git_ref, connect).await
+            }
+        }
+        Cmd::Ls { connect } => cli::commands::ls(connect).await,
+        Cmd::Gc { connect } => cli::commands::gc(connect).await,
         Cmd::Env {
-            cmd: EnvCmd::Send { apply, server },
-        } => cli::commands::env_send(apply, server).await,
+            cmd: EnvCmd::Send { apply, connect },
+        } => cli::commands::env_send(apply, connect).await,
         Cmd::Env {
-            cmd: EnvCmd::Ls { server },
-        } => cli::commands::env_ls(server).await,
+            cmd: EnvCmd::Ls { connect },
+        } => cli::commands::env_ls(connect).await,
         Cmd::Agent {
             cmd: AgentCmd::Run { config },
         } => agent::run::run(config).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn deploy_host_requires_user() {
+        assert!(Cli::try_parse_from(["pi", "deploy", "--host", "203.0.113.7"]).is_err());
+    }
+
+    #[test]
+    fn deploy_ci_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "pi",
+            "deploy",
+            "--host",
+            "203.0.113.7",
+            "--user",
+            "pi",
+            "--key",
+            "./k",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Deploy { connect, .. } => {
+                assert_eq!(connect.host.as_deref(), Some("203.0.113.7"));
+                assert_eq!(connect.user.as_deref(), Some("pi"));
+                assert_eq!(connect.key.as_deref(), Some("./k"));
+            }
+            _ => panic!("expected deploy"),
+        }
+    }
+
+    #[test]
+    fn server_flag_conflicts_with_host() {
+        assert!(Cli::try_parse_from([
+            "pi",
+            "deploy",
+            "--server",
+            "home",
+            "--host",
+            "203.0.113.7",
+            "--user",
+            "pi",
+        ])
+        .is_err());
     }
 }

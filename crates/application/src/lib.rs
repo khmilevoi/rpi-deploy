@@ -1,8 +1,9 @@
 pub mod deploy;
 pub mod env;
+pub mod gc;
 pub mod list;
-pub mod locks;
 pub mod mask;
+pub mod scheduler;
 pub mod tail;
 
 #[cfg(test)]

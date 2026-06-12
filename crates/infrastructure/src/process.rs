@@ -10,6 +10,7 @@ pub async fn run_streamed(mut cmd: Command, log: Arc<dyn LogSink>) -> Result<(),
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
+    cmd.kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| format!("spawn {label}: {e}"))?;
 
     let stdout = child.stdout.take().ok_or("child stdout not captured")?;
@@ -40,6 +41,7 @@ async fn forward_lines<R: AsyncRead + Unpin>(reader: R, log: Arc<dyn LogSink>) {
 pub async fn run_capture(mut cmd: Command) -> Result<String, String> {
     let label = format!("{:?}", cmd.as_std());
     cmd.stdin(Stdio::null());
+    cmd.kill_on_drop(true);
     let out = cmd
         .output()
         .await
@@ -104,5 +106,30 @@ mod tests {
         cmd.arg("definitely-not-a-git-command");
         let err = run_streamed(cmd, sink).await.unwrap_err();
         assert!(err.contains("exited with"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn dropping_run_streamed_future_kills_the_child() {
+        let mut cmd;
+        #[cfg(windows)]
+        {
+            cmd = tokio::process::Command::new("ping");
+            cmd.args(["-n", "30", "127.0.0.1"]);
+        }
+        #[cfg(not(windows))]
+        {
+            cmd = tokio::process::Command::new("sleep");
+            cmd.arg("30");
+        }
+
+        let sink = Arc::new(VecSink(Mutex::new(vec![])));
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            run_streamed(cmd, sink),
+        )
+        .await;
+        assert!(result.is_err(), "child must outlive the timeout");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }
