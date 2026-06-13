@@ -1,5 +1,5 @@
-use std::ffi::OsString;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -88,7 +88,10 @@ pub(crate) fn compose_args(project_name: &str, files: &[PathBuf], tail: &[&str])
 }
 
 pub(crate) fn parse_ps_json(output: &str) -> Vec<ServiceState> {
-    json_lines(output).iter().filter_map(service_state).collect()
+    json_lines(output)
+        .iter()
+        .filter_map(service_state)
+        .collect()
 }
 
 /// One JSON document per line (modern compose/docker) or a legacy array.
@@ -171,7 +174,10 @@ pub(crate) fn parse_stats_json(ps_output: &str, stats_output: &str) -> Vec<Servi
         let Some(service) = services.get(name) else {
             continue;
         };
-        let Some(cpu_percent) = v.get("CPUPerc").and_then(|p| p.as_str()).and_then(parse_percent)
+        let Some(cpu_percent) = v
+            .get("CPUPerc")
+            .and_then(|p| p.as_str())
+            .and_then(parse_percent)
         else {
             continue;
         };

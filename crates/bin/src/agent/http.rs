@@ -1,26 +1,35 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use pi_domain::entities::{DeployRef, DeploymentStatus, EnvBundle, ProjectConfig};
+use pi_application::logs::DEFAULT_LOG_TAIL;
+use pi_domain::entities::{DeployRef, DeploymentStatus, EnvBundle, LifecycleAction, ProjectConfig};
 use pi_domain::error::DomainError;
 use pi_infrastructure::events::DeployEvent;
+use serde::Deserialize;
+use tokio::sync::mpsc;
 
+use crate::agent::logfile;
 use crate::agent::state::AppState;
 use crate::proto::{
-    DeployAccepted, DeployRequest, DeploymentDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
-    GcResponse, ProjectViewDto, VersionInfo,
+    AgentOverviewDto, DeployAccepted, DeployRequest, DeploymentDto, DiagnosticReportDto,
+    EnvKeysResponse, EnvSendRequest, EnvSendResponse, GcResponse, LifecycleResponse,
+    ProjectViewDto, RemoveResponse, StatsReportDto, VersionInfo,
 };
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/version", get(version))
         .route("/v1/gc", post(run_gc))
+        .route("/v1/stats", get(stats))
+        .route("/v1/status", get(agent_status))
+        .route("/v1/doctor", get(doctor))
+        .route("/v1/agent/logs", get(agent_logs))
         .route("/v1/deployments", post(create_deployment))
         .route(
             "/v1/deployments/{id}",
@@ -28,6 +37,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/deployments/{id}/logs", get(deployment_logs))
         .route("/v1/projects", get(list_projects))
+        .route("/v1/projects/{name}", delete(remove_project))
+        .route("/v1/projects/{name}/logs", get(project_logs))
+        .route("/v1/projects/{name}/lifecycle/{action}", post(lifecycle))
         .route(
             "/v1/projects/{name}/deployments/active",
             get(active_deployments),
@@ -133,6 +145,84 @@ async fn run_gc(State(state): State<AppState>) -> Result<Json<GcResponse>, ApiEr
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct StatsQuery {
+    project: Option<String>,
+}
+
+async fn stats(
+    State(state): State<AppState>,
+    Query(q): Query<StatsQuery>,
+) -> Result<Json<StatsReportDto>, ApiError> {
+    Ok(Json(
+        state
+            .stats
+            .execute(q.project)
+            .await
+            .map_err(ApiError)?
+            .into(),
+    ))
+}
+
+async fn agent_status(State(state): State<AppState>) -> Result<Json<AgentOverviewDto>, ApiError> {
+    Ok(Json(
+        state.agent_status.execute().await.map_err(ApiError)?.into(),
+    ))
+}
+
+async fn doctor(State(state): State<AppState>) -> Json<DiagnosticReportDto> {
+    Json(state.diagnostics.execute().await.into())
+}
+
+async fn lifecycle(
+    State(state): State<AppState>,
+    Path((name, action)): Path<(String, String)>,
+) -> Result<Json<LifecycleResponse>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    let action = action
+        .parse::<LifecycleAction>()
+        .map_err(|_| ApiError(DomainError::Invalid("invalid lifecycle action".into())))?;
+    state
+        .lifecycle
+        .execute(&name, action, Arc::new(TracingSink))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(LifecycleResponse {
+        project: name,
+        action: action.as_str().to_string(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoveQuery {
+    #[serde(default)]
+    volumes: bool,
+}
+
+async fn remove_project(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<RemoveQuery>,
+) -> Result<Json<RemoveResponse>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    Ok(Json(
+        state
+            .remove
+            .execute(&name, q.volumes, Arc::new(TracingSink))
+            .await
+            .map_err(ApiError)?
+            .into(),
+    ))
+}
+
 async fn get_deployment(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -194,6 +284,94 @@ async fn active_deployments(
 
 fn sse_log(line: String) -> Result<Event, Infallible> {
     Ok(Event::default().event("log").data(line))
+}
+
+struct ChannelSink(mpsc::UnboundedSender<String>);
+
+impl pi_domain::contracts::LogSink for ChannelSink {
+    fn line(&self, line: &str) {
+        let _ = self.0.send(line.to_string());
+    }
+
+    fn finished(&self, _status: DeploymentStatus) {}
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    #[serde(default = "default_tail")]
+    tail: usize,
+    #[serde(default)]
+    follow: bool,
+    since: Option<i64>,
+}
+
+fn default_tail() -> usize {
+    DEFAULT_LOG_TAIL
+}
+
+async fn project_logs(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<LogsQuery>,
+) -> Result<Response, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    state
+        .stream_logs
+        .ensure_project(&name)
+        .await
+        .map_err(ApiError)?;
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let logs = state.stream_logs.clone();
+    tokio::spawn(async move {
+        let _ = logs
+            .execute(&name, q.tail, q.follow, Arc::new(ChannelSink(tx)))
+            .await;
+    });
+    let stream = async_stream::stream! {
+        while let Some(line) = rx.recv().await {
+            yield sse_log(line);
+        }
+    };
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+async fn agent_logs(
+    State(state): State<AppState>,
+    Query(q): Query<LogsQuery>,
+) -> Result<Response, ApiError> {
+    let initial = logfile::read(&state.log_dir, Some(q.tail), q.since)
+        .map_err(|e| ApiError(DomainError::Storage(format!("agent logs: {e}"))))?;
+    if !q.follow {
+        let stream = async_stream::stream! {
+            for line in initial {
+                yield sse_log(line);
+            }
+        };
+        return Ok(Sse::new(stream).into_response());
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    for line in initial {
+        let _ = tx.send(line);
+    }
+    let dir = state.log_dir.clone();
+    tokio::spawn(async move {
+        let _ = logfile::follow(dir, q.since, |line| tx.send(line).is_ok()).await;
+    });
+    let stream = async_stream::stream! {
+        while let Some(line) = rx.recv().await {
+            yield sse_log(line);
+        }
+    };
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 
 fn sse_finished(status: &str) -> Result<Event, Infallible> {
@@ -306,9 +484,14 @@ mod tests {
     use crate::agent::state::AppState;
     use http_body_util::BodyExt;
     use pi_application::deploy::DeployProject;
+    use pi_application::diagnostics::{AgentStatus, RunDiagnostics};
     use pi_application::env::{ListEnvKeys, SendEnv};
     use pi_application::gc::RunGc;
+    use pi_application::lifecycle::ControlLifecycle;
     use pi_application::list::ListProjects;
+    use pi_application::logs::StreamLogs;
+    use pi_application::remove::RemoveProject;
+    use pi_application::stats::GetStats;
     use pi_domain::contracts::{
         ContainerRuntime, LogSink, MockContainerRuntime, MockDiskProbe, MockSource, Source,
     };
@@ -316,8 +499,10 @@ mod tests {
     use pi_infrastructure::events::DeployEventsHub;
     use pi_infrastructure::history::SqliteHistory;
     use pi_infrastructure::overrides::FsOverrideStore;
+    use pi_infrastructure::probe::{HostSystemProbe, SystemRunner};
     use pi_infrastructure::repo::SqliteProjectRepo;
     use pi_infrastructure::sqlite::Db;
+    use pi_infrastructure::stats::CompositeStats;
     use pi_infrastructure::sys::{SystemClock, UuidGen};
     use tower::ServiceExt;
 
@@ -371,7 +556,8 @@ mod tests {
         );
         let mut disk = MockDiskProbe::new();
         disk.expect_used_percent().returning(|| Ok(10));
-        let gc = RunGc::new(Arc::clone(&runtime), Arc::new(disk), 85);
+        let disk = Arc::new(disk);
+        let gc = RunGc::new(Arc::clone(&runtime), disk.clone(), 85);
         let deploy = DeployProject::new(
             source.clone(),
             Arc::clone(&runtime),
@@ -393,6 +579,28 @@ mod tests {
             SystemClock::new(),
         );
         let list = ListProjects::new(projects.clone(), Arc::clone(&runtime));
+        let stream_logs = StreamLogs::new(projects.clone(), secrets.clone(), Arc::clone(&runtime));
+        let stats_provider = CompositeStats::new(Arc::clone(&runtime), disk.clone());
+        let stats = GetStats::new(projects.clone(), Arc::clone(&history), stats_provider);
+        let lifecycle =
+            ControlLifecycle::new(projects.clone(), Arc::clone(&history), Arc::clone(&runtime));
+        let remove = RemoveProject::new(
+            projects.clone(),
+            Arc::clone(&history),
+            Arc::clone(&runtime),
+            DisabledIngress::new(),
+            source.clone(),
+            secrets.clone(),
+            overrides.clone(),
+        );
+        let probe = HostSystemProbe::new(
+            Arc::new(SystemRunner),
+            disk,
+            projects.clone(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+        let diagnostics = RunDiagnostics::new(probe.clone());
+        let agent_status = AgentStatus::new(probe, projects.clone(), Arc::clone(&history));
         let send_env = SendEnv::new(
             secrets.clone(),
             projects,
@@ -411,6 +619,13 @@ mod tests {
             send_env,
             env_keys,
             gc,
+            stream_logs,
+            stats,
+            lifecycle,
+            remove,
+            diagnostics,
+            agent_status,
+            log_dir: dir.join("logs"),
         }
     }
 

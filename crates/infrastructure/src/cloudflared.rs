@@ -161,7 +161,9 @@ impl Ingress for CloudflaredIngress {
         let mut doc: serde_yaml::Value = serde_yaml::from_str(&text).map_err(ingress_err)?;
         let changed = remove_ingress_rule(&mut doc, hostname).map_err(ingress_err)?;
         if !changed {
-            log.line(&format!("ingress: no route for {hostname}; cloudflared untouched"));
+            log.line(&format!(
+                "ingress: no route for {hostname}; cloudflared untouched"
+            ));
             return Ok(());
         }
         let updated = serde_yaml::to_string(&doc).map_err(ingress_err)?;

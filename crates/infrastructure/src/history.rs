@@ -210,9 +210,12 @@ impl DeploymentHistory for SqliteHistory {
         let project = project.to_string();
         self.db
             .call(move |conn| {
-                conn.execute("DELETE FROM deployments WHERE project = ?1", params![project])
-                    .map(|_| ())
-                    .map_err(storage_err)
+                conn.execute(
+                    "DELETE FROM deployments WHERE project = ?1",
+                    params![project],
+                )
+                .map(|_| ())
+                .map_err(storage_err)
             })
             .await
     }

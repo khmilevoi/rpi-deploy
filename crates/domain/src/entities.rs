@@ -462,18 +462,14 @@ mod tests {
             detail: "inactive".into(),
             hint: Some("systemctl --user start cloudflared".into()),
         };
-        assert!(
-            DiagnosticReport {
-                checks: vec![pass.clone()]
-            }
-            .all_passed()
-        );
-        assert!(
-            !DiagnosticReport {
-                checks: vec![pass, fail]
-            }
-            .all_passed()
-        );
+        assert!(DiagnosticReport {
+            checks: vec![pass.clone()]
+        }
+        .all_passed());
+        assert!(!DiagnosticReport {
+            checks: vec![pass, fail]
+        }
+        .all_passed());
         assert!(
             DiagnosticReport::default().all_passed(),
             "no checks - nothing failed"

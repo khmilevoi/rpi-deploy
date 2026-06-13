@@ -12,7 +12,10 @@ pub struct CompositeStats {
 }
 
 impl CompositeStats {
-    pub fn new(runtime: Arc<dyn ContainerRuntime>, disk: Arc<dyn DiskProbe>) -> Arc<CompositeStats> {
+    pub fn new(
+        runtime: Arc<dyn ContainerRuntime>,
+        disk: Arc<dyn DiskProbe>,
+    ) -> Arc<CompositeStats> {
         Arc::new(CompositeStats { runtime, disk })
     }
 }
