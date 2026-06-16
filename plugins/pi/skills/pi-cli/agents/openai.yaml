@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pi CLI"
+  short_description: "Operate the pi deploy CLI"
+  default_prompt: "Use $pi-cli to deploy and inspect a project."

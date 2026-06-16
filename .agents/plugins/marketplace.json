@@ -1,0 +1,20 @@
+{
+  "name": "pi-local",
+  "interface": {
+    "displayName": "Pi Local"
+  },
+  "plugins": [
+    {
+      "name": "pi",
+      "source": {
+        "source": "local",
+        "path": "./plugins/pi"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
