@@ -80,7 +80,7 @@ Install base packages:
 
 ```bash
 sudo apt update
-sudo apt install -y git curl build-essential pkg-config libssl-dev
+sudo apt install -y git curl build-essential pkg-config
 ```
 
 Install Docker:
