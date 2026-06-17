@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::sqlite::{storage_err, Db};
 
-const SELECT: &str = "SELECT name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at FROM projects";
+const SELECT: &str = "SELECT name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose FROM projects";
 
 pub struct SqliteProjectRepo {
     db: Db,
@@ -38,7 +38,7 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> Result<Project, rusqlite::Error> {
             service: row.get(4)?,
             container_port: row.get(5)?,
             hostname: row.get(6)?,
-            expose: ExposeMode::default(),
+            expose: ExposeMode::parse(&row.get::<_, String>(9)?).unwrap_or_default(),
             healthcheck: HealthcheckConfig::default(), // per-deploy input, not stored
             timeouts: StageTimeoutOverrides::default(), // per-deploy input, not stored
         },
@@ -93,23 +93,7 @@ impl ProjectRepository for SqliteProjectRepo {
                     .map_err(storage_err)?;
                 if exists.is_some() {
                     tx.execute(
-                        "UPDATE projects SET repo=?2, branch=?3, compose_path=?4, service=?5, container_port=?6, hostname=?7 WHERE name=?1",
-                        params![
-                            &config.name,
-                            &config.repo,
-                            &config.branch,
-                            &config.compose_path,
-                            &config.service,
-                            config.container_port,
-                            &config.hostname
-                        ],
-                    )
-                    .map_err(storage_err)?;
-                } else {
-                    let port = allocate_port(&tx, min, max)?;
-                    tx.execute(
-                        "INSERT INTO projects (name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())",
+                        "UPDATE projects SET repo=?2, branch=?3, compose_path=?4, service=?5, container_port=?6, hostname=?7, expose=?8 WHERE name=?1",
                         params![
                             &config.name,
                             &config.repo,
@@ -118,7 +102,25 @@ impl ProjectRepository for SqliteProjectRepo {
                             &config.service,
                             config.container_port,
                             &config.hostname,
-                            port
+                            config.expose.as_str()
+                        ],
+                    )
+                    .map_err(storage_err)?;
+                } else {
+                    let port = allocate_port(&tx, min, max)?;
+                    tx.execute(
+                        "INSERT INTO projects (name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch(), ?9)",
+                        params![
+                            &config.name,
+                            &config.repo,
+                            &config.branch,
+                            &config.compose_path,
+                            &config.service,
+                            config.container_port,
+                            &config.hostname,
+                            port,
+                            config.expose.as_str()
                         ],
                     )
                     .map_err(storage_err)?;
@@ -234,6 +236,17 @@ mod tests {
         assert_eq!(found.config.name, "a");
         assert_eq!(found.host_port, 8000);
         assert!(repo.get("nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn roundtrips_expose_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo(&dir, 8000, 8999);
+        let mut c = cfg("a");
+        c.expose = pi_domain::entities::ExposeMode::Lan;
+        repo.upsert(&c).await.unwrap();
+        let got = repo.get("a").await.unwrap().unwrap();
+        assert_eq!(got.config.expose, pi_domain::entities::ExposeMode::Lan);
     }
 
     #[tokio::test]
