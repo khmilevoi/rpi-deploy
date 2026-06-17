@@ -42,6 +42,22 @@ struct InitArgs {
     yes: bool,
 }
 
+#[derive(clap::Args)]
+struct SetupArgs {
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(long)]
+    user: Option<String>,
+    #[arg(long)]
+    key: Option<String>,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    default: bool,
+    #[arg(long)]
+    yes: bool,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Deploy current project (reads ./pi.toml)
@@ -126,6 +142,8 @@ enum Cmd {
     },
     /// Generate pi.toml in the current project (wizard; flags for CI)
     Init(InitArgs),
+    /// Configure a server profile on this machine (wizard; flags for CI)
+    Setup(SetupArgs),
     /// Manage project secrets
     Env {
         #[command(subcommand)]
@@ -260,6 +278,17 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
         }
+        Cmd::Setup(a) => {
+            cli::setup::run(cli::setup::SetupFlags {
+                host: a.host,
+                user: a.user,
+                key: a.key,
+                name: a.name,
+                default: a.default,
+                yes: a.yes,
+            })
+            .await
+        }
         Cmd::Env {
             cmd: EnvCmd::Send { apply, connect },
         } => cli::commands::env_send(apply, connect).await,
@@ -367,6 +396,22 @@ mod tests {
                 assert!(args.yes);
             }
             _ => panic!("expected init"),
+        }
+    }
+
+    #[test]
+    fn setup_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "pi", "setup", "--host", "pihost.local", "--user", "piuser", "--key", "~/.ssh/pi", "--yes",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Setup(a) => {
+                assert_eq!(a.host.as_deref(), Some("pihost.local"));
+                assert_eq!(a.user.as_deref(), Some("piuser"));
+                assert!(a.yes);
+            }
+            _ => panic!("expected setup"),
         }
     }
 }
