@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{
-    Clock, ContainerRuntime, DeploymentHistory, EnvFileWriter, HealthGate, Ingress, LogSink,
-    OverrideStore, ProjectRepository, SecretStore, Source,
+    Clock, ContainerRuntime, DeploymentHistory, EnvFileWriter, HealthGate, HostNetwork, Ingress,
+    LogSink, OverrideStore, ProjectRepository, SecretStore, Source,
 };
 use pi_domain::entities::{
-    ComposeStack, DeployRef, Deployment, DeploymentStatus, ProjectConfig, StageTimeouts,
+    ComposeStack, DeployRef, Deployment, DeploymentStatus, ExposeMode, ProjectConfig,
+    StageTimeouts,
 };
 use pi_domain::error::DomainError;
 use tokio::sync::Semaphore;
@@ -54,6 +55,7 @@ pub struct DeployProject {
     env_files: Arc<dyn EnvFileWriter>,
     health: Arc<dyn HealthGate>,
     ingress: Arc<dyn Ingress>,
+    host_network: Arc<dyn HostNetwork>,
     clock: Arc<dyn Clock>,
     gc: Arc<RunGc>,
     timeouts: StageTimeouts,
@@ -90,6 +92,7 @@ impl DeployProject {
         env_files: Arc<dyn EnvFileWriter>,
         health: Arc<dyn HealthGate>,
         ingress: Arc<dyn Ingress>,
+        host_network: Arc<dyn HostNetwork>,
         clock: Arc<dyn Clock>,
         gc: Arc<RunGc>,
         timeouts: StageTimeouts,
@@ -105,6 +108,7 @@ impl DeployProject {
             env_files,
             health,
             ingress,
+            host_network,
             clock,
             gc,
             timeouts,
@@ -268,6 +272,14 @@ impl DeployProject {
             .check(config, project.host_port, log.clone())
             .await?;
 
+        if config.expose == ExposeMode::Lan {
+            if let Some(ip) = self.host_network.primary_ipv4() {
+                log.line(&format!("lan: http://{ip}:{}", project.host_port));
+            } else {
+                log.line(&format!("lan: {} (ip not detected)", project.host_port));
+            }
+        }
+
         // §11: route hostname only when configured
         if let Some(hostname) = &config.hostname {
             self.ingress
@@ -289,8 +301,8 @@ mod tests {
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
         MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe, MockEnvFileWriter,
-        MockHealthGate, MockIngress, MockOverrideStore, MockProjectRepository, MockSecretStore,
-        MockSource,
+        MockHealthGate, MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository,
+        MockSecretStore, MockSource,
     };
     use pi_domain::entities::{
         DeployRef, DeploymentStatus, EnvBundle, ExposeMode, FetchedSource, HealthcheckConfig,
@@ -329,6 +341,7 @@ mod tests {
         pub env_files: MockEnvFileWriter,
         pub health: MockHealthGate,
         pub ingress: MockIngress,
+        pub host_network: MockHostNetwork,
         pub clock: MockClock,
     }
 
@@ -351,6 +364,7 @@ mod tests {
             env_files: MockEnvFileWriter::new(),
             health: MockHealthGate::new(),
             ingress: MockIngress::new(),
+            host_network: MockHostNetwork::new(),
             clock,
         }
     }
@@ -367,6 +381,7 @@ mod tests {
             Arc::new(m.env_files),
             Arc::new(m.health),
             Arc::new(m.ingress),
+            Arc::new(m.host_network),
             Arc::new(m.clock),
             gc,
             StageTimeouts::default(),
@@ -570,6 +585,7 @@ mod tests {
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().times(0);
+        m.host_network.expect_primary_ipv4().returning(|| None);
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -587,6 +603,86 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.status, DeploymentStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn lan_deploy_logs_reachable_url() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+        m.host_network
+            .expect_primary_ipv4()
+            .returning(|| Some("192.168.1.50".parse().unwrap()));
+
+        let mut config = sample_config();
+        config.expose = ExposeMode::Lan;
+        config.hostname = None;
+        let sink = CollectSink::new();
+
+        let result = build(m)
+            .execute(
+                "dep-lan-url".into(),
+                config,
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        assert!(
+            sink.lines
+                .lock()
+                .unwrap()
+                .contains(&"lan: http://192.168.1.50:8000".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn lan_deploy_logs_port_when_ip_not_detected() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+        m.host_network.expect_primary_ipv4().returning(|| None);
+
+        let mut config = sample_config();
+        config.expose = ExposeMode::Lan;
+        config.hostname = None;
+        let sink = CollectSink::new();
+
+        let result = build(m)
+            .execute(
+                "dep-lan-no-ip".into(),
+                config,
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        assert!(
+            sink.lines
+                .lock()
+                .unwrap()
+                .contains(&"lan: 8000 (ip not detected)".to_string())
+        );
     }
 
     #[tokio::test]
@@ -747,6 +843,7 @@ mod tests {
             Arc::new(m.env_files),
             Arc::new(m.health),
             Arc::new(m.ingress),
+            Arc::new(m.host_network),
             Arc::new(m.clock),
             gc,
             timeouts,
@@ -1056,6 +1153,7 @@ mod tests {
             Arc::new(m.env_files),
             Arc::new(m.health),
             Arc::new(m.ingress),
+            Arc::new(m.host_network),
             Arc::new(m.clock),
             gc,
             StageTimeouts::default(),

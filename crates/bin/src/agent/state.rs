@@ -14,6 +14,7 @@ use pi_infrastructure::events::DeployEventsHub;
 use pi_infrastructure::git::GitSource;
 use pi_infrastructure::health::HybridHealthGate;
 use pi_infrastructure::history::SqliteHistory;
+use pi_infrastructure::hostnet::UdpHostNetwork;
 use pi_infrastructure::overrides::FsOverrideStore;
 use pi_infrastructure::repo::SqliteProjectRepo;
 use pi_infrastructure::secrets::EncryptedFileStore;
@@ -65,6 +66,7 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
         Arc::clone(&env_files),
         health,
         ingress,
+        UdpHostNetwork::new(),
         SystemClock::new(),
         Arc::clone(&gc),
         config.stage_timeouts()?,
