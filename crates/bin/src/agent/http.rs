@@ -599,7 +599,6 @@ mod tests {
         let stats = GetStats::new(projects.clone(), Arc::clone(&history), stats_provider);
         let lifecycle = ControlLifecycle::new(
             projects.clone(),
-            Arc::clone(&history),
             Arc::clone(&runtime),
             source.clone(),
             overrides.clone(),

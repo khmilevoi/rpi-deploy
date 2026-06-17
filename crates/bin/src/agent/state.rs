@@ -103,7 +103,6 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     let stats = GetStats::new(projects.clone(), Arc::clone(&history), stats_provider);
     let lifecycle = ControlLifecycle::new(
         projects.clone(),
-        Arc::clone(&history),
         runtime.clone(),
         source.clone(),
         overrides.clone(),

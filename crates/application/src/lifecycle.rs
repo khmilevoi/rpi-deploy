@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{
-    ContainerRuntime, DeploymentHistory, LogSink, OverrideStore, ProjectRepository, Source,
+    ContainerRuntime, LogSink, OverrideStore, ProjectRepository, Source,
 };
 use pi_domain::entities::{ComposeStack, LifecycleAction};
 use pi_domain::error::DomainError;
 
 pub struct ControlLifecycle {
     projects: Arc<dyn ProjectRepository>,
-    history: Arc<dyn DeploymentHistory>,
     runtime: Arc<dyn ContainerRuntime>,
     source: Arc<dyn Source>,
     overrides: Arc<dyn OverrideStore>,
@@ -17,14 +16,12 @@ pub struct ControlLifecycle {
 impl ControlLifecycle {
     pub fn new(
         projects: Arc<dyn ProjectRepository>,
-        history: Arc<dyn DeploymentHistory>,
         runtime: Arc<dyn ContainerRuntime>,
         source: Arc<dyn Source>,
         overrides: Arc<dyn OverrideStore>,
     ) -> Arc<ControlLifecycle> {
         Arc::new(ControlLifecycle {
             projects,
-            history,
             runtime,
             source,
             overrides,
