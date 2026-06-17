@@ -209,6 +209,14 @@ enum AgentCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Remove the agent (keeps data unless --purge)
+    Uninstall {
+        /// Also delete /var/lib/pi, /etc/pi, /var/log/pi (irreversible)
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -325,6 +333,9 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Agent {
             cmd: AgentCmd::Setup { user, with_cloudflared, dry_run },
         } => agent::setup::run_cmd(user, with_cloudflared, dry_run).await,
+        Cmd::Agent {
+            cmd: AgentCmd::Uninstall { purge, yes },
+        } => agent::uninstall::run_cmd(purge, yes).await,
     }
 }
 
@@ -440,6 +451,18 @@ mod tests {
                 assert!(dry_run);
             }
             _ => panic!("expected agent setup"),
+        }
+    }
+
+    #[test]
+    fn agent_uninstall_flags_parse() {
+        let cli = Cli::try_parse_from(["pi", "agent", "uninstall", "--purge", "--yes"]).unwrap();
+        match cli.cmd {
+            Cmd::Agent { cmd: AgentCmd::Uninstall { purge, yes } } => {
+                assert!(purge);
+                assert!(yes);
+            }
+            _ => panic!("expected agent uninstall"),
         }
     }
 }
