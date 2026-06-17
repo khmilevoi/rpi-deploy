@@ -584,7 +584,7 @@ mod tests {
             FsEnvFileWriter::new(),
             health,
             DisabledIngress::new(),
-            UdpHostNetwork::new(),
+            Arc::new(UdpHostNetwork::new()),
             SystemClock::new(),
             Arc::clone(&gc),
             StageTimeouts::default(),

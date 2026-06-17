@@ -88,7 +88,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         Arc::clone(&env_files),
         health,
         ingress.clone(),
-        UdpHostNetwork::new(),
+        Arc::new(UdpHostNetwork::new()),
         SystemClock::new(),
         Arc::clone(&gc),
         config.stage_timeouts()?,

@@ -1,13 +1,18 @@
 use std::net::{IpAddr, UdpSocket};
-use std::sync::Arc;
 
 use pi_domain::contracts::HostNetwork;
 
 pub struct UdpHostNetwork;
 
+impl Default for UdpHostNetwork {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UdpHostNetwork {
-    pub fn new() -> Arc<UdpHostNetwork> {
-        Arc::new(UdpHostNetwork)
+    pub fn new() -> UdpHostNetwork {
+        UdpHostNetwork
     }
 }
 
