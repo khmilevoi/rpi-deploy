@@ -135,6 +135,31 @@ pub fn resolve_init_fields(
     Ok(InitFields { name, repo, branch, compose, service, port, hostname, expose, env_file })
 }
 
+use crate::cli::prompt::InquirePrompter;
+
+/// Entrypoint for `pi init`: detect, resolve, write ./pi.toml (backup if present).
+pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let det = detect_defaults(&cwd);
+    let mut prompter = InquirePrompter;
+    let fields = resolve_init_fields(&flags, &det, &mut prompter)?;
+    let text = render_pi_toml(&fields);
+
+    let path = cwd.join("pi.toml");
+    if path.exists() {
+        let overwrite = flags.yes || prompter.confirm("pi.toml exists — overwrite? (a .bak is kept)", false)?;
+        if !overwrite {
+            println!("aborted: pi.toml left unchanged");
+            return Ok(());
+        }
+        std::fs::rename(&path, cwd.join("pi.toml.bak"))?;
+    }
+    std::fs::write(&path, &text)?;
+    println!("wrote {}", path.display());
+    println!("next: `pi env send` (if you use secrets), then `pi deploy`");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

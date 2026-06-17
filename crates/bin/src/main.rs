@@ -18,6 +18,30 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(clap::Args)]
+struct InitArgs {
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    repo: Option<String>,
+    #[arg(long)]
+    branch: Option<String>,
+    #[arg(long)]
+    compose: Option<String>,
+    #[arg(long)]
+    service: Option<String>,
+    #[arg(long)]
+    port: Option<u16>,
+    #[arg(long)]
+    hostname: Option<String>,
+    #[arg(long)]
+    expose: Option<String>,
+    #[arg(long = "env")]
+    env_file: Option<String>,
+    #[arg(long)]
+    yes: bool,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Deploy current project (reads ./pi.toml)
@@ -100,6 +124,8 @@ enum Cmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
+    /// Generate pi.toml in the current project (wizard; flags for CI)
+    Init(InitArgs),
     /// Manage project secrets
     Env {
         #[command(subcommand)]
@@ -219,6 +245,21 @@ async fn main() -> anyhow::Result<()> {
         } => cli::commands::rm(project, volumes, yes, connect).await,
         Cmd::Status { json, connect } => cli::commands::status(json, connect).await,
         Cmd::Doctor { connect } => cli::commands::doctor(connect).await,
+        Cmd::Init(a) => {
+            cli::init::run(cli::init::InitFlags {
+                name: a.name,
+                repo: a.repo,
+                branch: a.branch,
+                compose: a.compose,
+                service: a.service,
+                port: a.port,
+                hostname: a.hostname,
+                expose: a.expose,
+                env_file: a.env_file,
+                yes: a.yes,
+            })
+            .await
+        }
         Cmd::Env {
             cmd: EnvCmd::Send { apply, connect },
         } => cli::commands::env_send(apply, connect).await,
@@ -309,6 +350,23 @@ mod tests {
                 assert_eq!(tail, 100);
             }
             _ => panic!("expected agent logs"),
+        }
+    }
+
+    #[test]
+    fn init_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "pi", "init", "--name", "rateme", "--port", "3000", "--expose", "lan", "--yes",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Init(args) => {
+                assert_eq!(args.name.as_deref(), Some("rateme"));
+                assert_eq!(args.port, Some(3000));
+                assert_eq!(args.expose.as_deref(), Some("lan"));
+                assert!(args.yes);
+            }
+            _ => panic!("expected init"),
         }
     }
 }
