@@ -168,6 +168,17 @@ impl ProjectRepository for SqliteProjectRepo {
             })
             .await
     }
+
+    async fn remove(&self, name: &str) -> Result<(), DomainError> {
+        let name = name.to_string();
+        self.db
+            .call(move |conn| {
+                conn.execute("DELETE FROM projects WHERE name = ?1", params![name])
+                    .map(|_| ())
+                    .map_err(storage_err)
+            })
+            .await
+    }
 }
 
 #[cfg(test)]

@@ -5,7 +5,10 @@ runs an agent, while the CLI runs on a developer machine or in CI. The CLI
 connects to the agent through an SSH tunnel; the agent clones the Git
 repository, builds the Compose stack, and starts the containers.
 
-Current status: `v0.3.0`.
+Status: v0.4 (Операционка) — deploy/env/ingress/CI (v0.1-v0.3) + `pi logs`,
+`pi stats`, `pi start|stop|restart`, `pi rm`, `pi status`, `pi doctor`,
+`pi agent status|logs`, rolling agent logs. One-command install and
+`pi agent setup` are planned for v0.5 (§23 spec).
 
 Supported features:
 
@@ -15,6 +18,14 @@ Supported features:
 - `pi env send`;
 - `pi env ls`;
 - `pi gc`;
+- `pi logs <project> [-f]`;
+- `pi stats [project]`;
+- `pi start|stop|restart <project>`;
+- `pi rm <project> [--volumes]`;
+- `pi status`;
+- `pi doctor`;
+- `pi agent status`;
+- `pi agent logs [-f] [--since 2h]`;
 - stable host port allocation;
 - Docker Compose overrides;
 - health checks;
@@ -69,7 +80,7 @@ Install base packages:
 
 ```bash
 sudo apt update
-sudo apt install -y git curl build-essential pkg-config libssl-dev
+sudo apt install -y git curl build-essential pkg-config
 ```
 
 Install Docker:

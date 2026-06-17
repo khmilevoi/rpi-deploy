@@ -25,6 +25,8 @@ pub struct AgentConfig {
     pub timeouts: TimeoutsSection,
     #[serde(default)]
     pub gc: GcSection,
+    #[serde(default)]
+    pub logs: LogsSection,
 }
 
 /// [timeouts] in agent.toml — agent-wide stage timeout defaults (§8.1).
@@ -61,6 +63,23 @@ pub struct CloudflaredSection {
     pub restart: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct LogsSection {
+    #[serde(default = "default_log_dir")]
+    pub dir: PathBuf,
+    #[serde(default = "default_log_retention_days")]
+    pub retention_days: u64,
+}
+
+impl Default for LogsSection {
+    fn default() -> LogsSection {
+        LogsSection {
+            dir: default_log_dir(),
+            retention_days: default_log_retention_days(),
+        }
+    }
+}
+
 fn default_restart() -> Vec<String> {
     ["systemctl", "--user", "restart", "cloudflared"]
         .map(String::from)
@@ -87,6 +106,12 @@ fn default_history_keep() -> usize {
 }
 fn default_disk_threshold() -> u8 {
     85
+}
+fn default_log_dir() -> PathBuf {
+    PathBuf::from("/var/log/pi")
+}
+fn default_log_retention_days() -> u64 {
+    14
 }
 
 impl AgentConfig {
@@ -182,6 +207,8 @@ mod tests {
             "deployments kept per project (§18)"
         );
         assert_eq!(config.gc.disk_threshold_percent, 85, "§8.1");
+        assert_eq!(config.logs.dir, PathBuf::from("/var/log/pi"));
+        assert_eq!(config.logs.retention_days, 14);
         let t = config.stage_timeouts().unwrap();
         assert_eq!((t.fetch_secs, t.build_secs, t.up_secs), (120, 1800, 300));
     }
@@ -208,5 +235,13 @@ mod tests {
         assert_eq!(config.build_concurrency, 2);
         assert_eq!(config.history_keep, 10);
         assert_eq!(config.gc.disk_threshold_percent, 90);
+    }
+
+    #[test]
+    fn logs_section_parses() {
+        let config =
+            AgentConfig::parse("[logs]\ndir = \"/tmp/pi-logs\"\nretention_days = 7").unwrap();
+        assert_eq!(config.logs.dir, PathBuf::from("/tmp/pi-logs"));
+        assert_eq!(config.logs.retention_days, 7);
     }
 }

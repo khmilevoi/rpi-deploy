@@ -259,6 +259,104 @@ pub struct ComposeStack {
     pub override_file: PathBuf,
 }
 
+/// Live container metrics of one compose service (`pi stats`, v0.4 design §4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServiceStats {
+    pub service: String,
+    pub cpu_percent: f64,
+    pub mem_used_bytes: u64,
+    pub mem_limit_bytes: u64,
+}
+
+/// Per-project slice of `pi stats`. last_deploy is filled by the GetStats
+/// use-case from DeploymentHistory, not by the stats provider.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectStats {
+    pub project: String,
+    pub services: Vec<ServiceStats>,
+    pub last_deploy: Option<Deployment>,
+}
+
+/// Host metrics (sysinfo + DiskProbe).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostStats {
+    pub cpu_percent: f64,
+    pub mem_used_bytes: u64,
+    pub mem_total_bytes: u64,
+    pub disk_used_percent: u8,
+    pub uptime_secs: u64,
+}
+
+/// Full `pi stats` payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatsReport {
+    pub host: HostStats,
+    pub projects: Vec<ProjectStats>,
+}
+
+/// One PASS/FAIL check of `pi doctor` (§14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticCheck {
+    pub name: String,
+    pub passed: bool,
+    pub detail: String,
+    /// How to fix; only meaningful on failed checks.
+    pub hint: Option<String>,
+}
+
+/// `pi doctor` result (§14).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiagnosticReport {
+    pub checks: Vec<DiagnosticCheck>,
+}
+
+impl DiagnosticReport {
+    pub fn all_passed(&self) -> bool {
+        self.checks.iter().all(|c| c.passed)
+    }
+}
+
+/// `pi start|stop|restart` (§16). Maps 1:1 to compose subcommands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl LifecycleAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LifecycleAction::Start => "start",
+            LifecycleAction::Stop => "stop",
+            LifecycleAction::Restart => "restart",
+        }
+    }
+}
+
+impl std::str::FromStr for LifecycleAction {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "start" => Ok(LifecycleAction::Start),
+            "stop" => Ok(LifecycleAction::Stop),
+            "restart" => Ok(LifecycleAction::Restart),
+            _ => Err(()),
+        }
+    }
+}
+
+/// `pi status` summary (v0.4 design §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOverview {
+    pub version: String,
+    pub uptime_secs: u64,
+    pub disk_used_percent: u8,
+    pub projects: usize,
+    pub active_deployments: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +479,45 @@ mod tests {
         assert_eq!(effective.fetch_secs, 120, "no override -> default");
         assert_eq!(effective.build_secs, 3600, "override wins");
         assert_eq!(effective.up_secs, 300);
+    }
+
+    #[test]
+    fn lifecycle_action_roundtrips_through_str() {
+        for a in [
+            LifecycleAction::Start,
+            LifecycleAction::Stop,
+            LifecycleAction::Restart,
+        ] {
+            assert_eq!(a.as_str().parse::<LifecycleAction>(), Ok(a));
+        }
+        assert_eq!("bogus".parse::<LifecycleAction>(), Err(()));
+    }
+
+    #[test]
+    fn diagnostic_report_all_passed() {
+        let pass = DiagnosticCheck {
+            name: "docker daemon".into(),
+            passed: true,
+            detail: "27.0".into(),
+            hint: None,
+        };
+        let fail = DiagnosticCheck {
+            name: "cloudflared unit".into(),
+            passed: false,
+            detail: "inactive".into(),
+            hint: Some("systemctl --user start cloudflared".into()),
+        };
+        assert!(DiagnosticReport {
+            checks: vec![pass.clone()]
+        }
+        .all_passed());
+        assert!(!DiagnosticReport {
+            checks: vec![pass, fail]
+        }
+        .all_passed());
+        assert!(
+            DiagnosticReport::default().all_passed(),
+            "no checks - nothing failed"
+        );
     }
 }

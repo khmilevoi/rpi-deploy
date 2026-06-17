@@ -96,6 +96,14 @@ impl SecretStore for EncryptedFileStore {
         let text = String::from_utf8(plaintext).map_err(secrets_err)?;
         dotenv::parse(&text).map_err(secrets_err)
     }
+
+    async fn remove(&self, project: &str) -> Result<(), DomainError> {
+        match tokio::fs::remove_file(self.bundle_path(project)?).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(secrets_err(e)),
+        }
+    }
 }
 
 #[cfg(test)]

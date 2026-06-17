@@ -42,6 +42,64 @@ enum Cmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
+    /// Stream container logs of a project
+    Logs {
+        project: String,
+        #[arg(short, long)]
+        follow: bool,
+        #[arg(long, default_value_t = 100)]
+        tail: usize,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Live CPU/memory/disk metrics
+    Stats {
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Start project containers (no rebuild)
+    Start {
+        project: String,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Stop project containers
+    Stop {
+        project: String,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Restart project containers
+    Restart {
+        project: String,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Remove a project
+    Rm {
+        project: String,
+        #[arg(long)]
+        volumes: bool,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Agent and host overview
+    Status {
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Environment self-diagnosis
+    Doctor {
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
     /// Manage project secrets
     Env {
         #[command(subcommand)]
@@ -79,10 +137,41 @@ enum AgentCmd {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Agent overview; falls back to systemctl over ssh
+    Status {
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Agent logs; falls back to journalctl over ssh
+    Logs {
+        #[arg(short, long)]
+        follow: bool,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        tail: usize,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    if matches!(
+        cli.cmd,
+        Cmd::Agent {
+            cmd: AgentCmd::Run { .. }
+        }
+    ) {
+        return match cli.cmd {
+            Cmd::Agent {
+                cmd: AgentCmd::Run { config },
+            } => agent::run::run(config).await,
+            _ => unreachable!(),
+        };
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -90,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    match Cli::parse().cmd {
+    match cli.cmd {
         Cmd::Deploy {
             git_ref,
             cancel,
@@ -104,6 +193,32 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Ls { connect } => cli::commands::ls(connect).await,
         Cmd::Gc { connect } => cli::commands::gc(connect).await,
+        Cmd::Logs {
+            project,
+            follow,
+            tail,
+            connect,
+        } => cli::commands::logs(project, follow, tail, connect).await,
+        Cmd::Stats {
+            project,
+            json,
+            connect,
+        } => cli::commands::stats(project, json, connect).await,
+        Cmd::Start { project, connect } => {
+            cli::commands::lifecycle(project, "start", connect).await
+        }
+        Cmd::Stop { project, connect } => cli::commands::lifecycle(project, "stop", connect).await,
+        Cmd::Restart { project, connect } => {
+            cli::commands::lifecycle(project, "restart", connect).await
+        }
+        Cmd::Rm {
+            project,
+            volumes,
+            yes,
+            connect,
+        } => cli::commands::rm(project, volumes, yes, connect).await,
+        Cmd::Status { json, connect } => cli::commands::status(json, connect).await,
+        Cmd::Doctor { connect } => cli::commands::doctor(connect).await,
         Cmd::Env {
             cmd: EnvCmd::Send { apply, connect },
         } => cli::commands::env_send(apply, connect).await,
@@ -111,8 +226,20 @@ async fn main() -> anyhow::Result<()> {
             cmd: EnvCmd::Ls { connect },
         } => cli::commands::env_ls(connect).await,
         Cmd::Agent {
-            cmd: AgentCmd::Run { config },
-        } => agent::run::run(config).await,
+            cmd: AgentCmd::Run { .. },
+        } => unreachable!(),
+        Cmd::Agent {
+            cmd: AgentCmd::Status { connect },
+        } => cli::commands::agent_status(connect).await,
+        Cmd::Agent {
+            cmd:
+                AgentCmd::Logs {
+                    follow,
+                    since,
+                    tail,
+                    connect,
+                },
+        } => cli::commands::agent_logs(follow, since, tail, connect).await,
     }
 }
 
@@ -162,5 +289,26 @@ mod tests {
             "pi",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn agent_logs_flags_parse() {
+        let cli = Cli::try_parse_from(["pi", "agent", "logs", "-f", "--since", "2h"]).unwrap();
+        match cli.cmd {
+            Cmd::Agent {
+                cmd:
+                    AgentCmd::Logs {
+                        follow,
+                        since,
+                        tail,
+                        ..
+                    },
+            } => {
+                assert!(follow);
+                assert_eq!(since.as_deref(), Some("2h"));
+                assert_eq!(tail, 100);
+            }
+            _ => panic!("expected agent logs"),
+        }
     }
 }

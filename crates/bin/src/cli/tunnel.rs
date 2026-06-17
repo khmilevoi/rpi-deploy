@@ -60,7 +60,7 @@ fn free_local_port() -> anyhow::Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-fn expand_home(path: &str) -> String {
+pub(crate) fn expand_home(path: &str) -> String {
     match (path.strip_prefix("~/"), dirs::home_dir()) {
         (Some(rest), Some(home)) => home.join(rest).display().to_string(),
         _ => path.to_string(),

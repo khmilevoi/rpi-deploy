@@ -186,6 +186,39 @@ impl DeploymentHistory for SqliteHistory {
             })
             .await
     }
+
+    async fn latest(&self, project: &str) -> Result<Option<Deployment>, DomainError> {
+        let project = project.to_string();
+        self.db
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT id, project, git_ref, commit_sha, status, started_at, finished_at, log_tail
+                     FROM deployments
+                     WHERE project = ?1
+                     ORDER BY started_at DESC, id DESC
+                     LIMIT 1",
+                    params![project],
+                    row_to_deployment,
+                )
+                .optional()
+                .map_err(storage_err)
+            })
+            .await
+    }
+
+    async fn remove_project(&self, project: &str) -> Result<(), DomainError> {
+        let project = project.to_string();
+        self.db
+            .call(move |conn| {
+                conn.execute(
+                    "DELETE FROM deployments WHERE project = ?1",
+                    params![project],
+                )
+                .map(|_| ())
+                .map_err(storage_err)
+            })
+            .await
+    }
 }
 
 #[cfg(test)]
