@@ -24,6 +24,10 @@ impl FsOverrideStore {
 
 #[async_trait]
 impl OverrideStore for FsOverrideStore {
+    fn path(&self, project: &str) -> PathBuf {
+        self.dir.join(format!("{project}.yml"))
+    }
+
     async fn write(
         &self,
         project: &str,
@@ -38,6 +42,15 @@ impl OverrideStore for FsOverrideStore {
             .await
             .map_err(io_err)?;
         Ok(path)
+    }
+
+    async fn remove(&self, project: &str) -> Result<(), DomainError> {
+        let io_err = |e: std::io::Error| DomainError::Storage(format!("override remove: {e}"));
+        match tokio::fs::remove_file(self.dir.join(format!("{project}.yml"))).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(e)),
+        }
     }
 }
 

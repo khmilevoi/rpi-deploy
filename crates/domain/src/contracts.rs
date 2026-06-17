@@ -6,8 +6,9 @@ use async_trait::async_trait;
 use mockall::automock;
 
 use crate::entities::{
-    ComposeStack, DeployRef, Deployment, DeploymentStatus, EnvBundle, FetchedSource, Project,
-    ProjectConfig, ServiceState,
+    AgentOverview, ComposeStack, DeployRef, Deployment, DeploymentStatus, DiagnosticReport,
+    EnvBundle, FetchedSource, LifecycleAction, Project, ProjectConfig, ServiceState, ServiceStats,
+    StatsReport,
 };
 use crate::error::DomainError;
 
@@ -32,6 +33,8 @@ pub trait Source: Send + Sync {
         git_ref: &DeployRef,
         log: Arc<dyn LogSink>,
     ) -> Result<FetchedSource, DomainError>;
+
+    async fn cleanup(&self, project_name: &str) -> Result<(), DomainError>;
 }
 
 /// Abstraction of container backend (§6). v1 — DockerComposeRuntime.
@@ -46,6 +49,31 @@ pub trait ContainerRuntime: Send + Sync {
     /// `docker builder prune -f` with an age filter — frees build cache when
     /// the disk crosses the GC threshold (§8.1).
     async fn prune_builder(&self, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
+    /// `docker compose logs` of the project (v0.4). With `follow` the future
+    /// completes only when interrupted — dropping it kills the child.
+    async fn logs(
+        &self,
+        project_name: &str,
+        tail: usize,
+        follow: bool,
+        log: Arc<dyn LogSink>,
+    ) -> Result<(), DomainError>;
+    /// Live CPU/memory per service (`docker stats --no-stream`).
+    async fn stats(&self, project_name: &str) -> Result<Vec<ServiceStats>, DomainError>;
+    /// `docker compose start|stop|restart` — no rebuild, not a deploy.
+    async fn lifecycle(
+        &self,
+        stack: &ComposeStack,
+        action: LifecycleAction,
+        log: Arc<dyn LogSink>,
+    ) -> Result<(), DomainError>;
+    /// `docker compose down` for `pi rm`; named volumes die only with the flag.
+    async fn down(
+        &self,
+        stack: &ComposeStack,
+        remove_volumes: bool,
+        log: Arc<dyn LogSink>,
+    ) -> Result<(), DomainError>;
 }
 
 /// Disk fill probe for the GC threshold decision (§8.1). v1 — sysinfo.
@@ -64,6 +92,7 @@ pub trait ProjectRepository: Send + Sync {
     async fn upsert(&self, config: &ProjectConfig) -> Result<Project, DomainError>;
     async fn get(&self, name: &str) -> Result<Option<Project>, DomainError>;
     async fn list(&self) -> Result<Vec<Project>, DomainError>;
+    async fn remove(&self, name: &str) -> Result<(), DomainError>;
 }
 
 /// Deployment history (§6, §18).
@@ -89,12 +118,16 @@ pub trait DeploymentHistory: Send + Sync {
     /// Crash-recovery sweep at agent start (§8.1): queued/running -> interrupted.
     /// Returns the number of rows swept.
     async fn sweep_interrupted(&self, finished_at: i64) -> Result<u64, DomainError>;
+    async fn latest(&self, project: &str) -> Result<Option<Deployment>, DomainError>;
+    async fn remove_project(&self, project: &str) -> Result<(), DomainError>;
 }
 
 /// Writes compose-override with mapping 127.0.0.1:<host> → <container> (§12.1).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait OverrideStore: Send + Sync {
+    /// Returns the expected path of the override file for the project.
+    fn path(&self, project: &str) -> PathBuf;
     async fn write(
         &self,
         project: &str,
@@ -102,6 +135,7 @@ pub trait OverrideStore: Send + Sync {
         host_port: u16,
         container_port: u16,
     ) -> Result<PathBuf, DomainError>;
+    async fn remove(&self, project: &str) -> Result<(), DomainError>;
 }
 
 /// Store/retrieve the project EnvBundle, encrypted at rest (§6, §10).
@@ -111,6 +145,7 @@ pub trait SecretStore: Send + Sync {
     async fn save(&self, project: &str, bundle: &EnvBundle) -> Result<(), DomainError>;
     /// Empty bundle when nothing is stored for the project.
     async fn load(&self, project: &str) -> Result<EnvBundle, DomainError>;
+    async fn remove(&self, project: &str) -> Result<(), DomainError>;
 }
 
 /// Writes the decrypted bundle as `.env` into the project workdir (§10).
@@ -143,6 +178,20 @@ pub trait Ingress: Send + Sync {
         host_port: u16,
         log: Arc<dyn LogSink>,
     ) -> Result<(), DomainError>;
+    async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
+}
+
+#[cfg_attr(feature = "mocks", automock)]
+#[async_trait]
+pub trait StatsProvider: Send + Sync {
+    async fn report(&self, projects: Vec<String>) -> Result<StatsReport, DomainError>;
+}
+
+#[cfg_attr(feature = "mocks", automock)]
+#[async_trait]
+pub trait SystemProbe: Send + Sync {
+    async fn diagnostics(&self) -> DiagnosticReport;
+    async fn overview(&self) -> Result<AgentOverview, DomainError>;
 }
 
 /// Time determinism in tests (§6).
