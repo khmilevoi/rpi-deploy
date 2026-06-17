@@ -273,7 +273,12 @@ impl DeployProject {
             .await?;
 
         if config.expose == ExposeMode::Lan {
-            if let Some(ip) = self.host_network.primary_ipv4() {
+            let hn = Arc::clone(&self.host_network);
+            let ip = tokio::task::spawn_blocking(move || hn.primary_ipv4())
+                .await
+                .ok()
+                .flatten();
+            if let Some(ip) = ip {
                 log.line(&format!("lan: http://{ip}:{}", project.host_port));
             } else {
                 log.line(&format!("lan: {} (ip not detected)", project.host_port));
