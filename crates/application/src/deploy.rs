@@ -236,6 +236,7 @@ impl DeployProject {
             .write(
                 &config.name,
                 &config.service,
+                config.expose.bind_addr(),
                 project.host_port,
                 config.container_port,
             )
@@ -408,9 +409,15 @@ mod tests {
         let stage_order = Arc::clone(&order);
         m.overrides
             .expect_write()
-            .withf(|p, s, hp, cp| p == "rateme" && s == "web" && *hp == 8000 && *cp == 3000)
+            .withf(|p, s, bind, hp, cp| {
+                p == "rateme"
+                    && s == "web"
+                    && bind == "127.0.0.1"
+                    && *hp == 8000
+                    && *cp == 3000
+            })
             .times(1)
-            .returning(move |_, _, _, _| {
+            .returning(move |_, _, _, _, _| {
                 stage_order.lock().unwrap().push("override");
                 Ok(PathBuf::from("/var/lib/pi/overrides/rateme.yml"))
             });
@@ -525,6 +532,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lan_expose_writes_override_bound_to_all_interfaces() {
+        let mut m = mocks();
+        let mut cfg = sample_config();
+        cfg.expose = ExposeMode::Lan;
+        cfg.hostname = None;
+
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
+        });
+        m.source.expect_fetch().returning(|_, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.overrides
+            .expect_write()
+            .withf(|p, s, bind, hp, cp| {
+                p == "rateme"
+                    && s == "web"
+                    && bind == "0.0.0.0"
+                    && *hp == 8000
+                    && *cp == 3000
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let result = build(m)
+            .execute(
+                "dep-lan".into(),
+                cfg,
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+    }
+
+    #[tokio::test]
     async fn mark_running_failure_writes_failed_to_db_and_emits_finished() {
         let mut m = mocks();
         m.history
@@ -580,7 +645,7 @@ mod tests {
         m.env_files.expect_write().times(0);
         m.overrides
             .expect_write()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.runtime
             .expect_build()
             .returning(|_, _| Err(DomainError::Runtime("compose build exited with 1".into())));
@@ -641,7 +706,7 @@ mod tests {
         });
         m.overrides
             .expect_write()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -968,7 +1033,7 @@ mod tests {
         m.env_files.expect_write().times(0);
         m.overrides
             .expect_write()
-            .returning(|p, _, _, _| Ok(PathBuf::from("/ov").join(p)));
+            .returning(|p, _, _, _, _| Ok(PathBuf::from("/ov").join(p)));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
         m.history.expect_mark_running().returning(|_, _| Ok(()));

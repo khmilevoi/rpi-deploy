@@ -91,7 +91,8 @@ pub trait DeploymentHistory: Send + Sync {
     async fn sweep_interrupted(&self, finished_at: i64) -> Result<u64, DomainError>;
 }
 
-/// Writes compose-override with mapping 127.0.0.1:<host> → <container> (§12.1).
+/// Writes compose-override mapping <bind>:<host> -> <container> (§12.1).
+/// `bind` is "127.0.0.1" (private) or "0.0.0.0" (lan), from ExposeMode.
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait OverrideStore: Send + Sync {
@@ -99,6 +100,7 @@ pub trait OverrideStore: Send + Sync {
         &self,
         project: &str,
         service: &str,
+        bind: &str,
         host_port: u16,
         container_port: u16,
     ) -> Result<PathBuf, DomainError>;

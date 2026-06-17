@@ -83,6 +83,7 @@ impl SendEnv {
             .write(
                 project,
                 &config.service,
+                registered.config.expose.bind_addr(),
                 registered.host_port,
                 config.container_port,
             )
@@ -238,9 +239,15 @@ mod tests {
             .returning(|_, _| Ok(()));
         m.overrides
             .expect_write()
-            .withf(|p, s, hp, cp| p == "rateme" && s == "web" && *hp == 8000 && *cp == 3000)
+            .withf(|p, s, bind, hp, cp| {
+                p == "rateme"
+                    && s == "web"
+                    && bind == "127.0.0.1"
+                    && *hp == 8000
+                    && *cp == 3000
+            })
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/ov/rateme.yml")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov/rateme.yml")));
         m.runtime
             .expect_up()
             .withf(|stack, _| {
