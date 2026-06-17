@@ -36,6 +36,8 @@ pub struct ProjectDto {
     pub port: u16,
     pub hostname: Option<String>,
     #[serde(default)]
+    pub expose: Option<String>,
+    #[serde(default)]
     pub healthcheck: Option<HealthcheckDto>,
     #[serde(default)]
     pub timeouts: Option<TimeoutsDto>,
@@ -51,7 +53,11 @@ impl From<ProjectDto> for ProjectConfig {
             service: dto.service,
             container_port: dto.port,
             hostname: dto.hostname,
-            expose: ExposeMode::default(),
+            expose: dto
+                .expose
+                .as_deref()
+                .and_then(ExposeMode::parse)
+                .unwrap_or_default(),
             healthcheck: dto
                 .healthcheck
                 .map(|h| HealthcheckConfig {
@@ -82,6 +88,7 @@ impl From<&ProjectConfig> for ProjectDto {
             service: config.service.clone(),
             port: config.container_port,
             hostname: config.hostname.clone(),
+            expose: Some(config.expose.as_str().to_string()),
             healthcheck: Some(HealthcheckDto {
                 path: config.healthcheck.path.clone(),
                 expect: config.healthcheck.expect.clone(),
@@ -221,6 +228,7 @@ mod tests {
             service: "web".into(),
             port: 3000,
             hostname: None,
+            expose: None,
             healthcheck: None,
             timeouts: None,
         }
@@ -248,5 +256,22 @@ mod tests {
         let dto = ProjectDto::from(&config);
         let back: ProjectConfig = dto.into();
         assert_eq!(back.timeouts.build_secs, Some(3600));
+    }
+
+    #[test]
+    fn expose_roundtrips_and_defaults_private_when_absent() {
+        // legacy payload without `expose` -> Private
+        let json = r#"{"project":{"name":"a","repo":"r","branch":"main","compose":"docker-compose.yml","service":"web","port":3000,"hostname":null},"ref":null}"#;
+        let req: DeployRequest = serde_json::from_str(json).unwrap();
+        let config: ProjectConfig = req.project.into();
+        assert_eq!(config.expose, pi_domain::entities::ExposeMode::Private);
+
+        // lan roundtrip
+        let mut config = config;
+        config.expose = pi_domain::entities::ExposeMode::Lan;
+        let dto = ProjectDto::from(&config);
+        assert_eq!(dto.expose.as_deref(), Some("lan"));
+        let back: ProjectConfig = dto.into();
+        assert_eq!(back.expose, pi_domain::entities::ExposeMode::Lan);
     }
 }
