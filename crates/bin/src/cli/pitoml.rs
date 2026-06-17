@@ -59,6 +59,8 @@ pub struct IngressSection {
     pub hostname: Option<String>,
     pub service: String,
     pub port: u16,
+    #[serde(default)]
+    pub expose: Option<String>,
 }
 
 /// [timeouts] in pi.toml — per-project stage overrides (§12, §8.1).
@@ -135,6 +137,13 @@ impl PiToml {
         if let Some(expect) = &parsed.healthcheck.expect {
             validate_expect(expect).map_err(|e| anyhow::anyhow!("pi.toml [healthcheck]: {e}"))?;
         }
+        if let Some(expose) = &parsed.ingress.expose {
+            if ExposeMode::parse(expose).is_none() {
+                anyhow::bail!(
+                    "invalid pi.toml [ingress].expose '{expose}' (use \"private\" or \"lan\")"
+                );
+            }
+        }
         Ok(parsed)
     }
 
@@ -157,7 +166,12 @@ impl PiToml {
             service: self.ingress.service.clone(),
             container_port: self.ingress.port,
             hostname: self.ingress.hostname.clone(),
-            expose: ExposeMode::default(),
+            expose: self
+                .ingress
+                .expose
+                .as_deref()
+                .and_then(ExposeMode::parse)
+                .unwrap_or_default(),
             healthcheck: HealthcheckConfig {
                 path: self.healthcheck.path.clone(),
                 expect: self.healthcheck.expect.clone(),
@@ -298,5 +312,25 @@ file = ".env"
     fn missing_timeouts_section_means_no_overrides() {
         let config = PiToml::parse(SAMPLE).unwrap().to_project_config();
         assert_eq!(config.timeouts, Default::default());
+    }
+
+    #[test]
+    fn expose_defaults_private_and_parses_lan() {
+        let default_cfg = PiToml::parse(SAMPLE).unwrap().to_project_config();
+        assert_eq!(
+            default_cfg.expose,
+            pi_domain::entities::ExposeMode::Private
+        );
+
+        let lan = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"lan\"");
+        let lan_cfg = PiToml::parse(&lan).unwrap().to_project_config();
+        assert_eq!(lan_cfg.expose, pi_domain::entities::ExposeMode::Lan);
+    }
+
+    #[test]
+    fn invalid_expose_is_rejected() {
+        let bad = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"public\"");
+        let err = PiToml::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("expose"), "got: {err}");
     }
 }
