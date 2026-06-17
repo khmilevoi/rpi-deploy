@@ -44,36 +44,15 @@ pub(crate) fn logs_args(project_name: &str, tail: usize, follow: bool) -> Vec<St
     args
 }
 
-pub(crate) fn lifecycle_args(project_name: &str, action: LifecycleAction) -> Vec<String> {
-    vec![
-        "compose".to_string(),
-        "-p".to_string(),
-        project_name.to_string(),
-        action.as_str().to_string(),
-    ]
-}
-
-pub(crate) fn down_args(project_name: &str, remove_volumes: bool) -> Vec<String> {
-    let mut args = vec![
-        "compose".to_string(),
-        "-p".to_string(),
-        project_name.to_string(),
-        "down".to_string(),
-        "--remove-orphans".to_string(),
-    ];
-    if remove_volumes {
-        args.push("--volumes".to_string());
-    }
-    args
-}
-
 pub(crate) fn file_chain(stack: &ComposeStack) -> Vec<PathBuf> {
     let mut files = vec![stack.compose_file.clone()];
     let repo_override = stack.workdir.join("docker-compose.override.yml");
     if repo_override.exists() && repo_override != stack.compose_file {
         files.push(repo_override);
     }
-    files.push(stack.override_file.clone());
+    if stack.override_file.exists() {
+        files.push(stack.override_file.clone());
+    }
     files
 }
 
@@ -283,26 +262,30 @@ impl ContainerRuntime for DockerComposeRuntime {
 
     async fn lifecycle(
         &self,
-        project_name: &str,
+        stack: &ComposeStack,
         action: LifecycleAction,
         log: Arc<dyn LogSink>,
     ) -> Result<(), DomainError> {
         log.line(&format!("docker compose {} ...", action.as_str()));
-        let mut cmd = Command::new("docker");
-        cmd.args(lifecycle_args(project_name, action));
-        run_streamed(cmd, log).await.map_err(DomainError::Runtime)
+        run_streamed(self.compose(stack, &[action.as_str()]), log)
+            .await
+            .map_err(DomainError::Runtime)
     }
 
     async fn down(
         &self,
-        project_name: &str,
+        stack: &ComposeStack,
         remove_volumes: bool,
         log: Arc<dyn LogSink>,
     ) -> Result<(), DomainError> {
         log.line("docker compose down ...");
-        let mut cmd = Command::new("docker");
-        cmd.args(down_args(project_name, remove_volumes));
-        run_streamed(cmd, log).await.map_err(DomainError::Runtime)
+        let mut tail = vec!["down", "--remove-orphans"];
+        if remove_volumes {
+            tail.push("--volumes");
+        }
+        run_streamed(self.compose(stack, &tail), log)
+            .await
+            .map_err(DomainError::Runtime)
     }
 }
 
@@ -330,7 +313,7 @@ mod tests {
         let s = stack(dir.path());
         assert_eq!(
             file_chain(&s),
-            vec![s.compose_file.clone(), s.override_file.clone()]
+            vec![s.compose_file.clone()]
         );
     }
 
@@ -339,13 +322,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo_override = dir.path().join("docker-compose.override.yml");
         std::fs::write(&repo_override, "services: {}").unwrap();
-        let s = stack(dir.path());
+        let pi_override = dir.path().join("pi-override.yml");
+        std::fs::write(&pi_override, "services: {}").unwrap();
+        let s = ComposeStack {
+            project_name: "rateme".into(),
+            workdir: dir.path().to_path_buf(),
+            compose_file: dir.path().join("docker-compose.yml"),
+            override_file: pi_override.clone(),
+        };
         assert_eq!(
             file_chain(&s),
             vec![
                 s.compose_file.clone(),
                 repo_override,
-                s.override_file.clone()
+                pi_override,
             ]
         );
     }
@@ -382,8 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn logs_lifecycle_down_args_shapes() {
-        use pi_domain::entities::LifecycleAction;
+    fn logs_args_shapes() {
         assert_eq!(
             logs_args("rateme", 100, false),
             strings(&["compose", "-p", "rateme", "logs", "--tail", "100"])
@@ -391,25 +380,6 @@ mod tests {
         assert_eq!(
             logs_args("rateme", 50, true),
             strings(&["compose", "-p", "rateme", "logs", "--tail", "50", "-f"])
-        );
-        assert_eq!(
-            lifecycle_args("rateme", LifecycleAction::Restart),
-            strings(&["compose", "-p", "rateme", "restart"])
-        );
-        assert_eq!(
-            down_args("rateme", false),
-            strings(&["compose", "-p", "rateme", "down", "--remove-orphans"])
-        );
-        assert_eq!(
-            down_args("rateme", true),
-            strings(&[
-                "compose",
-                "-p",
-                "rateme",
-                "down",
-                "--remove-orphans",
-                "--volumes"
-            ])
         );
     }
 

@@ -63,14 +63,14 @@ pub trait ContainerRuntime: Send + Sync {
     /// `docker compose start|stop|restart` — no rebuild, not a deploy.
     async fn lifecycle(
         &self,
-        project_name: &str,
+        stack: &ComposeStack,
         action: LifecycleAction,
         log: Arc<dyn LogSink>,
     ) -> Result<(), DomainError>;
     /// `docker compose down` for `pi rm`; named volumes die only with the flag.
     async fn down(
         &self,
-        project_name: &str,
+        stack: &ComposeStack,
         remove_volumes: bool,
         log: Arc<dyn LogSink>,
     ) -> Result<(), DomainError>;
@@ -126,6 +126,8 @@ pub trait DeploymentHistory: Send + Sync {
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait OverrideStore: Send + Sync {
+    /// Returns the expected path of the override file for the project.
+    fn path(&self, project: &str) -> PathBuf;
     async fn write(
         &self,
         project: &str,

@@ -967,7 +967,7 @@ mod tests {
 
         async fn lifecycle(
             &self,
-            _project_name: &str,
+            _stack: &pi_domain::entities::ComposeStack,
             _action: pi_domain::entities::LifecycleAction,
             _log: Arc<dyn LogSink>,
         ) -> Result<(), DomainError> {
@@ -976,7 +976,7 @@ mod tests {
 
         async fn down(
             &self,
-            _project_name: &str,
+            _stack: &pi_domain::entities::ComposeStack,
             _remove_volumes: bool,
             _log: Arc<dyn LogSink>,
         ) -> Result<(), DomainError> {

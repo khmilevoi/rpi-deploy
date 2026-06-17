@@ -591,8 +591,13 @@ mod tests {
         let stream_logs = StreamLogs::new(projects.clone(), secrets.clone(), Arc::clone(&runtime));
         let stats_provider = CompositeStats::new(Arc::clone(&runtime), disk.clone());
         let stats = GetStats::new(projects.clone(), Arc::clone(&history), stats_provider);
-        let lifecycle =
-            ControlLifecycle::new(projects.clone(), Arc::clone(&history), Arc::clone(&runtime));
+        let lifecycle = ControlLifecycle::new(
+            projects.clone(),
+            Arc::clone(&history),
+            Arc::clone(&runtime),
+            source.clone(),
+            overrides.clone(),
+        );
         let remove = RemoveProject::new(
             projects.clone(),
             Arc::clone(&history),

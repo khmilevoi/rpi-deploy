@@ -24,6 +24,10 @@ impl FsOverrideStore {
 
 #[async_trait]
 impl OverrideStore for FsOverrideStore {
+    fn path(&self, project: &str) -> PathBuf {
+        self.dir.join(format!("{project}.yml"))
+    }
+
     async fn write(
         &self,
         project: &str,

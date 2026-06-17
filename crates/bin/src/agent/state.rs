@@ -100,7 +100,13 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
     let stream_logs = StreamLogs::new(projects.clone(), secrets.clone(), runtime.clone());
     let stats_provider = CompositeStats::new(runtime.clone(), disk.clone());
     let stats = GetStats::new(projects.clone(), Arc::clone(&history), stats_provider);
-    let lifecycle = ControlLifecycle::new(projects.clone(), Arc::clone(&history), runtime.clone());
+    let lifecycle = ControlLifecycle::new(
+        projects.clone(),
+        Arc::clone(&history),
+        runtime.clone(),
+        source.clone(),
+        overrides.clone(),
+    );
     let remove = RemoveProject::new(
         projects.clone(),
         Arc::clone(&history),
