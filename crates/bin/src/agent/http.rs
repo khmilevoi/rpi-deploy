@@ -595,7 +595,11 @@ mod tests {
             Arc::clone(&history),
             SystemClock::new(),
         );
-        let list = ListProjects::new(projects.clone(), Arc::clone(&runtime));
+        let list = ListProjects::new(
+            projects.clone(),
+            Arc::clone(&runtime),
+            Arc::new(UdpHostNetwork::new()),
+        );
         let stream_logs = StreamLogs::new(projects.clone(), secrets.clone(), Arc::clone(&runtime));
         let stats_provider = CompositeStats::new(Arc::clone(&runtime), disk.clone());
         let stats = GetStats::new(projects.clone(), Arc::clone(&history), stats_provider);

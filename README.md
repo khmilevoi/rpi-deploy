@@ -853,5 +853,6 @@ cargo install --path crates/bin --locked
 11. Mutable runtime files are stored in mounted directories.
 12. If the project needs secrets, `pi env send` has been run.
 13. `pi deploy` finishes with `deploy finished: success`.
-14. `pi ls` shows the project, branch, host port, hostname if configured, and
-    service status.
+14. `pi ls` shows the project, branch, host port, hostname if configured,
+    expose mode (`-` for private, `lan http://<lan-ip>:<port>` for
+    `expose = "lan"`), and service status.

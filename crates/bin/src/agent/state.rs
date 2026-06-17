@@ -102,7 +102,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         Arc::clone(&history),
         SystemClock::new(),
     );
-    let list = ListProjects::new(projects.clone(), runtime.clone());
+    let list = ListProjects::new(projects.clone(), runtime.clone(), Arc::clone(&host_network));
     let stream_logs = StreamLogs::new(projects.clone(), secrets.clone(), runtime.clone());
     let stats_provider = CompositeStats::new(runtime.clone(), disk.clone());
     let stats = GetStats::new(projects.clone(), Arc::clone(&history), stats_provider);
