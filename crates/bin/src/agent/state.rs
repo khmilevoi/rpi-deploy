@@ -49,9 +49,10 @@ pub struct AppState {
     pub diagnostics: Arc<RunDiagnostics>,
     pub agent_status: Arc<AgentStatus>,
     pub log_dir: PathBuf,
+    pub log_dir_available: bool,
 }
 
-pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
+pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Result<AppState> {
     std::fs::create_dir_all(&config.data_dir)?;
     let db = Db::open(&config.data_dir.join("state.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -157,5 +158,6 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
         diagnostics,
         agent_status,
         log_dir: config.logs.dir.clone(),
+        log_dir_available,
     })
 }

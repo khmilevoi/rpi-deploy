@@ -353,6 +353,11 @@ async fn agent_logs(
     State(state): State<AppState>,
     Query(q): Query<LogsQuery>,
 ) -> Result<Response, ApiError> {
+    if !state.log_dir_available {
+        return Err(ApiError(DomainError::NotFound(
+            "agent file logging is disabled/unavailable".into(),
+        )));
+    }
     let tail = if q.since.is_some() { None } else { Some(q.tail) };
     let initial = logfile::read(&state.log_dir, tail, q.since)
         .map_err(|e| ApiError(DomainError::Storage(format!("agent logs: {e}"))))?;
@@ -644,6 +649,7 @@ mod tests {
             diagnostics,
             agent_status,
             log_dir: dir.join("logs"),
+            log_dir_available: true,
         }
     }
 

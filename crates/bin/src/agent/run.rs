@@ -9,22 +9,43 @@ use tracing_subscriber::prelude::*;
 
 pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let config = AgentConfig::load(config_path.as_deref())?;
-    std::fs::create_dir_all(&config.logs.dir)?;
-    logfile::prune_old(&config.logs.dir, config.logs.retention_days)?;
+
+    let log_dir_available = match std::fs::create_dir_all(&config.logs.dir) {
+        Ok(()) => {
+            let _ = logfile::prune_old(&config.logs.dir, config.logs.retention_days);
+            true
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: cannot create log directory {}: {e} – agent logs to stderr only",
+                config.logs.dir.display()
+            );
+            false
+        }
+    };
+
     let env_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-    let file_layer = tracing_subscriber::fmt::layer()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logfile::DailyMakeWriter::new(config.logs.dir.clone()));
+
+    let file_layer: Option<_> = if log_dir_available {
+        Some(
+            tracing_subscriber::fmt::layer()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(logfile::DailyMakeWriter::new(config.logs.dir.clone())),
+        )
+    } else {
+        None
+    };
+
     tracing_subscriber::registry()
         .with(env_filter)
         .with(stderr_layer)
         .with(file_layer)
         .init();
 
-    let state = build_state(&config)?;
+    let state = build_state(&config, log_dir_available)?;
     let now = pi_infrastructure::sys::SystemClock::new().now_unix();
     let swept = state
         .history
