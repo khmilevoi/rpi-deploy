@@ -104,6 +104,50 @@ impl SystemProbe for HostSystemProbe {
             .await,
         ];
 
+        checks.push(match self.runner.run("id", &["-nG"]).await {
+            Ok(out) => {
+                let in_docker_group = out.split_whitespace().any(|g| g == "docker");
+                DiagnosticCheck {
+                    name: "pi-agent group".into(),
+                    passed: in_docker_group,
+                    detail: format!("groups: {out}"),
+                    hint: if !in_docker_group {
+                        Some("add pi-agent to the 'docker' group: sudo usermod -aG docker pi-agent".into())
+                    } else {
+                        None
+                    },
+                }
+            }
+            Err(err) => DiagnosticCheck {
+                name: "pi-agent group".into(),
+                passed: false,
+                detail: err,
+                hint: Some("add pi-agent to the 'docker' group".into()),
+            },
+        });
+
+        checks.push(match self.runner.run("loginctl", &["show-user", "-P", "Linger", "pi-agent"]).await {
+            Ok(out) => {
+                let linger_enabled = out == "yes";
+                DiagnosticCheck {
+                    name: "systemd linger".into(),
+                    passed: linger_enabled,
+                    detail: format!("Linger={out}"),
+                    hint: if !linger_enabled {
+                        Some("enable linger: loginctl enable-linger pi-agent".into())
+                    } else {
+                        None
+                    },
+                }
+            }
+            Err(err) => DiagnosticCheck {
+                name: "systemd linger".into(),
+                passed: false,
+                detail: err,
+                hint: Some("enable linger: loginctl enable-linger pi-agent".into()),
+            },
+        });
+
         if self.cloudflared_enabled {
             checks.push(
                 self.command_check(
@@ -111,6 +155,15 @@ impl SystemProbe for HostSystemProbe {
                     "cloudflared",
                     &["--version"],
                     "install cloudflared or disable [cloudflared] routing",
+                )
+                .await,
+            );
+            checks.push(
+                self.command_check(
+                    "cloudflared service",
+                    "systemctl",
+                    &["--user", "is-active", "cloudflared"],
+                    "enable and start cloudflared service: systemctl --user enable --now cloudflared",
                 )
                 .await,
             );
