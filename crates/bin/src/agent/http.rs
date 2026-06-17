@@ -353,7 +353,8 @@ async fn agent_logs(
     State(state): State<AppState>,
     Query(q): Query<LogsQuery>,
 ) -> Result<Response, ApiError> {
-    let initial = logfile::read(&state.log_dir, Some(q.tail), q.since)
+    let tail = if q.since.is_some() { None } else { Some(q.tail) };
+    let initial = logfile::read(&state.log_dir, tail, q.since)
         .map_err(|e| ApiError(DomainError::Storage(format!("agent logs: {e}"))))?;
     if !q.follow {
         let stream = async_stream::stream! {
