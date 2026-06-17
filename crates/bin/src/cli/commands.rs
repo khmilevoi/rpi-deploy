@@ -150,6 +150,19 @@ fn parse_env_file(text: &str) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(bundle.vars)
 }
 
+/// `pi ls` EXPOSE cell: `-` for private/unknown, `lan http://<ip>:<port>` for
+/// expose=lan with a detected ip, `lan (ip n/a)` when the ip could not be
+/// detected (§12.1).
+fn expose_cell(expose: &str, lan_ip: Option<&str>, host_port: u16) -> String {
+    match expose {
+        "lan" => match lan_ip {
+            Some(ip) => format!("lan http://{ip}:{host_port}"),
+            None => "lan (ip n/a)".to_string(),
+        },
+        _ => "-".to_string(),
+    }
+}
+
 pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
@@ -161,8 +174,8 @@ pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
         return Ok(());
     }
     println!(
-        "{:<16} {:<10} {:<8} {:<28} {:<6} SERVICES",
-        "NAME", "BRANCH", "EXPOSE", "HOSTNAME", "PORT"
+        "{:<16} {:<10} {:<28} {:<6} {:<28} SERVICES",
+        "NAME", "BRANCH", "HOSTNAME", "PORT", "EXPOSE"
     );
     for p in projects {
         let services = if p.services.is_empty() {
@@ -174,13 +187,14 @@ pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let expose = expose_cell(&p.expose, p.lan_ip.as_deref(), p.host_port);
         println!(
-            "{:<16} {:<10} {:<8} {:<28} {:<6} {services}",
+            "{:<16} {:<10} {:<28} {:<6} {:<28} {services}",
             p.name,
             p.branch,
-            p.expose,
             p.hostname.unwrap_or_else(|| "-".into()),
-            p.host_port
+            p.host_port,
+            expose
         );
     }
     Ok(())
@@ -585,6 +599,17 @@ mod tests {
         let q = build_agent_logs_query(true, &Some("2h".into()), 50, 10_000).unwrap();
         assert_eq!(q, "/v1/agent/logs?since=2800&follow=true");
         assert!(build_agent_logs_query(false, &Some("soon".into()), 50, 0).is_err());
+    }
+
+    #[test]
+    fn expose_cell_shows_lan_url_only_for_lan() {
+        assert_eq!(expose_cell("private", None, 8000), "-".to_string());
+        assert_eq!(expose_cell("", None, 8000), "-".to_string());
+        assert_eq!(
+            expose_cell("lan", Some("192.168.1.50"), 8000),
+            "lan http://192.168.1.50:8000".to_string()
+        );
+        assert_eq!(expose_cell("lan", None, 8000), "lan (ip n/a)".to_string());
     }
 
     #[test]
