@@ -197,6 +197,18 @@ enum AgentCmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
+    /// Bootstrap the agent on this Pi (run with sudo; idempotent)
+    Setup {
+        /// SSH login user to add to the pi-agent group (default: $SUDO_USER)
+        #[arg(long)]
+        user: Option<String>,
+        /// Also bootstrap cloudflared (linger + user unit)
+        #[arg(long)]
+        with_cloudflared: bool,
+        /// Print the plan without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -310,6 +322,9 @@ async fn main() -> anyhow::Result<()> {
                     connect,
                 },
         } => cli::commands::agent_logs(follow, since, tail, connect).await,
+        Cmd::Agent {
+            cmd: AgentCmd::Setup { user, with_cloudflared, dry_run },
+        } => agent::setup::run_cmd(user, with_cloudflared, dry_run).await,
     }
 }
 
@@ -412,6 +427,19 @@ mod tests {
                 assert!(a.yes);
             }
             _ => panic!("expected setup"),
+        }
+    }
+
+    #[test]
+    fn agent_setup_flags_parse() {
+        let cli = Cli::try_parse_from(["pi", "agent", "setup", "--user", "piuser", "--dry-run"]).unwrap();
+        match cli.cmd {
+            Cmd::Agent { cmd: AgentCmd::Setup { user, with_cloudflared, dry_run } } => {
+                assert_eq!(user.as_deref(), Some("piuser"));
+                assert!(!with_cloudflared);
+                assert!(dry_run);
+            }
+            _ => panic!("expected agent setup"),
         }
     }
 }

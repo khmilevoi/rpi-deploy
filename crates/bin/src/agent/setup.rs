@@ -238,6 +238,24 @@ async fn cloudflared_bootstrap(_sys: &dyn Sys, _dry: bool, rep: &mut SetupReport
     rep.warnings.push("--with-cloudflared not yet implemented".into());
 }
 
+/// CLI entrypoint: resolve the login user (--user or $SUDO_USER), run setup,
+/// print the report. Must run as root (under sudo) on the Pi.
+pub async fn run_cmd(user: Option<String>, with_cloudflared: bool, dry_run: bool) -> anyhow::Result<()> {
+    let login_user = user
+        .or_else(|| std::env::var("SUDO_USER").ok())
+        .filter(|u| !u.is_empty() && u != "root")
+        .ok_or_else(|| anyhow::anyhow!(
+            "cannot determine the SSH login user; run via `sudo pi agent setup` or pass --user <name>"
+        ))?;
+    let opts = SetupOpts { login_user, with_cloudflared, dry_run };
+    let report = setup(&HostSys, &opts).await;
+    report.print();
+    if dry_run {
+        println!("(dry run — no changes made)");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod fake {
     use super::*;
