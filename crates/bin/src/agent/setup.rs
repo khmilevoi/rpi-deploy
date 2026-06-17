@@ -120,6 +120,124 @@ pub fn write_unit_with_backup(sys: &dyn Sys, dry_run: bool) -> Result<WriteActio
     Ok(WriteAction::Wrote)
 }
 
+pub struct SetupOpts {
+    pub login_user: String,
+    pub with_cloudflared: bool,
+    pub dry_run: bool,
+}
+
+#[derive(Default)]
+pub struct SetupReport {
+    pub created: Vec<String>,
+    pub skipped: Vec<String>,
+    pub repaired: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+impl SetupReport {
+    pub fn print(&self) {
+        for c in &self.created { println!("created: {c}"); }
+        for r in &self.repaired { println!("repaired: {r}"); }
+        for s in &self.skipped { println!("ok (already present): {s}"); }
+        for w in &self.warnings { println!("warning: {w}"); }
+        if self.repaired.iter().any(|r| r.contains("/var/log/pi")) {
+            println!("note: run `sudo systemctl restart pi-agent` to activate file logs");
+        }
+    }
+}
+
+async fn ensure_dir(sys: &dyn Sys, path: &str, owner_group: Option<&str>, dry: bool, rep: &mut SetupReport, repair: bool) {
+    if sys.exists(Path::new(path)) {
+        rep.skipped.push(path.to_string());
+        return;
+    }
+    if !dry {
+        let args: Vec<&str> = match owner_group {
+            Some(og) => vec!["-d", "-o", og, "-g", og, path],
+            None => vec!["-d", path],
+        };
+        let _ = sys.run("install", &args).await;
+    }
+    if repair { rep.repaired.push(path.to_string()); } else { rep.created.push(path.to_string()); }
+}
+
+/// Idempotent agent bootstrap (spec §4). Adopt & preserve; never touches
+/// secret.key/state.db. Returns a report; does not restart the agent.
+pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
+    let mut rep = SetupReport::default();
+    let dry = opts.dry_run;
+
+    // 1. service user
+    if user_exists(sys, "pi-agent").await {
+        rep.skipped.push("user pi-agent".into());
+    } else {
+        if !dry {
+            let _ = sys.run("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]).await;
+        }
+        rep.created.push("user pi-agent".into());
+    }
+
+    // 2. pi-agent in docker group
+    if in_group(sys, "pi-agent", "docker").await {
+        rep.skipped.push("pi-agent in docker group".into());
+    } else {
+        if !dry { let _ = sys.run("usermod", &["-aG", "docker", "pi-agent"]).await; }
+        rep.created.push("pi-agent in docker group".into());
+    }
+
+    // 3. login user in pi-agent group
+    if in_group(sys, &opts.login_user, "pi-agent").await {
+        rep.skipped.push(format!("{} in pi-agent group", opts.login_user));
+    } else {
+        if !dry { let _ = sys.run("usermod", &["-aG", "pi-agent", &opts.login_user]).await; }
+        rep.created.push(format!("{} in pi-agent group", opts.login_user));
+    }
+
+    // 4-6. directories
+    ensure_dir(sys, "/var/lib/pi", Some("pi-agent"), dry, &mut rep, false).await;
+    ensure_dir(sys, "/var/log/pi", Some("pi-agent"), dry, &mut rep, true).await; // repair (§2.5)
+    ensure_dir(sys, "/etc/pi", None, dry, &mut rep, false).await;
+
+    // 7. agent.toml (only if absent)
+    if sys.exists(Path::new(AGENT_TOML_PATH)) {
+        rep.skipped.push(AGENT_TOML_PATH.into());
+    } else {
+        if !dry { let _ = sys.write(Path::new(AGENT_TOML_PATH), AGENT_TOML); }
+        rep.created.push(AGENT_TOML_PATH.into());
+    }
+
+    // 8. systemd unit + enable
+    match write_unit_with_backup(sys, dry) {
+        Ok(WriteAction::Skipped) => rep.skipped.push(UNIT_PATH.into()),
+        Ok(WriteAction::BackedUp) => rep.repaired.push(format!("{UNIT_PATH} (backed up to .bak)")),
+        Ok(WriteAction::Wrote) => rep.created.push(UNIT_PATH.into()),
+        Err(e) => rep.warnings.push(format!("unit: {e}")),
+    }
+    if !dry {
+        let _ = sys.run("systemctl", &["daemon-reload"]).await;
+        let _ = sys.run("systemctl", &["enable", "--now", "pi-agent"]).await;
+    }
+
+    // 9. cloudflared (opt-in) — implemented in Task 13.
+    if opts.with_cloudflared {
+        cloudflared_bootstrap(sys, dry, &mut rep).await;
+    }
+
+    // 10. dependency checks (warn, never fail)
+    if sys.run("docker", &["version", "--format", "{{.Server.Version}}"]).await.is_err() {
+        rep.warnings.push("docker not available — install Docker Engine and add pi-agent to the docker group".into());
+    }
+    if sys.run("docker", &["compose", "version"]).await.is_err() {
+        rep.warnings.push("docker compose plugin missing — install Docker Compose v2".into());
+    }
+
+    rep
+}
+
+async fn cloudflared_bootstrap(_sys: &dyn Sys, _dry: bool, rep: &mut SetupReport) {
+    rep.warnings.push("--with-cloudflared not yet implemented".into());
+}
+
 #[cfg(test)]
 pub(crate) mod fake {
     use super::*;
@@ -220,5 +338,76 @@ mod tests {
         let writes = sys.writes.lock().unwrap();
         assert!(writes.iter().any(|(p, _)| p.ends_with("pi-agent.service.bak")), "backup written");
         assert!(writes.iter().any(|(p, c)| p == UNIT_PATH && c == UNIT), "canonical written");
+    }
+
+    fn fresh_sys() -> FakeSys {
+        let mut sys = FakeSys::default();
+        // user absent, no dirs/files exist; group lookups succeed but show no membership.
+        sys.err.insert(FakeSys::key("id", &["-u", "pi-agent"]));
+        sys.ok.insert(FakeSys::key("id", &["-nG", "pi-agent"]), "pi-agent".into());
+        sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo".into());
+        sys.ok.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]), "27.0".into());
+        sys.ok.insert(FakeSys::key("docker", &["compose", "version"]), "v2".into());
+        sys
+    }
+
+    #[tokio::test]
+    async fn fresh_install_creates_user_dirs_unit() {
+        let sys = fresh_sys();
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let report = setup(&sys, &opts).await;
+        let calls = sys.calls();
+        assert!(calls.iter().any(|c| c.starts_with("useradd --system")), "creates pi-agent");
+        assert!(calls.iter().any(|c| c == "usermod -aG docker pi-agent"));
+        assert!(calls.iter().any(|c| c == "usermod -aG pi-agent piuser"));
+        assert!(calls.iter().any(|c| c.contains("install -d -o pi-agent -g pi-agent /var/lib/pi")));
+        assert!(calls.iter().any(|c| c.contains("install -d -o pi-agent -g pi-agent /var/log/pi")));
+        assert!(calls.iter().any(|c| c == "systemctl daemon-reload"));
+        assert!(calls.iter().any(|c| c == "systemctl enable --now pi-agent"));
+        assert!(report.warnings.is_empty(), "docker present -> no warnings");
+    }
+
+    #[tokio::test]
+    async fn repairs_only_missing_var_log_pi_on_working_install() {
+        let mut sys = FakeSys::default();
+        // user exists and is in both groups; all dirs exist EXCEPT /var/log/pi; unit identical.
+        sys.ok.insert(FakeSys::key("id", &["-u", "pi-agent"]), "999".into());
+        sys.ok.insert(FakeSys::key("id", &["-nG", "pi-agent"]), "pi-agent docker".into());
+        sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo docker pi-agent".into());
+        sys.ok.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]), "27.0".into());
+        sys.ok.insert(FakeSys::key("docker", &["compose", "version"]), "v2".into());
+        for p in ["/var/lib/pi", "/etc/pi", UNIT_PATH, AGENT_TOML_PATH] {
+            sys.paths.insert(p.into());
+        }
+        sys.files.insert(UNIT_PATH.into(), UNIT.into());
+        sys.files.insert(AGENT_TOML_PATH.into(), AGENT_TOML.into());
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let report = setup(&sys, &opts).await;
+        let calls = sys.calls();
+        assert!(!calls.iter().any(|c| c.starts_with("useradd")), "user not recreated");
+        assert!(!calls.iter().any(|c| c.starts_with("usermod")), "groups untouched");
+        assert!(calls.iter().any(|c| c.contains("install -d -o pi-agent -g pi-agent /var/log/pi")));
+        assert!(report.repaired.iter().any(|r| r.contains("/var/log/pi")));
+        assert!(sys.writes.lock().unwrap().is_empty(), "agent.toml/unit untouched");
+    }
+
+    #[tokio::test]
+    async fn dry_run_makes_no_changes() {
+        let sys = fresh_sys();
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: true };
+        let _ = setup(&sys, &opts).await;
+        let calls = sys.calls();
+        assert!(calls.iter().all(|c| c.starts_with("id ") || c.starts_with("docker ")), "only probes ran: {calls:?}");
+        assert!(sys.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_docker_warns_not_fails() {
+        let mut sys = fresh_sys();
+        sys.ok.remove(&FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]));
+        sys.err.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]));
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let report = setup(&sys, &opts).await;
+        assert!(report.warnings.iter().any(|w| w.contains("docker")));
     }
 }
