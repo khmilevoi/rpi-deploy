@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 
 use pi_application::list::ProjectView;
-use pi_domain::entities::{Deployment, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides};
+use pi_application::remove::RemoveReport;
+use pi_domain::entities::{
+    AgentOverview, Deployment, DiagnosticCheck, DiagnosticReport, HealthcheckConfig, HostStats,
+    ProjectConfig, ProjectStats, ServiceStats, StageTimeoutOverrides, StatsReport,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +119,154 @@ pub struct EnvKeysResponse {
 pub struct GcResponse {
     pub disk_used_percent: u8,
     pub builder_pruned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceStatsDto {
+    pub service: String,
+    pub cpu_percent: f64,
+    pub mem_used_bytes: u64,
+    pub mem_limit_bytes: u64,
+}
+
+impl From<ServiceStats> for ServiceStatsDto {
+    fn from(s: ServiceStats) -> ServiceStatsDto {
+        ServiceStatsDto {
+            service: s.service,
+            cpu_percent: s.cpu_percent,
+            mem_used_bytes: s.mem_used_bytes,
+            mem_limit_bytes: s.mem_limit_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostStatsDto {
+    pub cpu_percent: f64,
+    pub mem_used_bytes: u64,
+    pub mem_total_bytes: u64,
+    pub disk_used_percent: u8,
+    pub uptime_secs: u64,
+}
+
+impl From<HostStats> for HostStatsDto {
+    fn from(h: HostStats) -> HostStatsDto {
+        HostStatsDto {
+            cpu_percent: h.cpu_percent,
+            mem_used_bytes: h.mem_used_bytes,
+            mem_total_bytes: h.mem_total_bytes,
+            disk_used_percent: h.disk_used_percent,
+            uptime_secs: h.uptime_secs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectStatsDto {
+    pub project: String,
+    pub services: Vec<ServiceStatsDto>,
+    pub last_deploy: Option<DeploymentDto>,
+}
+
+impl From<ProjectStats> for ProjectStatsDto {
+    fn from(p: ProjectStats) -> ProjectStatsDto {
+        ProjectStatsDto {
+            project: p.project,
+            services: p.services.into_iter().map(Into::into).collect(),
+            last_deploy: p.last_deploy.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsReportDto {
+    pub host: HostStatsDto,
+    pub projects: Vec<ProjectStatsDto>,
+}
+
+impl From<StatsReport> for StatsReportDto {
+    fn from(r: StatsReport) -> StatsReportDto {
+        StatsReportDto {
+            host: r.host.into(),
+            projects: r.projects.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentOverviewDto {
+    pub version: String,
+    pub uptime_secs: u64,
+    pub disk_used_percent: u8,
+    pub projects: usize,
+    pub active_deployments: usize,
+}
+
+impl From<AgentOverview> for AgentOverviewDto {
+    fn from(a: AgentOverview) -> AgentOverviewDto {
+        AgentOverviewDto {
+            version: a.version,
+            uptime_secs: a.uptime_secs,
+            disk_used_percent: a.disk_used_percent,
+            projects: a.projects,
+            active_deployments: a.active_deployments,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticCheckDto {
+    pub name: String,
+    pub passed: bool,
+    pub detail: String,
+    pub hint: Option<String>,
+}
+
+impl From<DiagnosticCheck> for DiagnosticCheckDto {
+    fn from(c: DiagnosticCheck) -> DiagnosticCheckDto {
+        DiagnosticCheckDto {
+            name: c.name,
+            passed: c.passed,
+            detail: c.detail,
+            hint: c.hint,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticReportDto {
+    pub checks: Vec<DiagnosticCheckDto>,
+}
+
+impl From<DiagnosticReport> for DiagnosticReportDto {
+    fn from(r: DiagnosticReport) -> DiagnosticReportDto {
+        DiagnosticReportDto {
+            checks: r.checks.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleResponse {
+    pub project: String,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveResponse {
+    pub project: String,
+    pub hostname: Option<String>,
+    pub volumes_removed: bool,
+}
+
+impl From<RemoveReport> for RemoveResponse {
+    fn from(r: RemoveReport) -> RemoveResponse {
+        RemoveResponse {
+            project: r.project,
+            hostname: r.hostname,
+            volumes_removed: r.volumes_removed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

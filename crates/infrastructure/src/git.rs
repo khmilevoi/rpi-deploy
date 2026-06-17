@@ -133,6 +133,21 @@ impl Source for GitSource {
             commit_sha: sha,
         })
     }
+
+    async fn cleanup(&self, project_name: &str) -> Result<(), DomainError> {
+        let src_err = |e: std::io::Error| DomainError::Source(e.to_string());
+        for path in [
+            self.workdirs.join(project_name),
+            self.keys.join(project_name),
+        ] {
+            match tokio::fs::remove_dir_all(&path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(src_err(e)),
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

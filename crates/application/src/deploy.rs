@@ -663,6 +663,10 @@ mod tests {
         ) -> Result<FetchedSource, DomainError> {
             std::future::pending().await
         }
+
+        async fn cleanup(&self, _project_name: &str) -> Result<(), DomainError> {
+            Ok(())
+        }
     }
 
     fn build_with_source(
@@ -941,6 +945,41 @@ mod tests {
         }
 
         async fn prune_builder(&self, _log: Arc<dyn LogSink>) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        async fn logs(
+            &self,
+            _project_name: &str,
+            _tail: usize,
+            _follow: bool,
+            _log: Arc<dyn LogSink>,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        async fn stats(
+            &self,
+            _project_name: &str,
+        ) -> Result<Vec<pi_domain::entities::ServiceStats>, DomainError> {
+            Ok(vec![])
+        }
+
+        async fn lifecycle(
+            &self,
+            _stack: &pi_domain::entities::ComposeStack,
+            _action: pi_domain::entities::LifecycleAction,
+            _log: Arc<dyn LogSink>,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        async fn down(
+            &self,
+            _stack: &pi_domain::entities::ComposeStack,
+            _remove_volumes: bool,
+            _log: Arc<dyn LogSink>,
+        ) -> Result<(), DomainError> {
             Ok(())
         }
     }

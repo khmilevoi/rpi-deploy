@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 
 use crate::cli::sse::SseParser;
 use crate::proto::{
-    DeployAccepted, DeployRequest, DeploymentDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
-    GcResponse, ProjectViewDto, VersionInfo,
+    AgentOverviewDto, DeployAccepted, DeployRequest, DeploymentDto, DiagnosticReportDto,
+    EnvKeysResponse, EnvSendRequest, EnvSendResponse, GcResponse, LifecycleResponse,
+    ProjectViewDto, RemoveResponse, StatsReportDto, VersionInfo,
 };
 
 async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
@@ -88,6 +89,65 @@ impl ApiClient {
         Ok(extract_error(resp).await?.json().await?)
     }
 
+    pub async fn stats(&self, project: Option<&str>) -> anyhow::Result<StatsReportDto> {
+        let url = match project {
+            Some(project) => format!("{}/v1/stats?project={project}", self.base),
+            None => format!("{}/v1/stats", self.base),
+        };
+        let resp = self.http.get(url).send().await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn agent_status(&self) -> anyhow::Result<AgentOverviewDto> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/status", self.base))
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn doctor(&self) -> anyhow::Result<DiagnosticReportDto> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/doctor", self.base))
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn lifecycle(
+        &self,
+        project: &str,
+        action: &str,
+    ) -> anyhow::Result<LifecycleResponse> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/v1/projects/{project}/lifecycle/{action}",
+                self.base
+            ))
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    pub async fn remove_project(
+        &self,
+        project: &str,
+        volumes: bool,
+    ) -> anyhow::Result<RemoveResponse> {
+        let resp = self
+            .http
+            .delete(format!(
+                "{}/v1/projects/{project}?volumes={volumes}",
+                self.base
+            ))
+            .send()
+            .await?;
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
     pub async fn follow_logs(
         &self,
         id: &str,
@@ -123,6 +183,41 @@ impl ApiClient {
             }
         }
         anyhow::bail!("log stream ended without a final status (agent restarted?)")
+    }
+
+    pub async fn stream_sse(
+        &self,
+        query: &str,
+        mut on_line: impl FnMut(&str),
+    ) -> anyhow::Result<()> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base, query))
+            .send()
+            .await?;
+        let resp = extract_error(resp).await?;
+        let mut stream = resp.bytes_stream();
+        let mut parser = SseParser::default();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            buf.extend_from_slice(&chunk?);
+            let valid_up_to = match std::str::from_utf8(&buf) {
+                Ok(_) => buf.len(),
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => buf.len(),
+            };
+            if valid_up_to == 0 {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&buf[..valid_up_to]).into_owned();
+            buf.drain(..valid_up_to);
+            for ev in parser.push(&text) {
+                if ev.event == "log" {
+                    on_line(&ev.data);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn projects(&self) -> anyhow::Result<Vec<ProjectViewDto>> {

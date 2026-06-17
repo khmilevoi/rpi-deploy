@@ -16,3 +16,7 @@ tcp = "127.0.0.1:7700"
 
 # [gc]
 # disk_threshold_percent = 85    # builder prune above this disk usage (§8.1)
+
+# [logs]                         # rolling agent log files (§14)
+# dir = ".dev-logs"              # default on the Pi: /var/log/pi
+# retention_days = 14
