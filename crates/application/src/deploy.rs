@@ -278,10 +278,21 @@ impl DeployProject {
                 .await
                 .ok()
                 .flatten();
-            if let Some(ip) = ip {
-                log.line(&format!("lan: http://{ip}:{}", project.host_port));
-            } else {
-                log.line(&format!("lan: {} (ip not detected)", project.host_port));
+            match ip {
+                Some(ip) => {
+                    log.line(&format!("lan: http://{ip}:{}", project.host_port));
+                    if !is_private_ipv4(&ip) {
+                        let msg = format!(
+                            "lan: host ip {ip} is public (not RFC1918); expose=lan binds 0.0.0.0 \
+                             and publishes the service to the public internet, bypassing host \
+                             firewalls (Docker manages its own iptables chain)"
+                        );
+                        log.line(&msg);
+                    }
+                }
+                None => {
+                    log.line(&format!("lan: {} (ip not detected)", project.host_port))
+                }
             }
         }
 
@@ -298,6 +309,22 @@ impl DeployProject {
 
         Ok(fetched.commit_sha)
     }
+}
+
+/// True for loopback, link-local, and RFC1918 private IPv4 addresses. Used to
+/// warn when `expose = "lan"` would publish a service on a publicly routable
+/// IPv4 (the trait only returns IPv4, but an unexpected IPv6 is treated as
+/// private to avoid false alarms).
+fn is_private_ipv4(ip: &std::net::IpAddr) -> bool {
+    let std::net::IpAddr::V4(v4) = ip else {
+        return true;
+    };
+    let o = v4.octets();
+    v4.is_loopback()
+        || v4.is_link_local()
+        || o[0] == 10
+        || (o[0] == 172 && (16..=31).contains(&o[1]))
+        || (o[0] == 192 && o[1] == 168)
 }
 
 #[cfg(test)]
@@ -687,6 +714,52 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains(&"lan: 8000 (ip not detected)".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn lan_deploy_warns_when_ip_is_public() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+        m.host_network
+            .expect_primary_ipv4()
+            .returning(|| Some("93.184.216.34".parse().unwrap()));
+
+        let mut config = sample_config();
+        config.expose = ExposeMode::Lan;
+        config.hostname = None;
+        let sink = CollectSink::new();
+
+        let result = build(m)
+            .execute(
+                "dep-lan-public".into(),
+                config,
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        let lines = sink.lines.lock().unwrap();
+        assert!(
+            lines.contains(&"lan: http://93.184.216.34:8000".to_string()),
+            "missing url line in {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("93.184.216.34 is public")),
+            "missing public-ip warning in {lines:?}"
         );
     }
 

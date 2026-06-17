@@ -59,6 +59,12 @@ pub struct IngressSection {
     pub hostname: Option<String>,
     pub service: String,
     pub port: u16,
+    /// `expose = "lan"` binds `0.0.0.0` (all interfaces), not just the LAN.
+    /// On a host with a public IPv4 this publishes the service to the public
+    /// internet. Docker also bypasses host firewalls (UFW/iptables) for
+    /// published ports via its own `DOCKER` chain, so firewall rules will not
+    /// block it. Use `"lan"` only on trusted networks or behind an external
+    /// firewall/router. Defaults to `"private"` (127.0.0.1).
     #[serde(default)]
     pub expose: Option<String>,
 }

@@ -87,6 +87,13 @@ pub struct StageTimeoutOverrides {
     pub up_secs: Option<u64>,
 }
 
+/// How the host port is bound. `Lan` binds `0.0.0.0` (all interfaces).
+///
+/// NOTE: on a host with a public IPv4, `Lan` exposes the service to the
+/// public internet, not just the LAN. Docker also bypasses host firewalls
+/// (UFW/iptables) for published ports via its own `DOCKER` iptables chain,
+/// so an operator's firewall rules will not block the port. Use `Lan` only
+/// on trusted networks or behind an external firewall/router.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExposeMode {
     #[default]
@@ -115,6 +122,12 @@ impl ExposeMode {
             "lan" => Some(ExposeMode::Lan),
             _ => None,
         }
+    }
+}
+
+impl std::fmt::Display for ExposeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

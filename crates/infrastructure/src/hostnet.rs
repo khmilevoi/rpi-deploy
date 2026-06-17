@@ -17,6 +17,10 @@ impl UdpHostNetwork {
 }
 
 impl HostNetwork for UdpHostNetwork {
+    /// Best-effort detection for display only. Opens a UDP socket to a public
+    /// address and reads the local address the kernel chose — this is the IP of
+    /// the default-route interface. On multi-homed hosts this may not be the
+    /// LAN interface the operator expects.
     fn primary_ipv4(&self) -> Option<IpAddr> {
         let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
         socket.connect("8.8.8.8:80").ok()?;
