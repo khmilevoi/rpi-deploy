@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use pi_application::deploy::DeployProject;
 use pi_application::diagnostics::{AgentStatus, RunDiagnostics};
@@ -109,11 +110,18 @@ pub fn build_state(config: &AgentConfig) -> anyhow::Result<AppState> {
         secrets.clone(),
         overrides.clone(),
     );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let probe = HostSystemProbe::new(
         Arc::new(SystemRunner),
         disk,
         projects.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
+        config.gc.disk_threshold_percent,
+        config.cloudflared.is_some(),
+        now,
     );
     let diagnostics = RunDiagnostics::new(probe.clone());
     let agent_status = AgentStatus::new(probe, projects.clone(), Arc::clone(&history));

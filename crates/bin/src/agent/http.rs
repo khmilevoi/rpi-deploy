@@ -598,6 +598,9 @@ mod tests {
             disk,
             projects.clone(),
             env!("CARGO_PKG_VERSION").to_string(),
+            85,
+            false,
+            100,
         );
         let diagnostics = RunDiagnostics::new(probe.clone());
         let agent_status = AgentStatus::new(probe, projects.clone(), Arc::clone(&history));

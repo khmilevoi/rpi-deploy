@@ -35,6 +35,9 @@ pub struct HostSystemProbe {
     disk: Arc<dyn DiskProbe>,
     projects: Arc<dyn ProjectRepository>,
     version: String,
+    disk_threshold_percent: u8,
+    cloudflared_enabled: bool,
+    started_at: i64,
 }
 
 impl HostSystemProbe {
@@ -43,12 +46,18 @@ impl HostSystemProbe {
         disk: Arc<dyn DiskProbe>,
         projects: Arc<dyn ProjectRepository>,
         version: String,
+        disk_threshold_percent: u8,
+        cloudflared_enabled: bool,
+        started_at: i64,
     ) -> Arc<HostSystemProbe> {
         Arc::new(HostSystemProbe {
             runner,
             disk,
             projects,
             version,
+            disk_threshold_percent,
+            cloudflared_enabled,
+            started_at,
         })
     }
 
@@ -94,21 +103,27 @@ impl SystemProbe for HostSystemProbe {
                 "install Docker Compose v2",
             )
             .await,
-            self.command_check(
-                "cloudflared",
-                "cloudflared",
-                &["--version"],
-                "install cloudflared or disable [cloudflared] routing",
-            )
-            .await,
         ];
+
+        if self.cloudflared_enabled {
+            checks.push(
+                self.command_check(
+                    "cloudflared",
+                    "cloudflared",
+                    &["--version"],
+                    "install cloudflared or disable [cloudflared] routing",
+                )
+                .await,
+            );
+        }
 
         checks.push(match self.disk.used_percent() {
             Ok(percent) => DiagnosticCheck {
                 name: "disk space".into(),
-                passed: percent < 90,
+                passed: percent < self.disk_threshold_percent,
                 detail: format!("{percent}% used"),
-                hint: (percent >= 90).then(|| "run `pi gc` or free disk space".into()),
+                hint: (percent >= self.disk_threshold_percent)
+                    .then(|| "run `pi gc` or free disk space".into()),
             },
             Err(err) => DiagnosticCheck {
                 name: "disk space".into(),
