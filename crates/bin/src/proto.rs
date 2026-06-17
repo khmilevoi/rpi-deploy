@@ -334,6 +334,11 @@ pub struct ProjectViewDto {
     pub hostname: Option<String>,
     pub host_port: u16,
     pub expose: String,
+    /// Detected LAN ip for expose=lan projects; absent for private or when the
+    /// agent could not detect one. `#[serde(default)]` keeps legacy agents
+    /// (which never send this field) deserializable.
+    #[serde(default)]
+    pub lan_ip: Option<String>,
     pub services: Vec<ServiceStateDto>,
 }
 
@@ -346,6 +351,7 @@ impl From<ProjectView> for ProjectViewDto {
             hostname: v.hostname,
             host_port: v.host_port,
             expose: v.expose.as_str().to_string(),
+            lan_ip: v.lan_ip.map(|ip| ip.to_string()),
             services: v
                 .services
                 .into_iter()
@@ -436,9 +442,28 @@ mod tests {
             hostname: None,
             host_port: 8000,
             expose: pi_domain::entities::ExposeMode::Lan,
+            lan_ip: None,
             services: vec![],
         };
         let dto = ProjectViewDto::from(view);
         assert_eq!(dto.expose, "lan");
+        assert_eq!(dto.lan_ip, None);
+    }
+
+    #[test]
+    fn project_view_dto_carries_expose_and_lan_ip() {
+        let view = ProjectView {
+            name: "a".into(),
+            repo: "r".into(),
+            branch: "main".into(),
+            hostname: None,
+            host_port: 8000,
+            expose: pi_domain::entities::ExposeMode::Lan,
+            lan_ip: Some("192.168.1.50".parse().unwrap()),
+            services: vec![],
+        };
+        let dto = ProjectViewDto::from(view);
+        assert_eq!(dto.expose, "lan");
+        assert_eq!(dto.lan_ip.as_deref(), Some("192.168.1.50"));
     }
 }

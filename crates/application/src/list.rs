@@ -1,6 +1,7 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 
-use pi_domain::contracts::{ContainerRuntime, ProjectRepository};
+use pi_domain::contracts::{ContainerRuntime, HostNetwork, ProjectRepository};
 use pi_domain::entities::{ExposeMode, ServiceState};
 use pi_domain::error::DomainError;
 
@@ -13,23 +14,40 @@ pub struct ProjectView {
     pub hostname: Option<String>,
     pub host_port: u16,
     pub expose: ExposeMode,
+    /// Detected LAN ip for expose=lan projects (None for private or when
+    /// undetectable). Used by `pi ls` to render `lan http://<ip>:<port>`.
+    pub lan_ip: Option<IpAddr>,
     pub services: Vec<ServiceState>,
 }
 
 pub struct ListProjects {
     projects: Arc<dyn ProjectRepository>,
     runtime: Arc<dyn ContainerRuntime>,
+    host_network: Arc<dyn HostNetwork>,
 }
 
 impl ListProjects {
     pub fn new(
         projects: Arc<dyn ProjectRepository>,
         runtime: Arc<dyn ContainerRuntime>,
+        host_network: Arc<dyn HostNetwork>,
     ) -> Arc<ListProjects> {
-        Arc::new(ListProjects { projects, runtime })
+        Arc::new(ListProjects {
+            projects,
+            runtime,
+            host_network,
+        })
     }
 
     pub async fn execute(&self) -> Result<Vec<ProjectView>, DomainError> {
+        // Detect the host LAN ip once (UDP-connect syscall); offloaded to a
+        // blocking thread like deploy.rs. None when undetectable.
+        let hn = Arc::clone(&self.host_network);
+        let lan_ip = tokio::task::spawn_blocking(move || hn.primary_ipv4())
+            .await
+            .ok()
+            .flatten();
+
         let mut views = Vec::new();
         for project in self.projects.list().await? {
             // ps error (stack not yet up / docker unavailable) is not a reason
@@ -39,13 +57,15 @@ impl ListProjects {
                 .ps(&project.config.name)
                 .await
                 .unwrap_or_default();
+            let expose = project.config.expose;
             views.push(ProjectView {
                 name: project.config.name,
                 repo: project.config.repo,
                 branch: project.config.branch,
                 hostname: project.config.hostname,
                 host_port: project.host_port,
-                expose: project.config.expose,
+                expose,
+                lan_ip: if expose == ExposeMode::Lan { lan_ip } else { None },
                 services,
             });
         }
@@ -56,7 +76,7 @@ impl ListProjects {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_domain::contracts::{MockContainerRuntime, MockProjectRepository};
+    use pi_domain::contracts::{MockContainerRuntime, MockHostNetwork, MockProjectRepository};
     use pi_domain::entities::{
         ExposeMode, HealthcheckConfig, Project, ProjectConfig, ServiceState, StageTimeoutOverrides,
     };
@@ -81,6 +101,14 @@ mod tests {
         }
     }
 
+    /// HostNetwork mock that never reports an ip (matches the private/undetected
+    /// path used by the pre-existing tests).
+    fn no_ip_net() -> MockHostNetwork {
+        let mut net = MockHostNetwork::new();
+        net.expect_primary_ipv4().returning(|| None);
+        net
+    }
+
     #[tokio::test]
     async fn lists_projects_with_service_states() {
         let mut projects = MockProjectRepository::new();
@@ -102,13 +130,18 @@ mod tests {
             .withf(|n| n == "b")
             .returning(|_| Err(DomainError::Runtime("no such project".into())));
 
-        let list = ListProjects::new(Arc::new(projects), Arc::new(runtime));
+        let list = ListProjects::new(
+            Arc::new(projects),
+            Arc::new(runtime),
+            Arc::new(no_ip_net()),
+        );
         let views = list.execute().await.unwrap();
 
         assert_eq!(views.len(), 2);
         assert_eq!(views[0].name, "a");
         assert_eq!(views[0].host_port, 8000);
         assert_eq!(views[0].expose, ExposeMode::default());
+        assert_eq!(views[0].lan_ip, None);
         assert_eq!(
             views[0].services,
             vec![ServiceState {
@@ -131,9 +164,38 @@ mod tests {
         let mut runtime = MockContainerRuntime::new();
         runtime.expect_ps().times(0);
 
-        let list = ListProjects::new(Arc::new(projects), Arc::new(runtime));
+        let list = ListProjects::new(
+            Arc::new(projects),
+            Arc::new(runtime),
+            Arc::new(no_ip_net()),
+        );
         let err = list.execute().await.unwrap_err();
 
         assert!(matches!(err, DomainError::Storage(message) if message == "db unavailable"));
+    }
+
+    #[tokio::test]
+    async fn lan_projects_get_ip_private_projects_do_not() {
+        let mut projects = MockProjectRepository::new();
+        projects.expect_list().returning(|| {
+            let mut lan = project("lan-app", 8000);
+            lan.config.expose = ExposeMode::Lan;
+            Ok(vec![lan, project("priv-app", 8001)])
+        });
+        let mut runtime = MockContainerRuntime::new();
+        runtime.expect_ps().returning(|_| Ok(vec![]));
+        let mut net = MockHostNetwork::new();
+        net.expect_primary_ipv4()
+            .returning(|| Some("192.168.1.50".parse().unwrap()));
+
+        let list = ListProjects::new(Arc::new(projects), Arc::new(runtime), Arc::new(net));
+        let views = list.execute().await.unwrap();
+
+        let lan = views.iter().find(|v| v.name == "lan-app").unwrap();
+        let priv_ = views.iter().find(|v| v.name == "priv-app").unwrap();
+        assert_eq!(lan.expose, ExposeMode::Lan);
+        assert_eq!(lan.lan_ip, Some("192.168.1.50".parse().unwrap()));
+        assert_eq!(priv_.expose, ExposeMode::Private);
+        assert_eq!(priv_.lan_ip, None);
     }
 }
