@@ -1,6 +1,7 @@
 pub mod api;
 pub mod commands;
 pub mod config;
+pub mod init;
 pub mod pitoml;
 pub mod prompt;
 pub mod sse;
