@@ -23,3 +23,10 @@ The `/var/log/pi` directory must be writable by `pi-agent`:
 ```bash
 sudo install -d -o pi-agent -g pi-agent /var/log/pi
 ```
+
+## v0.5: setup automation
+
+`pi agent setup` now creates `/var/log/pi` (owner `pi-agent`) automatically, so
+the rolling agent logs activate without the manual `install -d` step above.
+Re-run `sudo pi agent setup` on an existing install to repair a missing
+`/var/log/pi`, then `sudo systemctl restart pi-agent`.
