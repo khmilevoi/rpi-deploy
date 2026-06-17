@@ -40,16 +40,27 @@ impl ListProjects {
     }
 
     pub async fn execute(&self) -> Result<Vec<ProjectView>, DomainError> {
-        // Detect the host LAN ip once (UDP-connect syscall); offloaded to a
-        // blocking thread like deploy.rs. None when undetectable.
-        let hn = Arc::clone(&self.host_network);
-        let lan_ip = tokio::task::spawn_blocking(move || hn.primary_ipv4())
-            .await
-            .ok()
-            .flatten();
+        let projects = self.projects.list().await?;
+
+        // Detect the host LAN ip only when at least one project needs it
+        // (UDP-connect syscall offloaded to a blocking thread like deploy.rs).
+        // Avoids the syscall for empty lists, private-only stacks, and — by
+        // returning early above on a repo error — repository failures.
+        let needs_lan_ip = projects
+            .iter()
+            .any(|p| p.config.expose == ExposeMode::Lan);
+        let lan_ip = if needs_lan_ip {
+            let hn = Arc::clone(&self.host_network);
+            tokio::task::spawn_blocking(move || hn.primary_ipv4())
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
 
         let mut views = Vec::new();
-        for project in self.projects.list().await? {
+        for project in projects {
             // ps error (stack not yet up / docker unavailable) is not a reason
             // to drop the entire list: we show the project without services.
             let services = self
@@ -101,11 +112,12 @@ mod tests {
         }
     }
 
-    /// HostNetwork mock that never reports an ip (matches the private/undetected
-    /// path used by the pre-existing tests).
-    fn no_ip_net() -> MockHostNetwork {
+    /// HostNetwork mock that asserts `primary_ipv4` is never called — used by
+    /// tests whose projects are all private (or whose `list()` fails), so the
+    /// agent must skip the UDP-connect syscall entirely.
+    fn unused_net() -> MockHostNetwork {
         let mut net = MockHostNetwork::new();
-        net.expect_primary_ipv4().returning(|| None);
+        net.expect_primary_ipv4().times(0);
         net
     }
 
@@ -133,7 +145,7 @@ mod tests {
         let list = ListProjects::new(
             Arc::new(projects),
             Arc::new(runtime),
-            Arc::new(no_ip_net()),
+            Arc::new(unused_net()),
         );
         let views = list.execute().await.unwrap();
 
@@ -164,10 +176,13 @@ mod tests {
         let mut runtime = MockContainerRuntime::new();
         runtime.expect_ps().times(0);
 
+        let mut net = MockHostNetwork::new();
+        net.expect_primary_ipv4().times(0);
+
         let list = ListProjects::new(
             Arc::new(projects),
             Arc::new(runtime),
-            Arc::new(no_ip_net()),
+            Arc::new(net),
         );
         let err = list.execute().await.unwrap_err();
 
