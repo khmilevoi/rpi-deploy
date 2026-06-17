@@ -333,6 +333,7 @@ pub struct ProjectViewDto {
     pub branch: String,
     pub hostname: Option<String>,
     pub host_port: u16,
+    pub expose: String,
     pub services: Vec<ServiceStateDto>,
 }
 
@@ -344,6 +345,7 @@ impl From<ProjectView> for ProjectViewDto {
             branch: v.branch,
             hostname: v.hostname,
             host_port: v.host_port,
+            expose: v.expose.as_str().to_string(),
             services: v
                 .services
                 .into_iter()
@@ -423,5 +425,20 @@ mod tests {
         assert_eq!(dto.expose.as_deref(), Some("lan"));
         let back: ProjectConfig = dto.into();
         assert_eq!(back.expose, pi_domain::entities::ExposeMode::Lan);
+    }
+
+    #[test]
+    fn project_view_dto_exposes_expose_mode_string() {
+        let view = ProjectView {
+            name: "a".into(),
+            repo: "r".into(),
+            branch: "main".into(),
+            hostname: None,
+            host_port: 8000,
+            expose: pi_domain::entities::ExposeMode::Lan,
+            services: vec![],
+        };
+        let dto = ProjectViewDto::from(view);
+        assert_eq!(dto.expose, "lan");
     }
 }

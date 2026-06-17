@@ -161,8 +161,8 @@ pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
         return Ok(());
     }
     println!(
-        "{:<16} {:<10} {:<28} {:<6} SERVICES",
-        "NAME", "BRANCH", "HOSTNAME", "PORT"
+        "{:<16} {:<10} {:<8} {:<28} {:<6} SERVICES",
+        "NAME", "BRANCH", "EXPOSE", "HOSTNAME", "PORT"
     );
     for p in projects {
         let services = if p.services.is_empty() {
@@ -175,9 +175,10 @@ pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
                 .join(", ")
         };
         println!(
-            "{:<16} {:<10} {:<28} {:<6} {services}",
+            "{:<16} {:<10} {:<8} {:<28} {:<6} {services}",
             p.name,
             p.branch,
+            p.expose,
             p.hostname.unwrap_or_else(|| "-".into()),
             p.host_port
         );
