@@ -234,8 +234,43 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
     rep
 }
 
-async fn cloudflared_bootstrap(_sys: &dyn Sys, _dry: bool, rep: &mut SetupReport) {
-    rep.warnings.push("--with-cloudflared not yet implemented".into());
+const CLOUDFLARED_UNIT_PATH: &str = "/var/lib/pi/.config/systemd/user/cloudflared.service";
+
+const CLOUDFLARED_UNIT: &str = "\
+[Unit]
+Description=cloudflared tunnel (pi-agent)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/cloudflared tunnel run
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+";
+
+/// Opt-in cloudflared scaffolding: enable linger and write the user unit.
+/// The interactive `cloudflared tunnel login` step is left to the operator.
+async fn cloudflared_bootstrap(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
+    if !dry {
+        let _ = sys.run("loginctl", &["enable-linger", "pi-agent"]).await;
+    }
+    rep.created.push("systemd linger for pi-agent".into());
+
+    if sys.exists(Path::new(CLOUDFLARED_UNIT_PATH)) {
+        rep.skipped.push(CLOUDFLARED_UNIT_PATH.into());
+    } else {
+        if !dry {
+            let _ = sys.run("install", &["-d", "-o", "pi-agent", "-g", "pi-agent", "/var/lib/pi/.config/systemd/user"]).await;
+            let _ = sys.write(Path::new(CLOUDFLARED_UNIT_PATH), CLOUDFLARED_UNIT);
+        }
+        rep.created.push(CLOUDFLARED_UNIT_PATH.into());
+    }
+    rep.warnings.push(
+        "cloudflared: finish manually — run `cloudflared tunnel login`, create a tunnel, \
+         write /var/lib/pi/cloudflared/config.yml, add [cloudflared] to /etc/pi/agent.toml, \
+         then `systemctl --user enable --now cloudflared` as pi-agent".into(),
+    );
 }
 
 /// CLI entrypoint: resolve the login user (--user or $SUDO_USER), run setup,
@@ -427,5 +462,24 @@ mod tests {
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let report = setup(&sys, &opts).await;
         assert!(report.warnings.iter().any(|w| w.contains("docker")));
+    }
+
+    #[tokio::test]
+    async fn with_cloudflared_enables_linger_and_instructs() {
+        let sys = fresh_sys();
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: true, dry_run: false };
+        let report = setup(&sys, &opts).await;
+        let calls = sys.calls();
+        assert!(calls.iter().any(|c| c == "loginctl enable-linger pi-agent"));
+        assert!(report.created.iter().any(|c| c.contains("linger")));
+        assert!(report.warnings.iter().any(|w| w.contains("cloudflared tunnel login")), "prints manual login step");
+    }
+
+    #[tokio::test]
+    async fn without_cloudflared_does_not_touch_linger() {
+        let sys = fresh_sys();
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let _ = setup(&sys, &opts).await;
+        assert!(!sys.calls().iter().any(|c| c.contains("enable-linger")));
     }
 }
