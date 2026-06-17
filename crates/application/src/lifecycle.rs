@@ -42,12 +42,6 @@ impl ControlLifecycle {
             .get(project)
             .await?
             .ok_or_else(|| DomainError::NotFound(format!("project {project}")))?;
-        let active = self.history.active(project).await?;
-        if !active.is_empty() {
-            return Err(DomainError::Conflict(format!(
-                "project {project} has active deployment"
-            )));
-        }
         let workdir = self.source.workdir(project);
         let compose_file = workdir.join(&registered.config.compose_path);
         let override_file = self.overrides.path(project);

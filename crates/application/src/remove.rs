@@ -60,7 +60,7 @@ impl RemoveProject {
         let active = self.history.active(project).await?;
         if !active.is_empty() {
             return Err(DomainError::Conflict(format!(
-                "project {project} has active deployment"
+                "project {project} has active deployment; cancel it first using `pi deploy --cancel`"
             )));
         }
 

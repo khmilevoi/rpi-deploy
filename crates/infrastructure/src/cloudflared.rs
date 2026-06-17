@@ -155,9 +155,19 @@ impl Ingress for CloudflaredIngress {
     }
 
     async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
-        let text = tokio::fs::read_to_string(&self.config_path)
-            .await
-            .map_err(|e| ingress_err(format!("cannot read {}: {e}", self.config_path.display())))?;
+        let text = match tokio::fs::read_to_string(&self.config_path).await {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                log.line("ingress: no config.yml found; skipping remove");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(ingress_err(format!(
+                    "cannot read {}: {e}",
+                    self.config_path.display()
+                )));
+            }
+        };
         let mut doc: serde_yaml::Value = serde_yaml::from_str(&text).map_err(ingress_err)?;
         let changed = remove_ingress_rule(&mut doc, hostname).map_err(ingress_err)?;
         if !changed {
