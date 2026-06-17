@@ -47,6 +47,79 @@ impl Sys for HostSys {
     }
 }
 
+pub const UNIT_PATH: &str = "/etc/systemd/system/pi-agent.service";
+pub const AGENT_TOML_PATH: &str = "/etc/pi/agent.toml";
+
+/// Canonical systemd unit — byte-for-byte the working install (spec §9).
+pub const UNIT: &str = "\
+[Unit]
+Description=pi deploy agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=pi-agent
+Group=pi-agent
+ExecStart=/usr/local/bin/pi agent run --config /etc/pi/agent.toml
+RuntimeDirectory=pi
+RuntimeDirectoryMode=0750
+Restart=on-failure
+Environment=HOME=/var/lib/pi
+Environment=XDG_CONFIG_HOME=/var/lib/pi/.config
+Environment=XDG_CACHE_HOME=/var/lib/pi/.cache
+WorkingDirectory=/var/lib/pi
+
+[Install]
+WantedBy=multi-user.target
+";
+
+/// Canonical agent.toml — written only when /etc/pi/agent.toml is absent (spec §9).
+pub const AGENT_TOML: &str = "\
+data_dir = \"/var/lib/pi\"
+socket = \"/run/pi/agent.sock\"
+port_min = 8000
+port_max = 8999
+build_concurrency = 1
+history_keep = 50
+
+[timeouts]
+fetch = \"2m\"
+build = \"30m\"
+up = \"5m\"
+
+[gc]
+disk_threshold_percent = 85
+";
+
+pub enum WriteAction {
+    Wrote,
+    Skipped,
+    BackedUp,
+}
+
+/// Write the canonical unit; back up to *.bak only if an existing file differs.
+pub fn write_unit_with_backup(sys: &dyn Sys, dry_run: bool) -> Result<WriteAction, String> {
+    let path = Path::new(UNIT_PATH);
+    if sys.exists(path) {
+        if sys.read(path).as_deref() == Some(UNIT) {
+            return Ok(WriteAction::Skipped);
+        }
+        if dry_run {
+            return Ok(WriteAction::BackedUp);
+        }
+        let bak = format!("{UNIT_PATH}.bak");
+        if let Some(old) = sys.read(path) {
+            sys.write(Path::new(&bak), &old)?;
+        }
+        sys.write(path, UNIT)?;
+        return Ok(WriteAction::BackedUp);
+    }
+    if !dry_run {
+        sys.write(path, UNIT)?;
+    }
+    Ok(WriteAction::Wrote)
+}
+
 #[cfg(test)]
 pub(crate) mod fake {
     use super::*;
@@ -117,5 +190,35 @@ mod tests {
         sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo docker pi-agent".into());
         assert!(in_group(&sys, "piuser", "docker").await);
         assert!(!in_group(&sys, "piuser", "wheel").await);
+    }
+
+    #[test]
+    fn unit_template_matches_spec_byte_for_byte() {
+        assert!(UNIT.starts_with("[Unit]\nDescription=pi deploy agent\n"));
+        assert!(UNIT.contains("ExecStart=/usr/local/bin/pi agent run --config /etc/pi/agent.toml\n"));
+        assert!(UNIT.contains("Environment=XDG_CACHE_HOME=/var/lib/pi/.cache\n"));
+        assert!(UNIT.ends_with("WantedBy=multi-user.target\n"));
+    }
+
+    #[tokio::test]
+    async fn write_unit_skips_when_identical() {
+        let mut sys = FakeSys::default();
+        sys.paths.insert(UNIT_PATH.into());
+        sys.files.insert(UNIT_PATH.into(), UNIT.into());
+        let action = write_unit_with_backup(&sys, false).unwrap();
+        assert!(matches!(action, WriteAction::Skipped));
+        assert!(sys.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_unit_backs_up_when_different() {
+        let mut sys = FakeSys::default();
+        sys.paths.insert(UNIT_PATH.into());
+        sys.files.insert(UNIT_PATH.into(), "old=unit\n".into());
+        let action = write_unit_with_backup(&sys, false).unwrap();
+        assert!(matches!(action, WriteAction::BackedUp));
+        let writes = sys.writes.lock().unwrap();
+        assert!(writes.iter().any(|(p, _)| p.ends_with("pi-agent.service.bak")), "backup written");
+        assert!(writes.iter().any(|(p, c)| p == UNIT_PATH && c == UNIT), "canonical written");
     }
 }
