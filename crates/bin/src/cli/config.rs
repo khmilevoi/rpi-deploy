@@ -1,19 +1,21 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ClientConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     #[serde(default)]
     pub servers: HashMap<String, ServerProfile>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerProfile {
     pub host: String,
     pub user: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
 
@@ -92,6 +94,37 @@ impl ClientConfig {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("server profile '{name}' not found in client config"))
     }
+
+    /// Insert or replace a profile; set it as `default` only when asked and no
+    /// default exists yet (Adopt & preserve).
+    pub fn upsert(&mut self, name: &str, profile: ServerProfile, make_default: bool) {
+        self.servers.insert(name.to_string(), profile);
+        if make_default && self.default.is_none() {
+            self.default = Some(name.to_string());
+        }
+    }
+
+    /// Load the existing config (or empty), upsert the profile, write it back.
+    pub fn save_merged(
+        name: &str,
+        profile: ServerProfile,
+        make_default: bool,
+    ) -> anyhow::Result<PathBuf> {
+        let path = ClientConfig::path()?;
+        let mut cfg = match std::fs::read_to_string(&path) {
+            Ok(text) => ClientConfig::parse(&text)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ClientConfig { default: None, servers: HashMap::new() }
+            }
+            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
+        };
+        cfg.upsert(name, profile, make_default);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, toml::to_string(&cfg)?)?;
+        Ok(path)
+    }
 }
 
 #[cfg(test)]
@@ -136,5 +169,39 @@ user = "deploy"
         assert_eq!(profile.host, "203.0.113.7");
         assert_eq!(profile.user, "pi");
         assert_eq!(profile.key.as_deref(), Some("./deploy_key"));
+    }
+
+    #[test]
+    fn save_merged_preserves_other_profiles_and_default() {
+        let existing = r#"
+default = "home"
+
+[servers.home]
+host = "pihost.local"
+user = "piuser"
+key = "~/.ssh/pi"
+"#;
+        let mut cfg = ClientConfig::parse(existing).unwrap();
+        cfg.upsert(
+            "work",
+            ServerProfile { host: "10.0.0.2".into(), user: "deploy".into(), key: None },
+            false,
+        );
+        let rendered = toml::to_string(&cfg).unwrap();
+        let reparsed = ClientConfig::parse(&rendered).unwrap();
+        assert_eq!(reparsed.default.as_deref(), Some("home"), "default preserved");
+        assert_eq!(reparsed.servers.len(), 2);
+        assert_eq!(reparsed.servers["home"].host, "pihost.local");
+        assert_eq!(reparsed.servers["work"].host, "10.0.0.2");
+        assert_eq!(reparsed.servers["work"].key, None);
+    }
+
+    #[test]
+    fn upsert_sets_default_only_when_requested_and_absent() {
+        let mut cfg = ClientConfig { default: None, servers: Default::default() };
+        cfg.upsert("home", ServerProfile { host: "h".into(), user: "u".into(), key: None }, true);
+        assert_eq!(cfg.default.as_deref(), Some("home"));
+        cfg.upsert("work", ServerProfile { host: "h2".into(), user: "u".into(), key: None }, true);
+        assert_eq!(cfg.default.as_deref(), Some("home"), "existing default not overwritten");
     }
 }
