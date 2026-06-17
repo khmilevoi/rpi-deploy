@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use pi_domain::contracts::{DiskProbe, ProjectRepository, SystemProbe};
 use pi_domain::entities::{AgentOverview, DiagnosticCheck, DiagnosticReport};
 use pi_domain::error::DomainError;
-use sysinfo::System;
 use tokio::process::Command;
 
 #[async_trait]
@@ -138,9 +137,15 @@ impl SystemProbe for HostSystemProbe {
 
     async fn overview(&self) -> Result<AgentOverview, DomainError> {
         let projects = self.projects.list().await?.len();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let uptime_secs = (now - self.started_at).max(0) as u64;
+
         Ok(AgentOverview {
             version: self.version.clone(),
-            uptime_secs: System::uptime(),
+            uptime_secs,
             disk_used_percent: self.disk.used_percent()?,
             projects,
             active_deployments: 0,
