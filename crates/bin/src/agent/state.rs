@@ -13,7 +13,7 @@ use pi_application::logs::StreamLogs;
 use pi_application::remove::RemoveProject;
 use pi_application::scheduler::{DeployRunner, DeployScheduler};
 use pi_application::stats::GetStats;
-use pi_domain::contracts::{DeploymentHistory, IdGen, Ingress};
+use pi_domain::contracts::{DeploymentHistory, HostNetwork, IdGen, Ingress};
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
 use pi_infrastructure::disk::SysinfoDiskProbe;
 use pi_infrastructure::docker::DockerComposeRuntime;
@@ -22,6 +22,7 @@ use pi_infrastructure::events::DeployEventsHub;
 use pi_infrastructure::git::GitSource;
 use pi_infrastructure::health::HybridHealthGate;
 use pi_infrastructure::history::SqliteHistory;
+use pi_infrastructure::hostnet::UdpHostNetwork;
 use pi_infrastructure::overrides::FsOverrideStore;
 use pi_infrastructure::probe::{HostSystemProbe, SystemRunner};
 use pi_infrastructure::repo::SqliteProjectRepo;
@@ -48,6 +49,7 @@ pub struct AppState {
     pub remove: Arc<RemoveProject>,
     pub diagnostics: Arc<RunDiagnostics>,
     pub agent_status: Arc<AgentStatus>,
+    pub host_network: Arc<dyn HostNetwork>,
     pub log_dir: PathBuf,
     pub log_dir_available: bool,
 }
@@ -77,6 +79,8 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         None => DisabledIngress::new(),
     };
 
+    let host_network: Arc<dyn HostNetwork> = Arc::new(UdpHostNetwork::new());
+
     let deploy = DeployProject::new(
         source.clone(),
         runtime.clone(),
@@ -87,6 +91,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         Arc::clone(&env_files),
         health,
         ingress.clone(),
+        Arc::clone(&host_network),
         SystemClock::new(),
         Arc::clone(&gc),
         config.stage_timeouts()?,
@@ -156,6 +161,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         remove,
         diagnostics,
         agent_status,
+        host_network: Arc::clone(&host_network),
         log_dir: config.logs.dir.clone(),
         log_dir_available,
     })

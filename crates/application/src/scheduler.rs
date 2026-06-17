@@ -276,7 +276,7 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{MockClock, MockDeploymentHistory};
-    use pi_domain::entities::{HealthcheckConfig, StageTimeoutOverrides};
+    use pi_domain::entities::{ExposeMode, HealthcheckConfig, StageTimeoutOverrides};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn config(name: &str) -> ProjectConfig {
@@ -288,6 +288,7 @@ mod tests {
             service: "web".into(),
             container_port: 3000,
             hostname: None,
+            expose: ExposeMode::default(),
             healthcheck: HealthcheckConfig::default(),
             timeouts: StageTimeoutOverrides::default(),
         }

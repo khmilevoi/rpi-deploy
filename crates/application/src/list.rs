@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{ContainerRuntime, ProjectRepository};
-use pi_domain::entities::ServiceState;
+use pi_domain::entities::{ExposeMode, ServiceState};
 use pi_domain::error::DomainError;
 
 /// Line for `pi ls`: project + state of its services (§7 ListProjects).
@@ -12,6 +12,7 @@ pub struct ProjectView {
     pub branch: String,
     pub hostname: Option<String>,
     pub host_port: u16,
+    pub expose: ExposeMode,
     pub services: Vec<ServiceState>,
 }
 
@@ -44,6 +45,7 @@ impl ListProjects {
                 branch: project.config.branch,
                 hostname: project.config.hostname,
                 host_port: project.host_port,
+                expose: project.config.expose,
                 services,
             });
         }
@@ -56,7 +58,7 @@ mod tests {
     use super::*;
     use pi_domain::contracts::{MockContainerRuntime, MockProjectRepository};
     use pi_domain::entities::{
-        HealthcheckConfig, Project, ProjectConfig, ServiceState, StageTimeoutOverrides,
+        ExposeMode, HealthcheckConfig, Project, ProjectConfig, ServiceState, StageTimeoutOverrides,
     };
     use pi_domain::error::DomainError;
 
@@ -70,6 +72,7 @@ mod tests {
                 service: "web".into(),
                 container_port: 3000,
                 hostname: None,
+                expose: ExposeMode::default(),
                 healthcheck: HealthcheckConfig::default(),
                 timeouts: StageTimeoutOverrides::default(),
             },
@@ -105,6 +108,7 @@ mod tests {
         assert_eq!(views.len(), 2);
         assert_eq!(views[0].name, "a");
         assert_eq!(views[0].host_port, 8000);
+        assert_eq!(views[0].expose, ExposeMode::default());
         assert_eq!(
             views[0].services,
             vec![ServiceState {

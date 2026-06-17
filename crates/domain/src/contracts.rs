@@ -83,6 +83,13 @@ pub trait DiskProbe: Send + Sync {
     fn used_percent(&self) -> Result<u8, DomainError>;
 }
 
+/// Detects the agent host's primary LAN IPv4 for building reachable URLs
+/// (used by `pi deploy`/`pi ls` for expose=lan projects). None when undetectable.
+#[cfg_attr(feature = "mocks", automock)]
+pub trait HostNetwork: Send + Sync {
+    fn primary_ipv4(&self) -> Option<std::net::IpAddr>;
+}
+
 /// Project registry + port allocation (§6).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
@@ -122,7 +129,8 @@ pub trait DeploymentHistory: Send + Sync {
     async fn remove_project(&self, project: &str) -> Result<(), DomainError>;
 }
 
-/// Writes compose-override with mapping 127.0.0.1:<host> → <container> (§12.1).
+/// Writes compose-override mapping <bind>:<host> -> <container> (§12.1).
+/// `bind` is "127.0.0.1" (private) or "0.0.0.0" (lan), from ExposeMode.
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait OverrideStore: Send + Sync {
@@ -132,6 +140,7 @@ pub trait OverrideStore: Send + Sync {
         &self,
         project: &str,
         service: &str,
+        bind: &str,
         host_port: u16,
         container_port: u16,
     ) -> Result<PathBuf, DomainError>;

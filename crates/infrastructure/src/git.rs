@@ -188,7 +188,8 @@ mod tests {
 mod integration {
     use super::*;
     use pi_domain::entities::{
-        DeployRef, DeploymentStatus, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides,
+        DeployRef, DeploymentStatus, ExposeMode, HealthcheckConfig, ProjectConfig,
+        StageTimeoutOverrides,
     };
     use std::path::Path;
 
@@ -225,6 +226,7 @@ mod integration {
             service: "web".into(),
             container_port: 3000,
             hostname: None,
+            expose: ExposeMode::default(),
             healthcheck: HealthcheckConfig::default(),
             timeouts: StageTimeoutOverrides::default(),
         }

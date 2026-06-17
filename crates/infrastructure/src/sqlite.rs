@@ -6,8 +6,9 @@ use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(
-        r#"
+    Migrations::new(vec![
+        M::up(
+            r#"
         CREATE TABLE projects (
             name           TEXT PRIMARY KEY,
             repo           TEXT NOT NULL,
@@ -31,7 +32,9 @@ fn migrations() -> Migrations<'static> {
         );
         CREATE INDEX idx_deployments_project ON deployments(project, started_at DESC);
         "#,
-    )])
+        ),
+        M::up("ALTER TABLE projects ADD COLUMN expose TEXT NOT NULL DEFAULT 'private';"),
+    ])
 }
 
 pub(crate) fn storage_err(e: rusqlite::Error) -> DomainError {
@@ -165,5 +168,31 @@ mod tests {
             })
             .await;
         assert!(matches!(duplicate_port, Err(DomainError::Storage(_))));
+    }
+
+    #[tokio::test]
+    async fn migration_adds_expose_column_defaulting_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        db.call(|c| {
+            c.execute(
+                "INSERT INTO projects
+                 (name, repo, branch, compose_path, service, container_port, host_port, created_at)
+                 VALUES ('a', 'repo-a', 'main', 'docker-compose.yml', 'web', 3000, 8000, 1)",
+                [],
+            )
+            .map_err(storage_err)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let expose: String = db
+            .call(|c| {
+                c.query_row("SELECT expose FROM projects WHERE name='a'", [], |r| r.get(0))
+                    .map_err(storage_err)
+            })
+            .await
+            .unwrap();
+        assert_eq!(expose, "private");
     }
 }

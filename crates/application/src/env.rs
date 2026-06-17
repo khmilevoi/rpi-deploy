@@ -83,6 +83,7 @@ impl SendEnv {
             .write(
                 project,
                 &config.service,
+                registered.config.expose.bind_addr(),
                 registered.host_port,
                 config.container_port,
             )
@@ -124,7 +125,9 @@ mod tests {
         MockContainerRuntime, MockEnvFileWriter, MockOverrideStore, MockProjectRepository,
         MockSecretStore, MockSource,
     };
-    use pi_domain::entities::{HealthcheckConfig, Project, ProjectConfig, StageTimeoutOverrides};
+    use pi_domain::entities::{
+        ExposeMode, HealthcheckConfig, Project, ProjectConfig, StageTimeoutOverrides,
+    };
     use std::path::{Path, PathBuf};
 
     fn bundle() -> EnvBundle {
@@ -144,6 +147,7 @@ mod tests {
                 service: "web".into(),
                 container_port: 3000,
                 hostname: None,
+                expose: ExposeMode::default(),
                 healthcheck: HealthcheckConfig::default(),
                 timeouts: StageTimeoutOverrides::default(),
             },
@@ -235,9 +239,15 @@ mod tests {
             .returning(|_, _| Ok(()));
         m.overrides
             .expect_write()
-            .withf(|p, s, hp, cp| p == "rateme" && s == "web" && *hp == 8000 && *cp == 3000)
+            .withf(|p, s, bind, hp, cp| {
+                p == "rateme"
+                    && s == "web"
+                    && bind == "127.0.0.1"
+                    && *hp == 8000
+                    && *cp == 3000
+            })
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/ov/rateme.yml")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov/rateme.yml")));
         m.runtime
             .expect_up()
             .withf(|stack, _| {

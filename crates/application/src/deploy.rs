@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{
-    Clock, ContainerRuntime, DeploymentHistory, EnvFileWriter, HealthGate, Ingress, LogSink,
-    OverrideStore, ProjectRepository, SecretStore, Source,
+    Clock, ContainerRuntime, DeploymentHistory, EnvFileWriter, HealthGate, HostNetwork, Ingress,
+    LogSink, OverrideStore, ProjectRepository, SecretStore, Source,
 };
 use pi_domain::entities::{
-    ComposeStack, DeployRef, Deployment, DeploymentStatus, ProjectConfig, StageTimeouts,
+    ComposeStack, DeployRef, Deployment, DeploymentStatus, ExposeMode, ProjectConfig,
+    StageTimeouts,
 };
 use pi_domain::error::DomainError;
 use tokio::sync::Semaphore;
@@ -54,6 +55,7 @@ pub struct DeployProject {
     env_files: Arc<dyn EnvFileWriter>,
     health: Arc<dyn HealthGate>,
     ingress: Arc<dyn Ingress>,
+    host_network: Arc<dyn HostNetwork>,
     clock: Arc<dyn Clock>,
     gc: Arc<RunGc>,
     timeouts: StageTimeouts,
@@ -90,6 +92,7 @@ impl DeployProject {
         env_files: Arc<dyn EnvFileWriter>,
         health: Arc<dyn HealthGate>,
         ingress: Arc<dyn Ingress>,
+        host_network: Arc<dyn HostNetwork>,
         clock: Arc<dyn Clock>,
         gc: Arc<RunGc>,
         timeouts: StageTimeouts,
@@ -105,6 +108,7 @@ impl DeployProject {
             env_files,
             health,
             ingress,
+            host_network,
             clock,
             gc,
             timeouts,
@@ -236,6 +240,7 @@ impl DeployProject {
             .write(
                 &config.name,
                 &config.service,
+                config.expose.bind_addr(),
                 project.host_port,
                 config.container_port,
             )
@@ -267,6 +272,30 @@ impl DeployProject {
             .check(config, project.host_port, log.clone())
             .await?;
 
+        if config.expose == ExposeMode::Lan {
+            let hn = Arc::clone(&self.host_network);
+            let ip = tokio::task::spawn_blocking(move || hn.primary_ipv4())
+                .await
+                .ok()
+                .flatten();
+            match ip {
+                Some(ip) => {
+                    log.line(&format!("lan: http://{ip}:{}", project.host_port));
+                    if !is_private_ipv4(&ip) {
+                        let msg = format!(
+                            "lan: host ip {ip} is public (not RFC1918); expose=lan binds 0.0.0.0 \
+                             and publishes the service to the public internet, bypassing host \
+                             firewalls (Docker manages its own iptables chain)"
+                        );
+                        log.line(&msg);
+                    }
+                }
+                None => {
+                    log.line(&format!("lan: {} (ip not detected)", project.host_port))
+                }
+            }
+        }
+
         // §11: route hostname only when configured
         if let Some(hostname) = &config.hostname {
             self.ingress
@@ -282,18 +311,34 @@ impl DeployProject {
     }
 }
 
+/// True for loopback, link-local, and RFC1918 private IPv4 addresses. Used to
+/// warn when `expose = "lan"` would publish a service on a publicly routable
+/// IPv4 (the trait only returns IPv4, but an unexpected IPv6 is treated as
+/// private to avoid false alarms).
+fn is_private_ipv4(ip: &std::net::IpAddr) -> bool {
+    let std::net::IpAddr::V4(v4) = ip else {
+        return true;
+    };
+    let o = v4.octets();
+    v4.is_loopback()
+        || v4.is_link_local()
+        || o[0] == 10
+        || (o[0] == 172 && (16..=31).contains(&o[1]))
+        || (o[0] == 192 && o[1] == 168)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
         MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe, MockEnvFileWriter,
-        MockHealthGate, MockIngress, MockOverrideStore, MockProjectRepository, MockSecretStore,
-        MockSource,
+        MockHealthGate, MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository,
+        MockSecretStore, MockSource,
     };
     use pi_domain::entities::{
-        DeployRef, DeploymentStatus, EnvBundle, FetchedSource, HealthcheckConfig, Project,
-        ProjectConfig, StageTimeoutOverrides, StageTimeouts,
+        DeployRef, DeploymentStatus, EnvBundle, ExposeMode, FetchedSource, HealthcheckConfig,
+        Project, ProjectConfig, StageTimeoutOverrides, StageTimeouts,
     };
     use pi_domain::error::DomainError;
     use std::{
@@ -310,6 +355,7 @@ mod tests {
             service: "web".into(),
             container_port: 3000,
             hostname: Some("rateme.isskelo.com".into()),
+            expose: ExposeMode::default(),
             healthcheck: HealthcheckConfig::default(),
             timeouts: StageTimeoutOverrides::default(),
         }
@@ -327,6 +373,7 @@ mod tests {
         pub env_files: MockEnvFileWriter,
         pub health: MockHealthGate,
         pub ingress: MockIngress,
+        pub host_network: MockHostNetwork,
         pub clock: MockClock,
     }
 
@@ -349,6 +396,7 @@ mod tests {
             env_files: MockEnvFileWriter::new(),
             health: MockHealthGate::new(),
             ingress: MockIngress::new(),
+            host_network: MockHostNetwork::new(),
             clock,
         }
     }
@@ -365,6 +413,7 @@ mod tests {
             Arc::new(m.env_files),
             Arc::new(m.health),
             Arc::new(m.ingress),
+            Arc::new(m.host_network),
             Arc::new(m.clock),
             gc,
             StageTimeouts::default(),
@@ -407,9 +456,15 @@ mod tests {
         let stage_order = Arc::clone(&order);
         m.overrides
             .expect_write()
-            .withf(|p, s, hp, cp| p == "rateme" && s == "web" && *hp == 8000 && *cp == 3000)
+            .withf(|p, s, bind, hp, cp| {
+                p == "rateme"
+                    && s == "web"
+                    && bind == "127.0.0.1"
+                    && *hp == 8000
+                    && *cp == 3000
+            })
             .times(1)
-            .returning(move |_, _, _, _| {
+            .returning(move |_, _, _, _, _| {
                 stage_order.lock().unwrap().push("override");
                 Ok(PathBuf::from("/var/lib/pi/overrides/rateme.yml"))
             });
@@ -524,6 +579,191 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lan_expose_writes_override_bound_to_all_interfaces() {
+        let mut m = mocks();
+        let mut cfg = sample_config();
+        cfg.expose = ExposeMode::Lan;
+        cfg.hostname = None;
+
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
+        });
+        m.source.expect_fetch().returning(|_, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.overrides
+            .expect_write()
+            .withf(|p, s, bind, hp, cp| {
+                p == "rateme"
+                    && s == "web"
+                    && bind == "0.0.0.0"
+                    && *hp == 8000
+                    && *cp == 3000
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+        m.host_network.expect_primary_ipv4().returning(|| None);
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let result = build(m)
+            .execute(
+                "dep-lan".into(),
+                cfg,
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn lan_deploy_logs_reachable_url() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+        m.host_network
+            .expect_primary_ipv4()
+            .returning(|| Some("192.168.1.50".parse().unwrap()));
+
+        let mut config = sample_config();
+        config.expose = ExposeMode::Lan;
+        config.hostname = None;
+        let sink = CollectSink::new();
+
+        let result = build(m)
+            .execute(
+                "dep-lan-url".into(),
+                config,
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        assert!(
+            sink.lines
+                .lock()
+                .unwrap()
+                .contains(&"lan: http://192.168.1.50:8000".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn lan_deploy_logs_port_when_ip_not_detected() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+        m.host_network.expect_primary_ipv4().returning(|| None);
+
+        let mut config = sample_config();
+        config.expose = ExposeMode::Lan;
+        config.hostname = None;
+        let sink = CollectSink::new();
+
+        let result = build(m)
+            .execute(
+                "dep-lan-no-ip".into(),
+                config,
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        assert!(
+            sink.lines
+                .lock()
+                .unwrap()
+                .contains(&"lan: 8000 (ip not detected)".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn lan_deploy_warns_when_ip_is_public() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(EnvBundle::default()));
+        m.env_files.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+        m.host_network
+            .expect_primary_ipv4()
+            .returning(|| Some("93.184.216.34".parse().unwrap()));
+
+        let mut config = sample_config();
+        config.expose = ExposeMode::Lan;
+        config.hostname = None;
+        let sink = CollectSink::new();
+
+        let result = build(m)
+            .execute(
+                "dep-lan-public".into(),
+                config,
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        let lines = sink.lines.lock().unwrap();
+        assert!(
+            lines.contains(&"lan: http://93.184.216.34:8000".to_string()),
+            "missing url line in {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("93.184.216.34 is public")),
+            "missing public-ip warning in {lines:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn mark_running_failure_writes_failed_to_db_and_emits_finished() {
         let mut m = mocks();
         m.history
@@ -579,7 +819,7 @@ mod tests {
         m.env_files.expect_write().times(0);
         m.overrides
             .expect_write()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.runtime
             .expect_build()
             .returning(|_, _| Err(DomainError::Runtime("compose build exited with 1".into())));
@@ -640,7 +880,7 @@ mod tests {
         });
         m.overrides
             .expect_write()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/ov.yml")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -685,6 +925,7 @@ mod tests {
             Arc::new(m.env_files),
             Arc::new(m.health),
             Arc::new(m.ingress),
+            Arc::new(m.host_network),
             Arc::new(m.clock),
             gc,
             timeouts,
@@ -1006,7 +1247,7 @@ mod tests {
         m.env_files.expect_write().times(0);
         m.overrides
             .expect_write()
-            .returning(|p, _, _, _| Ok(PathBuf::from("/ov").join(p)));
+            .returning(|p, _, _, _, _| Ok(PathBuf::from("/ov").join(p)));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
@@ -1029,6 +1270,7 @@ mod tests {
             Arc::new(m.env_files),
             Arc::new(m.health),
             Arc::new(m.ingress),
+            Arc::new(m.host_network),
             Arc::new(m.clock),
             gc,
             StageTimeouts::default(),

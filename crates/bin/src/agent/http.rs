@@ -558,6 +558,7 @@ mod tests {
         use pi_infrastructure::cloudflared::DisabledIngress;
         use pi_infrastructure::envfile::FsEnvFileWriter;
         use pi_infrastructure::health::HybridHealthGate;
+        use pi_infrastructure::hostnet::UdpHostNetwork;
         use pi_infrastructure::secrets::EncryptedFileStore;
 
         let db = Db::open(&dir.join("state.db")).unwrap();
@@ -583,6 +584,7 @@ mod tests {
             FsEnvFileWriter::new(),
             health,
             DisabledIngress::new(),
+            Arc::new(UdpHostNetwork::new()),
             SystemClock::new(),
             Arc::clone(&gc),
             StageTimeouts::default(),
@@ -647,6 +649,7 @@ mod tests {
             remove,
             diagnostics,
             agent_status,
+            host_network: Arc::new(UdpHostNetwork::new()),
             log_dir: dir.join("logs"),
             log_dir_available: true,
         }

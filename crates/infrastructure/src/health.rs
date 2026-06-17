@@ -128,7 +128,7 @@ mod tests {
     use super::*;
     use crate::test_sink::CollectSink;
     use pi_domain::contracts::MockContainerRuntime;
-    use pi_domain::entities::{HealthcheckConfig, ServiceState, StageTimeoutOverrides};
+    use pi_domain::entities::{ExposeMode, HealthcheckConfig, ServiceState, StageTimeoutOverrides};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn sink() -> Arc<dyn LogSink> {
@@ -144,6 +144,7 @@ mod tests {
             service: "web".into(),
             container_port: 3000,
             hostname: None,
+            expose: ExposeMode::default(),
             healthcheck,
             timeouts: StageTimeoutOverrides::default(),
         }
