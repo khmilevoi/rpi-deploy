@@ -46,6 +46,12 @@ pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .init();
 
     let state = build_state(&config, log_dir_available)?;
+    match state.host_network.primary_ipv4() {
+        Some(ip) => tracing::info!("lan ip detected: {ip}"),
+        None => {
+            tracing::warn!("no non-loopback ipv4 detected; lan-exposed projects will log port only")
+        }
+    }
     let now = pi_infrastructure::sys::SystemClock::new().now_unix();
     let swept = state
         .history

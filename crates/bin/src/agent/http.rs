@@ -649,6 +649,7 @@ mod tests {
             remove,
             diagnostics,
             agent_status,
+            host_network: Arc::new(UdpHostNetwork::new()),
             log_dir: dir.join("logs"),
             log_dir_available: true,
         }
