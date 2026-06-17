@@ -87,6 +87,37 @@ pub struct StageTimeoutOverrides {
     pub up_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExposeMode {
+    #[default]
+    Private,
+    Lan,
+}
+
+impl ExposeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExposeMode::Private => "private",
+            ExposeMode::Lan => "lan",
+        }
+    }
+
+    pub fn bind_addr(&self) -> &'static str {
+        match self {
+            ExposeMode::Private => "127.0.0.1",
+            ExposeMode::Lan => "0.0.0.0",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ExposeMode> {
+        match s {
+            "private" => Some(ExposeMode::Private),
+            "lan" => Some(ExposeMode::Lan),
+            _ => None,
+        }
+    }
+}
+
 /// Project config from pi.toml (received in deploy request, §12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectConfig {
@@ -101,6 +132,8 @@ pub struct ProjectConfig {
     pub container_port: u16,
     /// FQDN ([ingress].hostname). In v0.1 only stored (ingress — v0.2).
     pub hostname: Option<String>,
+    /// How the host port should be exposed. Defaults private for existing configs.
+    pub expose: ExposeMode,
     /// Health gate settings ([healthcheck] from pi.toml). Not persisted in DB.
     pub healthcheck: HealthcheckConfig,
     /// Stage timeout overrides ([timeouts] from pi.toml). Not persisted in DB.
@@ -269,6 +302,18 @@ mod tests {
         assert_eq!(hc.path, None);
         assert_eq!(hc.expect, None);
         assert_eq!(hc.timeout_secs, 60);
+    }
+
+    #[test]
+    fn expose_mode_maps_strings_bind_addrs_and_default() {
+        assert_eq!(ExposeMode::default(), ExposeMode::Private);
+        assert_eq!(ExposeMode::Private.as_str(), "private");
+        assert_eq!(ExposeMode::Lan.as_str(), "lan");
+        assert_eq!(ExposeMode::Private.bind_addr(), "127.0.0.1");
+        assert_eq!(ExposeMode::Lan.bind_addr(), "0.0.0.0");
+        assert_eq!(ExposeMode::parse("private"), Some(ExposeMode::Private));
+        assert_eq!(ExposeMode::parse("lan"), Some(ExposeMode::Lan));
+        assert_eq!(ExposeMode::parse("public"), None);
     }
 
     #[test]

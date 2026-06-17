@@ -292,8 +292,8 @@ mod tests {
         MockSource,
     };
     use pi_domain::entities::{
-        DeployRef, DeploymentStatus, EnvBundle, FetchedSource, HealthcheckConfig, Project,
-        ProjectConfig, StageTimeoutOverrides, StageTimeouts,
+        DeployRef, DeploymentStatus, EnvBundle, ExposeMode, FetchedSource, HealthcheckConfig,
+        Project, ProjectConfig, StageTimeoutOverrides, StageTimeouts,
     };
     use pi_domain::error::DomainError;
     use std::{
@@ -310,6 +310,7 @@ mod tests {
             service: "web".into(),
             container_port: 3000,
             hostname: Some("rateme.isskelo.com".into()),
+            expose: ExposeMode::default(),
             healthcheck: HealthcheckConfig::default(),
             timeouts: StageTimeoutOverrides::default(),
         }

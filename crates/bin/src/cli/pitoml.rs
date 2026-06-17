@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::duration::parse_duration_secs;
-use pi_domain::entities::{HealthcheckConfig, ProjectConfig, StageTimeoutOverrides};
+use pi_domain::entities::{ExposeMode, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +157,7 @@ impl PiToml {
             service: self.ingress.service.clone(),
             container_port: self.ingress.port,
             hostname: self.ingress.hostname.clone(),
+            expose: ExposeMode::default(),
             healthcheck: HealthcheckConfig {
                 path: self.healthcheck.path.clone(),
                 expect: self.healthcheck.expect.clone(),

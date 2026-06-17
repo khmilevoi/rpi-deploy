@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use pi_application::list::ProjectView;
-use pi_domain::entities::{Deployment, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides};
+use pi_domain::entities::{
+    Deployment, ExposeMode, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +51,7 @@ impl From<ProjectDto> for ProjectConfig {
             service: dto.service,
             container_port: dto.port,
             hostname: dto.hostname,
+            expose: ExposeMode::default(),
             healthcheck: dto
                 .healthcheck
                 .map(|h| HealthcheckConfig {

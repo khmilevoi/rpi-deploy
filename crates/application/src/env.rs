@@ -124,7 +124,9 @@ mod tests {
         MockContainerRuntime, MockEnvFileWriter, MockOverrideStore, MockProjectRepository,
         MockSecretStore, MockSource,
     };
-    use pi_domain::entities::{HealthcheckConfig, Project, ProjectConfig, StageTimeoutOverrides};
+    use pi_domain::entities::{
+        ExposeMode, HealthcheckConfig, Project, ProjectConfig, StageTimeoutOverrides,
+    };
     use std::path::{Path, PathBuf};
 
     fn bundle() -> EnvBundle {
@@ -144,6 +146,7 @@ mod tests {
                 service: "web".into(),
                 container_port: 3000,
                 hostname: None,
+                expose: ExposeMode::default(),
                 healthcheck: HealthcheckConfig::default(),
                 timeouts: StageTimeoutOverrides::default(),
             },
