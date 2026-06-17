@@ -55,6 +55,13 @@ pub trait DiskProbe: Send + Sync {
     fn used_percent(&self) -> Result<u8, DomainError>;
 }
 
+/// Detects the agent host's primary LAN IPv4 for building reachable URLs
+/// (used by `pi deploy`/`pi ls` for expose=lan projects). None when undetectable.
+#[cfg_attr(feature = "mocks", automock)]
+pub trait HostNetwork: Send + Sync {
+    fn primary_ipv4(&self) -> Option<std::net::IpAddr>;
+}
+
 /// Project registry + port allocation (§6).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
