@@ -296,6 +296,13 @@ impl pi_domain::contracts::LogSink for ChannelSink {
     fn finished(&self, _status: DeploymentStatus) {}
 }
 
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct LogsQuery {
     #[serde(default = "default_tail")]
@@ -326,12 +333,13 @@ async fn project_logs(
         .map_err(ApiError)?;
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let logs = state.stream_logs.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let _ = logs
             .execute(&name, q.tail, q.follow, Arc::new(ChannelSink(tx)))
             .await;
     });
     let stream = async_stream::stream! {
+        let _guard = AbortOnDrop(handle);
         while let Some(line) = rx.recv().await {
             yield sse_log(line);
         }
@@ -361,10 +369,11 @@ async fn agent_logs(
         let _ = tx.send(line);
     }
     let dir = state.log_dir.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let _ = logfile::follow(dir, q.since, |line| tx.send(line).is_ok()).await;
     });
     let stream = async_stream::stream! {
+        let _guard = AbortOnDrop(handle);
         while let Some(line) = rx.recv().await {
             yield sse_log(line);
         }
