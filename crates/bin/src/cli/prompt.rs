@@ -31,10 +31,10 @@ impl Prompter for InquirePrompter {
         inquire::Confirm::new(label).with_default(default).prompt().map_err(map_inquire)
     }
     fn select(&mut self, label: &str, options: &[String], default: usize) -> Result<String> {
-        Ok(inquire::Select::new(label, options.to_vec())
+        inquire::Select::new(label, options.to_vec())
             .with_starting_cursor(default)
             .prompt()
-            .map_err(map_inquire)?)
+            .map_err(map_inquire)
     }
 }
 

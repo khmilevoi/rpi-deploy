@@ -156,11 +156,11 @@ async fn ensure_dir(sys: &dyn Sys, path: &str, owner_group: Option<&str>, dry: b
             if !dry {
                 let want = format!("{og}:{og}");
                 let cur = sys.run("stat", &["-c", "%U:%G", path]).await;
-                if cur.ok().as_deref() != Some(want.as_str()) {
-                    if sys.run("chown", &["-R", &want, path]).await.is_ok() {
-                        rep.repaired.push(format!("{path} (ownership)"));
-                        return;
-                    }
+                if cur.ok().as_deref() != Some(want.as_str())
+                    && sys.run("chown", &["-R", &want, path]).await.is_ok()
+                {
+                    rep.repaired.push(format!("{path} (ownership)"));
+                    return;
                 }
             }
         }
