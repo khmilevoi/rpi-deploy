@@ -132,6 +132,7 @@ pub struct SetupReport {
     pub skipped: Vec<String>,
     pub repaired: Vec<String>,
     pub warnings: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 impl SetupReport {
@@ -140,6 +141,7 @@ impl SetupReport {
         for r in &self.repaired { println!("repaired: {r}"); }
         for s in &self.skipped { println!("ok (already present): {s}"); }
         for w in &self.warnings { println!("warning: {w}"); }
+        for e in &self.errors { println!("error: {e}"); }
         if self.repaired.iter().any(|r| r.contains("/var/log/pi")) {
             println!("note: run `sudo systemctl restart pi-agent` to activate file logs");
         }
@@ -151,14 +153,20 @@ async fn ensure_dir(sys: &dyn Sys, path: &str, owner_group: Option<&str>, dry: b
         rep.skipped.push(path.to_string());
         return;
     }
-    if !dry {
-        let args: Vec<&str> = match owner_group {
-            Some(og) => vec!["-d", "-o", og, "-g", og, path],
-            None => vec!["-d", path],
-        };
-        let _ = sys.run("install", &args).await;
+    if dry {
+        if repair { rep.repaired.push(path.to_string()); } else { rep.created.push(path.to_string()); }
+        return;
     }
-    if repair { rep.repaired.push(path.to_string()); } else { rep.created.push(path.to_string()); }
+    let args: Vec<&str> = match owner_group {
+        Some(og) => vec!["-d", "-o", og, "-g", og, path],
+        None => vec!["-d", path],
+    };
+    match sys.run("install", &args).await {
+        Ok(_) => {
+            if repair { rep.repaired.push(path.to_string()); } else { rep.created.push(path.to_string()); }
+        }
+        Err(e) => rep.errors.push(format!("mkdir {path} failed: {e}")),
+    }
 }
 
 /// Idempotent agent bootstrap (spec §4). Adopt & preserve; never touches
@@ -170,27 +178,37 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
     // 1. service user
     if user_exists(sys, "pi-agent").await {
         rep.skipped.push("user pi-agent".into());
-    } else {
-        if !dry {
-            let _ = sys.run("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]).await;
-        }
+    } else if dry {
         rep.created.push("user pi-agent".into());
+    } else {
+        match sys.run("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]).await {
+            Ok(_) => rep.created.push("user pi-agent".into()),
+            Err(e) => rep.errors.push(format!("useradd pi-agent failed: {e}")),
+        }
     }
 
     // 2. pi-agent in docker group
     if in_group(sys, "pi-agent", "docker").await {
         rep.skipped.push("pi-agent in docker group".into());
-    } else {
-        if !dry { let _ = sys.run("usermod", &["-aG", "docker", "pi-agent"]).await; }
+    } else if dry {
         rep.created.push("pi-agent in docker group".into());
+    } else {
+        match sys.run("usermod", &["-aG", "docker", "pi-agent"]).await {
+            Ok(_) => rep.created.push("pi-agent in docker group".into()),
+            Err(e) => rep.errors.push(format!("usermod pi-agent docker failed: {e}")),
+        }
     }
 
     // 3. login user in pi-agent group
     if in_group(sys, &opts.login_user, "pi-agent").await {
         rep.skipped.push(format!("{} in pi-agent group", opts.login_user));
-    } else {
-        if !dry { let _ = sys.run("usermod", &["-aG", "pi-agent", &opts.login_user]).await; }
+    } else if dry {
         rep.created.push(format!("{} in pi-agent group", opts.login_user));
+    } else {
+        match sys.run("usermod", &["-aG", "pi-agent", &opts.login_user]).await {
+            Ok(_) => rep.created.push(format!("{} in pi-agent group", opts.login_user)),
+            Err(e) => rep.errors.push(format!("usermod {u} pi-agent failed: {e}", u = opts.login_user)),
+        }
     }
 
     // 4-6. directories
@@ -201,9 +219,13 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
     // 7. agent.toml (only if absent)
     if sys.exists(Path::new(AGENT_TOML_PATH)) {
         rep.skipped.push(AGENT_TOML_PATH.into());
-    } else {
-        if !dry { let _ = sys.write(Path::new(AGENT_TOML_PATH), AGENT_TOML); }
+    } else if dry {
         rep.created.push(AGENT_TOML_PATH.into());
+    } else {
+        match sys.write(Path::new(AGENT_TOML_PATH), AGENT_TOML) {
+            Ok(_) => rep.created.push(AGENT_TOML_PATH.into()),
+            Err(e) => rep.errors.push(format!("write {AGENT_TOML_PATH} failed: {e}")),
+        }
     }
 
     // 8. systemd unit + enable
@@ -214,8 +236,12 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
         Err(e) => rep.warnings.push(format!("unit: {e}")),
     }
     if !dry {
-        let _ = sys.run("systemctl", &["daemon-reload"]).await;
-        let _ = sys.run("systemctl", &["enable", "--now", "pi-agent"]).await;
+        if sys.run("systemctl", &["daemon-reload"]).await.is_err() {
+            rep.warnings.push("systemctl daemon-reload failed".into());
+        }
+        if sys.run("systemctl", &["enable", "--now", "pi-agent"]).await.is_err() {
+            rep.warnings.push("systemctl enable --now pi-agent failed (is /usr/local/bin/pi installed?)".into());
+        }
     }
 
     // 9. cloudflared (opt-in) — implemented in Task 13.
@@ -273,6 +299,18 @@ async fn cloudflared_bootstrap(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) 
     );
 }
 
+async fn run_with(sys: &dyn Sys, opts: &SetupOpts) -> anyhow::Result<SetupReport> {
+    let report = setup(sys, opts).await;
+    report.print();
+    if opts.dry_run {
+        println!("(dry run — no changes made)");
+    }
+    if !report.errors.is_empty() {
+        anyhow::bail!("setup completed with {} error(s); see above", report.errors.len());
+    }
+    Ok(report)
+}
+
 /// CLI entrypoint: resolve the login user (--user or $SUDO_USER), run setup,
 /// print the report. Must run as root (under sudo) on the Pi.
 pub async fn run_cmd(user: Option<String>, with_cloudflared: bool, dry_run: bool) -> anyhow::Result<()> {
@@ -283,12 +321,7 @@ pub async fn run_cmd(user: Option<String>, with_cloudflared: bool, dry_run: bool
             "cannot determine the SSH login user; run via `sudo pi agent setup` or pass --user <name>"
         ))?;
     let opts = SetupOpts { login_user, with_cloudflared, dry_run };
-    let report = setup(&HostSys, &opts).await;
-    report.print();
-    if dry_run {
-        println!("(dry run — no changes made)");
-    }
-    Ok(())
+    run_with(&HostSys, &opts).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -481,5 +514,34 @@ mod tests {
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let _ = setup(&sys, &opts).await;
         assert!(!sys.calls().iter().any(|c| c.contains("enable-linger")));
+    }
+
+    #[tokio::test]
+    async fn useradd_failure_records_error_not_created() {
+        let mut sys = fresh_sys();
+        sys.err.insert(FakeSys::key("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]));
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let report = setup(&sys, &opts).await;
+        assert!(report.errors.iter().any(|e| e.contains("useradd")), "error recorded");
+        assert!(!report.created.iter().any(|c| c == "user pi-agent"), "no false created");
+    }
+
+    #[tokio::test]
+    async fn mkdir_failure_records_error_not_created() {
+        let mut sys = fresh_sys();
+        sys.err.insert(FakeSys::key("install", &["-d", "-o", "pi-agent", "-g", "pi-agent", "/var/lib/pi"]));
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let report = setup(&sys, &opts).await;
+        assert!(report.errors.iter().any(|e| e.contains("/var/lib/pi")), "mkdir error recorded");
+        assert!(!report.created.iter().any(|c| c.contains("/var/lib/pi")));
+    }
+
+    #[tokio::test]
+    async fn run_with_bails_on_errors() {
+        let mut sys = fresh_sys();
+        sys.err.insert(FakeSys::key("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]));
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let res = run_with(&sys, &opts).await;
+        assert!(res.is_err(), "non-zero exit when privileged step fails");
     }
 }
