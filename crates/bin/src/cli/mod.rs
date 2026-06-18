@@ -1,7 +1,11 @@
 pub mod api;
 pub mod commands;
 pub mod config;
+pub mod init;
+pub mod keys;
 pub mod pitoml;
+pub mod prompt;
 pub mod sse;
+pub mod setup;
 pub mod ssh;
 pub mod tunnel;

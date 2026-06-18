@@ -5,10 +5,12 @@ runs an agent, while the CLI runs on a developer machine or in CI. The CLI
 connects to the agent through an SSH tunnel; the agent clones the Git
 repository, builds the Compose stack, and starts the containers.
 
-Status: v0.4 (Операционка) — deploy/env/ingress/CI (v0.1-v0.3) + `pi logs`,
+Status: v0.5 (Install & UX) — deploy/env/ingress/CI (v0.1-v0.3), `pi logs`,
 `pi stats`, `pi start|stop|restart`, `pi rm`, `pi status`, `pi doctor`,
-`pi agent status|logs`, rolling agent logs. One-command install and
-`pi agent setup` are planned for v0.5 (§23 spec).
+`pi agent status|logs`, rolling agent logs (v0.4), plus one-command setup:
+`sudo pi agent setup` on the Pi and `pi setup` / `pi init` on the developer
+machine. `pi agent uninstall` removes the install. Manual install from source
+remains as a fallback (see "Build And Install The Binary" below).
 
 Supported features:
 
@@ -26,6 +28,10 @@ Supported features:
 - `pi doctor`;
 - `pi agent status`;
 - `pi agent logs [-f] [--since 2h]`;
+- `pi setup`;
+- `pi init`;
+- `pi agent setup`;
+- `pi agent uninstall`;
 - stable host port allocation;
 - Docker Compose overrides;
 - health checks;
@@ -195,6 +201,26 @@ sudo install -m 755 /tmp/pi /usr/local/bin/pi
 pi --help
 ```
 
+## Quick Setup (v0.5)
+
+On the Pi, after the binary is installed (see above):
+
+```bash
+sudo pi agent setup
+```
+
+This is idempotent: it creates the `pi-agent` user, directories, the systemd
+unit, and `/etc/pi/agent.toml` if missing, repairs `/var/log/pi`, and never
+touches `secret.key` or `state.db`. Re-running it is safe. Use `--dry-run` to
+preview, `--with-cloudflared` to scaffold cloudflared.
+
+On the developer machine:
+
+```bash
+pi setup            # wizard: server profile + SSH key + config.toml
+pi init             # wizard: generate pi.toml in the current project
+```
+
 ## Install `pi-agent`
 
 Create the service user:
@@ -248,14 +274,14 @@ Wants=network-online.target
 [Service]
 User=pi-agent
 Group=pi-agent
-Environment=HOME=/var/lib/pi
-Environment=XDG_CONFIG_HOME=/var/lib/pi/.config
-Environment=XDG_CACHE_HOME=/var/lib/pi/.cache
-WorkingDirectory=/var/lib/pi
 ExecStart=/usr/local/bin/pi agent run --config /etc/pi/agent.toml
 RuntimeDirectory=pi
 RuntimeDirectoryMode=0750
 Restart=on-failure
+Environment=HOME=/var/lib/pi
+Environment=XDG_CONFIG_HOME=/var/lib/pi/.config
+Environment=XDG_CACHE_HOME=/var/lib/pi/.cache
+WorkingDirectory=/var/lib/pi
 
 [Install]
 WantedBy=multi-user.target

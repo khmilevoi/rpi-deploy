@@ -18,6 +18,46 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(clap::Args)]
+struct InitArgs {
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    repo: Option<String>,
+    #[arg(long)]
+    branch: Option<String>,
+    #[arg(long)]
+    compose: Option<String>,
+    #[arg(long)]
+    service: Option<String>,
+    #[arg(long)]
+    port: Option<u16>,
+    #[arg(long)]
+    hostname: Option<String>,
+    #[arg(long)]
+    expose: Option<String>,
+    #[arg(long = "env")]
+    env_file: Option<String>,
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(clap::Args)]
+struct SetupArgs {
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(long)]
+    user: Option<String>,
+    #[arg(long)]
+    key: Option<String>,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    default: bool,
+    #[arg(long)]
+    yes: bool,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Deploy current project (reads ./pi.toml)
@@ -100,6 +140,10 @@ enum Cmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
+    /// Generate pi.toml in the current project (wizard; flags for CI)
+    Init(InitArgs),
+    /// Configure a server profile on this machine (wizard; flags for CI)
+    Setup(SetupArgs),
     /// Manage project secrets
     Env {
         #[command(subcommand)]
@@ -152,6 +196,26 @@ enum AgentCmd {
         tail: usize,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
+    },
+    /// Bootstrap the agent on this Pi (run with sudo; idempotent)
+    Setup {
+        /// SSH login user to add to the pi-agent group (default: $SUDO_USER)
+        #[arg(long)]
+        user: Option<String>,
+        /// Also bootstrap cloudflared (linger + user unit)
+        #[arg(long)]
+        with_cloudflared: bool,
+        /// Print the plan without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove the agent (keeps data unless --purge)
+    Uninstall {
+        /// Also delete /var/lib/pi, /etc/pi, /var/log/pi (irreversible)
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -219,6 +283,32 @@ async fn main() -> anyhow::Result<()> {
         } => cli::commands::rm(project, volumes, yes, connect).await,
         Cmd::Status { json, connect } => cli::commands::status(json, connect).await,
         Cmd::Doctor { connect } => cli::commands::doctor(connect).await,
+        Cmd::Init(a) => {
+            cli::init::run(cli::init::InitFlags {
+                name: a.name,
+                repo: a.repo,
+                branch: a.branch,
+                compose: a.compose,
+                service: a.service,
+                port: a.port,
+                hostname: a.hostname,
+                expose: a.expose,
+                env_file: a.env_file,
+                yes: a.yes,
+            })
+            .await
+        }
+        Cmd::Setup(a) => {
+            cli::setup::run(cli::setup::SetupFlags {
+                host: a.host,
+                user: a.user,
+                key: a.key,
+                name: a.name,
+                default: a.default,
+                yes: a.yes,
+            })
+            .await
+        }
         Cmd::Env {
             cmd: EnvCmd::Send { apply, connect },
         } => cli::commands::env_send(apply, connect).await,
@@ -240,6 +330,12 @@ async fn main() -> anyhow::Result<()> {
                     connect,
                 },
         } => cli::commands::agent_logs(follow, since, tail, connect).await,
+        Cmd::Agent {
+            cmd: AgentCmd::Setup { user, with_cloudflared, dry_run },
+        } => agent::setup::run_cmd(user, with_cloudflared, dry_run).await,
+        Cmd::Agent {
+            cmd: AgentCmd::Uninstall { purge, yes },
+        } => agent::uninstall::run_cmd(purge, yes).await,
     }
 }
 
@@ -309,6 +405,64 @@ mod tests {
                 assert_eq!(tail, 100);
             }
             _ => panic!("expected agent logs"),
+        }
+    }
+
+    #[test]
+    fn init_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "pi", "init", "--name", "rateme", "--port", "3000", "--expose", "lan", "--yes",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Init(args) => {
+                assert_eq!(args.name.as_deref(), Some("rateme"));
+                assert_eq!(args.port, Some(3000));
+                assert_eq!(args.expose.as_deref(), Some("lan"));
+                assert!(args.yes);
+            }
+            _ => panic!("expected init"),
+        }
+    }
+
+    #[test]
+    fn setup_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "pi", "setup", "--host", "pihost.local", "--user", "piuser", "--key", "~/.ssh/pi", "--yes",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Setup(a) => {
+                assert_eq!(a.host.as_deref(), Some("pihost.local"));
+                assert_eq!(a.user.as_deref(), Some("piuser"));
+                assert!(a.yes);
+            }
+            _ => panic!("expected setup"),
+        }
+    }
+
+    #[test]
+    fn agent_setup_flags_parse() {
+        let cli = Cli::try_parse_from(["pi", "agent", "setup", "--user", "piuser", "--dry-run"]).unwrap();
+        match cli.cmd {
+            Cmd::Agent { cmd: AgentCmd::Setup { user, with_cloudflared, dry_run } } => {
+                assert_eq!(user.as_deref(), Some("piuser"));
+                assert!(!with_cloudflared);
+                assert!(dry_run);
+            }
+            _ => panic!("expected agent setup"),
+        }
+    }
+
+    #[test]
+    fn agent_uninstall_flags_parse() {
+        let cli = Cli::try_parse_from(["pi", "agent", "uninstall", "--purge", "--yes"]).unwrap();
+        match cli.cmd {
+            Cmd::Agent { cmd: AgentCmd::Uninstall { purge, yes } } => {
+                assert!(purge);
+                assert!(yes);
+            }
+            _ => panic!("expected agent uninstall"),
         }
     }
 }
