@@ -45,7 +45,7 @@ pub fn render_pi_toml(f: &InitFields) -> String {
     s
 }
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use crate::cli::prompt::Prompter;
 
 #[derive(Default)]
@@ -157,12 +157,37 @@ pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
             println!("aborted: pi.toml left unchanged");
             return Ok(());
         }
-        std::fs::rename(&path, cwd.join("pi.toml.bak"))?;
+        backup_existing_pi_toml(&path)?;
     }
     std::fs::write(&path, &text)?;
     println!("wrote {}", path.display());
     println!("next: `pi env send` (if you use secrets), then `pi deploy`");
     Ok(())
+}
+
+/// Move `pi.toml` aside to `pi.toml.bak`, rotating any existing `.bak` to `.bak.1`,
+/// `.bak.1` to `.bak.2`, …, up to `.bak.4` (oldest dropped). Windows-safe: the
+/// highest index is removed before each rename so destinations are always free.
+/// Returns the backup path. No-op-as-error if `pi.toml` does not exist.
+pub fn backup_existing_pi_toml(pi_toml: &std::path::Path) -> std::io::Result<PathBuf> {
+    let dir = pi_toml.parent().unwrap_or(std::path::Path::new("."));
+    let bak = dir.join("pi.toml.bak");
+    if bak.exists() {
+        // rotate .bak.(N-1) -> .bak.N for N=4..1, then .bak -> .bak.1
+        for n in (1..=4).rev() {
+            let cur = dir.join(format!("pi.toml.bak.{n}"));
+            if cur.exists() {
+                if n == 4 {
+                    std::fs::remove_file(&cur)?;
+                } else {
+                    std::fs::rename(&cur, dir.join(format!("pi.toml.bak.{}", n + 1)))?;
+                }
+            }
+        }
+        std::fs::rename(&bak, dir.join("pi.toml.bak.1"))?;
+    }
+    std::fs::rename(pi_toml, &bak)?;
+    Ok(bak)
 }
 
 #[cfg(test)]
@@ -282,5 +307,42 @@ mod tests {
         };
         let f = resolve_init_fields(&flags, &detected(), &mut p).unwrap();
         assert_eq!(f.expose.as_deref(), Some("lan"), "expose chosen via select");
+    }
+
+    #[test]
+    fn backup_rotates_existing_bak_to_bak1() {
+        let dir = tempfile::tempdir().unwrap();
+        let cur = dir.path().join("pi.toml");
+        let bak = dir.path().join("pi.toml.bak");
+        let bak1 = dir.path().join("pi.toml.bak.1");
+        std::fs::write(&cur, "current").unwrap();
+        std::fs::write(&bak, "previous").unwrap();
+
+        let dest = super::backup_existing_pi_toml(&cur).unwrap();
+        assert_eq!(dest, bak, "returns the .bak path");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "current", "current moved to .bak");
+        assert_eq!(std::fs::read_to_string(&bak1).unwrap(), "previous", "previous .bak rotated to .bak.1");
+        assert!(!cur.exists(), "current pi.toml moved away");
+    }
+
+    #[test]
+    fn backup_caps_at_four_history_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cur = dir.path().join("pi.toml");
+        std::fs::write(&cur, "cur").unwrap();
+        // pre-seed .bak, .bak.1 .. .bak.4
+        std::fs::write(dir.path().join("pi.toml.bak"), "b0").unwrap();
+        std::fs::write(dir.path().join("pi.toml.bak.1"), "b1").unwrap();
+        std::fs::write(dir.path().join("pi.toml.bak.2"), "b2").unwrap();
+        std::fs::write(dir.path().join("pi.toml.bak.3"), "b3").unwrap();
+        std::fs::write(dir.path().join("pi.toml.bak.4"), "b4-oldest").unwrap();
+
+        super::backup_existing_pi_toml(&cur).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak")).unwrap(), "cur");
+        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak.1")).unwrap(), "b0");
+        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak.2")).unwrap(), "b1");
+        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak.3")).unwrap(), "b2");
+        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak.4")).unwrap(), "b3");
+        assert!(!dir.path().join("pi.toml.bak.5").exists(), "cap at 4 history files");
     }
 }
