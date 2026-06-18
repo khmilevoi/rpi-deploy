@@ -150,6 +150,20 @@ impl SetupReport {
 
 async fn ensure_dir(sys: &dyn Sys, path: &str, owner_group: Option<&str>, dry: bool, rep: &mut SetupReport, repair: bool) {
     if sys.exists(Path::new(path)) {
+        // Repair ownership of pre-existing state dir to current pi-agent UID (PR #7 K1):
+        // after uninstall+reinstall the kept files keep an old numeric UID.
+        if let Some(og) = owner_group {
+            if !dry {
+                let want = format!("{og}:{og}");
+                let cur = sys.run("stat", &["-c", "%U:%G", path]).await;
+                if cur.ok().as_deref() != Some(want.as_str()) {
+                    if sys.run("chown", &["-R", &want, path]).await.is_ok() {
+                        rep.repaired.push(format!("{path} (ownership)"));
+                        return;
+                    }
+                }
+            }
+        }
         rep.skipped.push(path.to_string());
         return;
     }
@@ -465,6 +479,7 @@ mod tests {
         for p in ["/var/lib/pi", "/etc/pi", UNIT_PATH, AGENT_TOML_PATH] {
             sys.paths.insert(p.into());
         }
+        sys.ok.insert(FakeSys::key("stat", &["-c", "%U:%G", "/var/lib/pi"]), "pi-agent:pi-agent".into());
         sys.files.insert(UNIT_PATH.into(), UNIT.into());
         sys.files.insert(AGENT_TOML_PATH.into(), AGENT_TOML.into());
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
@@ -475,6 +490,34 @@ mod tests {
         assert!(calls.iter().any(|c| c.contains("install -d -o pi-agent -g pi-agent /var/log/pi")));
         assert!(report.repaired.iter().any(|r| r.contains("/var/log/pi")));
         assert!(sys.writes.lock().unwrap().is_empty(), "agent.toml/unit untouched");
+    }
+
+    #[tokio::test]
+    async fn ensure_dir_repairs_ownership_when_uid_drifted() {
+        let mut sys = fresh_sys();
+        // /var/lib/pi существует, но владелец — старый UID (не pi-agent:pi-agent)
+        sys.paths.insert("/var/lib/pi".into());
+        sys.ok.insert(FakeSys::key("stat", &["-c", "%U:%G", "/var/lib/pi"]), "999:999".into());
+        // useradd succeeds (новый UID)
+        sys.ok.insert(FakeSys::key("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]), "".into());
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let report = setup(&sys, &opts).await;
+        let calls = sys.calls();
+        assert!(calls.iter().any(|c| c == "chown -R pi-agent:pi-agent /var/lib/pi"), "chown -R issued");
+        assert!(report.repaired.iter().any(|r| r.contains("/var/lib/pi (ownership)")), "ownership repair reported");
+        assert!(!report.skipped.iter().any(|s| s == "/var/lib/pi"), "not skipped when ownership drifted");
+    }
+
+    #[tokio::test]
+    async fn ensure_dir_skips_when_ownership_already_correct() {
+        let mut sys = fresh_sys();
+        sys.paths.insert("/var/lib/pi".into());
+        sys.ok.insert(FakeSys::key("stat", &["-c", "%U:%G", "/var/lib/pi"]), "pi-agent:pi-agent".into());
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let report = setup(&sys, &opts).await;
+        let calls = sys.calls();
+        assert!(!calls.iter().any(|c| c.contains("chown")), "no chown when ownership ok");
+        assert!(report.skipped.iter().any(|s| s == "/var/lib/pi"));
     }
 
     #[tokio::test]
