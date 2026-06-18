@@ -9,21 +9,32 @@ pub trait Prompter {
 
 pub struct InquirePrompter;
 
+/// Convert inquire interruptions/cancellations into a clean one-line error
+/// instead of a raw error trace (PR #7 S3).
+fn map_inquire(err: inquire::InquireError) -> anyhow::Error {
+    use inquire::InquireError::*;
+    match err {
+        OperationInterrupted | OperationCanceled => anyhow::anyhow!("interrupted by user"),
+        other => anyhow::Error::new(other),
+    }
+}
+
 impl Prompter for InquirePrompter {
     fn text(&mut self, label: &str, default: Option<&str>) -> Result<String> {
         let mut q = inquire::Text::new(label);
         if let Some(d) = default {
             q = q.with_default(d);
         }
-        Ok(q.prompt()?)
+        q.prompt().map_err(map_inquire)
     }
     fn confirm(&mut self, label: &str, default: bool) -> Result<bool> {
-        Ok(inquire::Confirm::new(label).with_default(default).prompt()?)
+        inquire::Confirm::new(label).with_default(default).prompt().map_err(map_inquire)
     }
     fn select(&mut self, label: &str, options: &[String], default: usize) -> Result<String> {
         Ok(inquire::Select::new(label, options.to_vec())
             .with_starting_cursor(default)
-            .prompt()?)
+            .prompt()
+            .map_err(map_inquire)?)
     }
 }
 
