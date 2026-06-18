@@ -3,7 +3,6 @@ use crate::agent::setup::{user_exists, HostSys, Sys, UNIT_PATH};
 
 pub struct UninstallOpts {
     pub purge: bool,
-    pub yes: bool,
 }
 
 #[derive(Default)]
@@ -67,7 +66,7 @@ pub async fn run_cmd(purge: bool, yes: bool) -> anyhow::Result<()> {
              Re-run with --purge --yes to confirm."
         );
     }
-    let report = uninstall(&HostSys, &UninstallOpts { purge, yes }).await;
+    let report = uninstall(&HostSys, &UninstallOpts { purge }).await;
     for r in &report.removed { println!("removed: {r}"); }
     for k in &report.kept { println!("kept: {k}"); }
     for w in &report.warnings { println!("warning: {w}"); }
@@ -98,7 +97,7 @@ mod tests {
     #[tokio::test]
     async fn default_keeps_data() {
         let sys = installed_sys();
-        let report = uninstall(&sys, &UninstallOpts { purge: false, yes: true }).await;
+        let report = uninstall(&sys, &UninstallOpts { purge: false }).await;
         let calls = sys.calls();
         assert!(calls.iter().any(|c| c == "systemctl disable --now pi-agent"));
         assert!(calls.iter().any(|c| c == "userdel pi-agent"));
@@ -109,7 +108,7 @@ mod tests {
     #[tokio::test]
     async fn purge_removes_data() {
         let sys = installed_sys();
-        let report = uninstall(&sys, &UninstallOpts { purge: true, yes: true }).await;
+        let report = uninstall(&sys, &UninstallOpts { purge: true }).await;
         let calls = sys.calls();
         assert!(calls.iter().any(|c| c.contains("rm -rf /var/lib/pi")));
         assert!(report.removed.iter().any(|r| r.contains("/var/lib/pi")));
@@ -119,7 +118,7 @@ mod tests {
     async fn purge_rm_failure_does_not_claim_removed() {
         let mut sys = installed_sys();
         sys.err.insert(FakeSys::key("rm", &["-rf", "/var/lib/pi"]));
-        let report = uninstall(&sys, &UninstallOpts { purge: true, yes: true }).await;
+        let report = uninstall(&sys, &UninstallOpts { purge: true }).await;
         assert!(!report.removed.iter().any(|r| r.contains("/var/lib/pi")), "must not claim removed on failure");
         assert!(report.errors.iter().any(|e| e.contains("/var/lib/pi")), "failure recorded in errors");
     }
