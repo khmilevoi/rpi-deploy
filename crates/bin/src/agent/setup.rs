@@ -282,7 +282,7 @@ Description=cloudflared tunnel (pi-agent)
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/cloudflared tunnel run
+ExecStart=/usr/local/bin/cloudflared tunnel --config /var/lib/pi/cloudflared/config.yml run
 Restart=on-failure
 
 [Install]
@@ -557,6 +557,14 @@ mod tests {
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let _ = setup(&sys, &opts).await;
         assert!(!sys.calls().iter().any(|c| c.contains("enable-linger")));
+    }
+
+    #[test]
+    fn cloudflared_unit_points_at_canonical_config_path() {
+        assert!(
+            CLOUDFLARED_UNIT.contains("cloudflared tunnel --config /var/lib/pi/cloudflared/config.yml run"),
+            "ExecStart must use the canonical config path the setup flow instructs operators to write"
+        );
     }
 
     #[tokio::test]
