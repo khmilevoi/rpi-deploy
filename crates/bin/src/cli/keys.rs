@@ -43,6 +43,20 @@ pub async fn generate_key(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Human-readable instructions for copying the pubkey by hand when ssh-copy fails
+/// (e.g. password auth disabled on the Pi). PR #7 S4.
+pub fn manual_copy_instructions(pubkey_text: &str, profile: &ServerProfile) -> String {
+    format!(
+        "Could not copy the SSH key automatically (password auth may be disabled on the Pi).\n\
+         Append this public key to ~pi/.ssh/authorized_keys on {user}@{host} manually:\n\n\
+         {pubkey}\n\n\
+         Then re-run `pi setup` (or `pi doctor --server <alias>`).",
+        pubkey = pubkey_text.trim(),
+        user = profile.user,
+        host = profile.host,
+    )
+}
+
 /// Append our pubkey to the Pi's authorized_keys (ssh-copy-id equivalent;
 /// works on Windows OpenSSH which lacks ssh-copy-id). Interactive: may prompt
 /// for the Pi password once.
@@ -60,12 +74,24 @@ pub async fn push_pubkey(profile: &ServerProfile, pubkey: &Path) -> anyhow::Resu
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
-    let mut child = cmd.spawn()?;
-    use tokio::io::AsyncWriteExt;
-    child.stdin.take().unwrap().write_all(pubkey_text.as_bytes()).await?;
-    let status = child.wait().await?;
-    if !status.success() {
-        anyhow::bail!("failed to copy public key to {}", profile.host);
+    let mut child = cmd.spawn();
+    let failed = match &mut child {
+        Ok(c) => {
+            use tokio::io::AsyncWriteExt;
+            if c.stdin.take().unwrap().write_all(pubkey_text.as_bytes()).await.is_err() {
+                true
+            } else {
+                match c.wait().await {
+                    Ok(s) => !s.success(),
+                    Err(_) => true,
+                }
+            }
+        }
+        Err(_) => true,
+    };
+    if failed {
+        eprintln!("{}", manual_copy_instructions(&pubkey_text, profile));
+        anyhow::bail!("failed to copy public key to {} — see instructions above", profile.host);
     }
     Ok(())
 }
@@ -91,5 +117,18 @@ mod tests {
         let mut found = detect_ssh_keys(ssh);
         found.sort();
         assert_eq!(found, vec![ssh.join("id_ed25519"), ssh.join("pi")]);
+    }
+
+    #[test]
+    fn manual_instructions_include_pubkey_and_target() {
+        let profile = ServerProfile {
+            host: "pihost.local".into(),
+            user: "pi".into(),
+            key: Some("~/.ssh/pi".into()),
+        };
+        let msg = manual_copy_instructions("ssh-ed25519 AAAA…", &profile);
+        assert!(msg.contains("ssh-ed25519 AAAA…"), "pubkey printed");
+        assert!(msg.contains("pi@pihost.local"), "target printed");
+        assert!(msg.contains("authorized_keys"), "hints at authorized_keys");
     }
 }
