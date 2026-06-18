@@ -13,29 +13,34 @@ pub struct InitFields {
 
 use std::fmt::Write as _;
 
+/// TOML-экранированная basic-строка (с кавычками) — корректно эскейпит `"` и `\`.
+fn toml_str(s: &str) -> String {
+    toml::Value::String(s.to_string()).to_string()
+}
+
 /// Render canonical pi.toml text (schema 1, §12) from resolved fields.
 pub fn render_pi_toml(f: &InitFields) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "schema = 1\n");
     let _ = writeln!(s, "[project]");
-    let _ = writeln!(s, "name = \"{}\"\n", f.name);
+    let _ = writeln!(s, "name = {}\n", toml_str(&f.name));
     let _ = writeln!(s, "[source]");
-    let _ = writeln!(s, "repo = \"{}\"", f.repo);
-    let _ = writeln!(s, "branch = \"{}\"\n", f.branch);
+    let _ = writeln!(s, "repo = {}", toml_str(&f.repo));
+    let _ = writeln!(s, "branch = {}\n", toml_str(&f.branch));
     let _ = writeln!(s, "[build]");
-    let _ = writeln!(s, "compose = \"{}\"\n", f.compose);
+    let _ = writeln!(s, "compose = {}\n", toml_str(&f.compose));
     let _ = writeln!(s, "[ingress]");
     if let Some(h) = &f.hostname {
-        let _ = writeln!(s, "hostname = \"{h}\"");
+        let _ = writeln!(s, "hostname = {}", toml_str(h));
     }
-    let _ = writeln!(s, "service = \"{}\"", f.service);
+    let _ = writeln!(s, "service = {}", toml_str(&f.service));
     let _ = writeln!(s, "port = {}", f.port);
     if let Some(e) = &f.expose {
-        let _ = writeln!(s, "expose = \"{e}\"");
+        let _ = writeln!(s, "expose = {}", toml_str(e));
     }
     if let Some(env) = &f.env_file {
         let _ = writeln!(s, "\n[env]");
-        let _ = writeln!(s, "file = \"{env}\"");
+        let _ = writeln!(s, "file = {}", toml_str(env));
     }
     s
 }
@@ -201,6 +206,21 @@ mod tests {
         assert!(text.contains("expose = \"lan\""));
         let cfg = crate::cli::pitoml::PiToml::parse(&text).unwrap().to_project_config();
         assert_eq!(cfg.expose, pi_domain::entities::ExposeMode::Lan);
+    }
+
+    #[test]
+    fn render_escapes_backslashes_and_quotes_and_round_trips() {
+        let mut f = sample();
+        f.name = "a\"b".into();
+        f.env_file = Some("C:\\app\\.env".into());
+        let text = render_pi_toml(&f);
+        // Сгенерированный файл должен быть валидным TOML и разбор возвращать исходные значения.
+        let parsed = crate::cli::pitoml::PiToml::parse(&text).unwrap();
+        assert_eq!(parsed.project.name, "a\"b");
+        assert_eq!(parsed.env.file, "C:\\app\\.env");
+        // И должно содержать эскейпированные литералы в тексте.
+        assert!(text.contains("name = 'a\"b'"));
+        assert!(text.contains("file = 'C:\\app\\.env'"));
     }
 
     fn detected() -> DetectedDefaults {
