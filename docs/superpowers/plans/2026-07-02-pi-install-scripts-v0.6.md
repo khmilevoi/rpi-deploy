@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- Repo: `https://github.com/khmilevoi/pi-deploy.git`; raw script URLs: `https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/<name>`.
+- Repo: `https://github.com/khmilevoi/rpi-deploy.git`; raw script URLs: `https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/<name>`.
+- The GitHub repo was renamed `pi-deploy` → `rpi-deploy` (2026-07-02). GitHub redirects the old name, but every URL in scripts, README, and docs must use `rpi-deploy`. If the local `origin` still points to `pi-deploy`, fix it: `git remote set-url origin git@github.com:khmilevoi/rpi-deploy.git`.
 - `.sh` scripts are POSIX `sh` — no bash arrays, `[[ ]]`, `local`, or process substitution. They must pass `shellcheck` with zero findings.
 - `.ps1` scripts must pass `Invoke-ScriptAnalyzer` with zero findings and work when invoked via `irm | iex` (param defaults) and via `& ([scriptblock]::Create(...)) -Flag`.
 - Every script is self-contained: duplicate helper functions rather than sourcing a shared file.
@@ -68,14 +69,14 @@ Full content:
 # pi installer: provisions build prerequisites, clones the repo, builds from
 # source, and installs the binary for the chosen role (agent or client).
 #
-#   curl -fsSL https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.sh | sh
 #
 # POSIX sh; Linux and macOS. Docker is a prerequisite for the agent role and
 # is never installed by this script.
 set -eu
 
-REPO_URL="https://github.com/khmilevoi/pi-deploy.git"
-INSTALL_URL="https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.sh"
+REPO_URL="https://github.com/khmilevoi/rpi-deploy.git"
+INSTALL_URL="https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.sh"
 
 ROLE=""
 DIR=""
@@ -603,11 +604,11 @@ pi client installer for Windows: provisions rustup, clones the repo, and
 builds/installs the pi CLI from source. The only role on Windows is client.
 
 Default one-liner (from cmd or another shell; inside PowerShell just irm|iex):
-  powershell -c "irm https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.ps1 | iex"
+  powershell -c "irm https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.ps1 | iex"
 
 Parameterized run:
-  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.ps1))) -DryRun
-  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.ps1))) -Ref v0.6.0
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.ps1))) -DryRun
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.ps1))) -Ref v0.6.0
 #>
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
     Justification = 'installer talks to the interactive console')]
@@ -618,7 +619,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$RepoUrl = 'https://github.com/khmilevoi/pi-deploy.git'
+$RepoUrl = 'https://github.com/khmilevoi/rpi-deploy.git'
 
 function Fail([string]$Message) {
     Write-Host "error: $Message" -ForegroundColor Red
@@ -988,14 +989,14 @@ The fastest path on Linux and macOS — the script asks whether to install the
 agent (on the Raspberry Pi) or the client (on a developer machine):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.sh | sh
 ```
 
 Non-interactive (CI or provisioning):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.sh | sh -s -- --agent
-curl -fsSL https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.sh | sh -s -- --client
+curl -fsSL https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.sh | sh -s -- --agent
+curl -fsSL https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.sh | sh -s -- --client
 ```
 
 The agent role requires Docker to be installed beforehand. The script checks
@@ -1006,14 +1007,14 @@ On Windows (client only; building needs the Visual Studio Build Tools C++
 workload):
 
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.ps1 | iex"
+powershell -c "irm https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.ps1 | iex"
 ```
 
 Parameterized run (for example a dry run, or pinning a tag):
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.ps1))) -DryRun
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/install.ps1))) -Ref v0.6.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.ps1))) -DryRun
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.ps1))) -Ref v0.6.0
 ```
 
 To update an existing install later (pull the branch clone, rebuild,
@@ -1049,7 +1050,7 @@ Run:
 rtk grep "install.sh | sh" README.md && rtk grep "install.ps1 | iex" README.md
 ```
 
-Expected: both hits present, URLs exactly `https://raw.githubusercontent.com/khmilevoi/pi-deploy/master/scripts/...`.
+Expected: both hits present, URLs exactly `https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/...`.
 
 - [ ] **Step 5: Commit**
 
