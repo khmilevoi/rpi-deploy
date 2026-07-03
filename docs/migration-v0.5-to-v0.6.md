@@ -50,6 +50,10 @@ Unchanged either way:
   (Raspberry Pi OS: `sudo apt-get install -y nodejs npm`).
 - Docker already installed on the Pi (unchanged from v0.5).
 - On the Pi, building from source during `npm install` takes roughly 10 minutes.
+- If Node.js comes from `nvm` instead of apt, `sudo npm`/`sudo rpi` fail with
+  `command not found` (`sudo` resets `PATH`) — see "Troubleshooting" below.
+- Recent npm versions (v11+ observed) block the `postinstall` build script by
+  default unless explicitly allowed — also covered in "Troubleshooting".
 
 ## Migrate The Agent (Raspberry Pi)
 
@@ -65,11 +69,39 @@ is no separate "migrate" step.
    If you were on a from-source v0.5 install, this is the same command — npm
    replaces the manual `cargo build` / `install` step.
 
+   If Node.js is managed by `nvm`, `sudo` will not find it
+   (`sudo: npm: command not found`, since `sudo` resets `PATH`); install
+   without `sudo` instead — the nvm prefix is already user-writable:
+
+   ```bash
+   npm install -g rpi-deploy@latest
+   ```
+
+   Recent npm versions (v11+ observed) also block the `postinstall` build
+   script by default, printing `npm warn allow-scripts ... not yet covered by
+   allowScripts` instead of failing outright. If step 4's `rpi doctor` then
+   reports the binary was never built, reinstall with the script allowed:
+
+   ```bash
+   npm install -g --allow-scripts=rpi-deploy rpi-deploy@latest   # add sudo for a system-wide (apt) npm
+   ```
+
 2. Run setup:
 
    ```bash
    sudo rpi agent setup
    ```
+
+   If Node.js is managed by `nvm`, plain `sudo` cannot find `rpi` either —
+   forward `PATH` for this one call:
+
+   ```bash
+   sudo env "PATH=$PATH" rpi agent setup
+   ```
+
+   This self-installs a native binary to `/usr/local/bin/rpi`, already on
+   root's default `PATH`; every `sudo rpi ...` call after this one works
+   without the `env` wrapper.
 
    On a Pi still running the old `pi-agent` identity, this first converts it
    to `rpi-agent` in place, then runs its normal idempotent bootstrap:
@@ -227,13 +259,39 @@ rm -f ~/.cargo/bin/pi             # dev machine (from-source installs)
 
 ### `rpi: binary not built; reinstall without --ignore-scripts`
 
-The npm package builds the Rust binary in its `postinstall` script. Installing
-with `--ignore-scripts` skips that build and leaves the `rpi` shim with nothing
-to run. Reinstall normally:
+The npm package builds the Rust binary in its `postinstall` script. Two things
+skip that build and leave the `rpi` shim with nothing to run:
+
+- installing with `--ignore-scripts`;
+- recent npm versions (v11+ observed) blocking unreviewed `postinstall`
+  scripts by default, printing `npm warn allow-scripts ... not yet covered by
+  allowScripts` instead of failing outright.
+
+For either case, reinstall with the script explicitly allowed:
 
 ```bash
-npm install -g rpi-deploy         # add sudo on the Pi
+npm install -g --allow-scripts=rpi-deploy rpi-deploy   # add sudo on the Pi with a system-wide (apt) npm
 ```
+
+`npm approve-scripts <pkg>` does not work for a global install (`EGLOBAL` — no
+project `package.json` to write to); `--allow-scripts` on the install command,
+or `npm config set allow-scripts=rpi-deploy --location=user` to persist it, is
+the supported path for `-g`.
+
+### `sudo: npm: command not found` / `sudo: rpi: command not found`
+
+Node.js is managed by `nvm` (or a similar per-user version manager); `sudo`
+resets `PATH` and does not see it. Install without `sudo` and forward `PATH`
+only for the one command that needs root:
+
+```bash
+npm install -g rpi-deploy@latest
+sudo env "PATH=$PATH" rpi agent setup
+```
+
+After `agent setup` self-installs the native binary to `/usr/local/bin/rpi`
+(already on root's default `PATH`), later `sudo rpi ...` calls work without
+the `env` wrapper.
 
 ### CLI warns that versions differ
 

@@ -189,10 +189,40 @@ sudo rpi agent setup              # installs /usr/local/bin/rpi, unit, start
 rpi doctor
 ```
 
+If Node.js comes from `nvm` (or another per-user version manager) rather than
+apt, `sudo` will not find it — `sudo: npm: command not found` / `sudo: rpi:
+command not found`, since `sudo` resets `PATH` before running. Install
+without `sudo` instead (the nvm prefix is already user-writable), and forward
+`PATH` only for the one command that needs root:
+
+```bash
+npm install -g rpi-deploy                  # no sudo: nvm's prefix is user-owned
+sudo env "PATH=$PATH" rpi agent setup      # sudo alone can't find rpi/node
+rpi doctor
+```
+
+`agent setup` self-installs a native binary to `/usr/local/bin/rpi`, already
+on root's default `PATH`; every `sudo rpi ...` call after this one works
+without the `env` wrapper.
+
+Recent npm versions (v11+ observed) also block unreviewed `postinstall`
+scripts by default, printing `npm warn allow-scripts ... not yet covered by
+allowScripts` instead of failing — if `rpi` then reports the binary was never
+built, reinstall with the script allowed:
+
+```bash
+npm install -g --allow-scripts=rpi-deploy rpi-deploy   # add sudo for a system-wide (apt) npm
+```
+
+`npm approve-scripts <pkg>` does not work for a global install (`EGLOBAL` — no
+project `package.json` to write to); `--allow-scripts` on the install command,
+or `npm config set allow-scripts=rpi-deploy --location=user` to persist it, is
+the supported path for `-g`.
+
 Update (both roles):
 
 ```bash
-npm install -g rpi-deploy@latest  # with sudo on the Pi
+npm install -g rpi-deploy@latest  # with sudo on the Pi, unless npm is nvm-managed
 sudo rpi agent setup              # Pi only: swaps the binary and restarts the agent
 ```
 
@@ -206,7 +236,8 @@ The npm package ships the Rust sources and builds them on install
 cargo is missing, and the build directory is removed afterwards to save disk
 space. Building on Windows needs the Visual Studio Build Tools C++ workload.
 Installing with `--ignore-scripts` leaves the CLI unusable (`rpi` will report
-that the binary was not built).
+that the binary was not built) — as does npm's `allow-scripts` gate on recent
+versions, see above.
 
 ## Build And Install The Binary
 
@@ -785,6 +816,40 @@ export PI_AGENT_URL="http://127.0.0.1:7700"
 ```
 
 ## Troubleshooting
+
+### `npm warn allow-scripts ...` / `rpi: binary not built`
+
+npm blocked the `postinstall` script that builds the Rust binary and skipped
+it instead of failing outright. Reinstall with the script explicitly allowed:
+
+```bash
+npm install -g --allow-scripts=rpi-deploy rpi-deploy   # add sudo for a system-wide (apt) npm
+```
+
+To avoid repeating the flag on every future update:
+
+```bash
+npm config set allow-scripts=rpi-deploy --location=user
+```
+
+`npm approve-scripts <pkg>` does not work here — it writes to a project
+`package.json`, and a global install has none (`EGLOBAL`).
+
+### `sudo: npm: command not found` / `sudo: rpi: command not found`
+
+Node.js is managed by `nvm` (or a similar per-user version manager); `sudo`
+resets `PATH` and does not see it. Install without `sudo` — the nvm prefix is
+already user-writable — and forward `PATH` only for the one command that
+needs root:
+
+```bash
+npm install -g rpi-deploy
+sudo env "PATH=$PATH" rpi agent setup
+```
+
+`agent setup` self-installs a native binary to `/usr/local/bin/rpi`, already
+on root's default `PATH`; later `sudo rpi ...` calls work without the `env`
+wrapper.
 
 ### `rpi ls` Does Not Connect
 
