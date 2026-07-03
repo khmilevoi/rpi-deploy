@@ -97,15 +97,15 @@ Before `rpi deploy`:
 For connection failures, isolate layers in this order:
 
 1. SSH from the developer machine: `ssh -i <key> <user>@<host> true`
-2. Agent service on the Pi: `systemctl status pi-agent`
-3. Agent logs: `journalctl -u pi-agent -n 100 --no-pager`
-4. Socket permissions: `ls -l /run/pi/agent.sock` and `groups "$USER"`
-5. Direct socket API on the Pi: `curl --unix-socket /run/pi/agent.sock http://localhost/v1/version`
+2. Agent service on the Pi: `systemctl status rpi-agent`
+3. Agent logs: `journalctl -u rpi-agent -n 100 --no-pager`
+4. Socket permissions: `ls -l /run/rpi/agent.sock` and `groups "$USER"`
+5. Direct socket API on the Pi: `curl --unix-socket /run/rpi/agent.sock http://localhost/v1/version`
 
 For deploy failures:
 
 - `Permission denied (publickey)`: the Pi cannot fetch `source.repo`; add the printed deploy key to the repository.
-- Docker `/home/pi-agent` errors: ensure the systemd unit sets `HOME=/var/lib/pi`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, and `WorkingDirectory=/var/lib/pi`.
+- Docker `/home/rpi-agent` errors: ensure the systemd unit sets `HOME=/var/lib/rpi`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, and `WorkingDirectory=/var/lib/rpi`.
 - Compose does not see secrets: run `rpi env send`, or `rpi env send --apply` for an already running stack.
 - Health check fails: verify the app listens on `0.0.0.0`, `[ingress].port` is the container port, and `[healthcheck]` matches the endpoint.
 - Host port conflict: remove fixed host `ports:` from Compose and let rpi write the override.

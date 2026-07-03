@@ -4,7 +4,7 @@ v0.6 renames the tool and changes how it is installed. This guide covers both
 runtime roles:
 
 - the **agent** — the daemon on the Raspberry Pi (`rpi agent run`, the
-  `pi-agent` systemd service);
+  `rpi-agent` systemd service);
 - the **client** — the CLI on a developer machine or CI runner (`rpi deploy`,
   `rpi ls`, `rpi env ...`, `rpi gc`).
 
@@ -14,31 +14,35 @@ client together.
 
 ## At A Glance
 
-Three things changed, and they are all breaking:
-
 | Changed (breaking) | Old | New |
 | --- | --- | --- |
 | CLI command / binary | `pi` | `rpi` |
 | Installed binary path (agent) | `/usr/local/bin/pi` | `/usr/local/bin/rpi` |
 | Installed binary path (client, from source) | `~/.cargo/bin/pi` | `~/.cargo/bin/rpi` |
-| Project config file | `pi.toml` | `rpi.toml` (hard cutover, **no fallback**) |
+| Project config file | `pi.toml` | `rpi.toml` (hard cutover, **no fallback** — rename each project's config yourself) |
+| Systemd service user/group/unit | `pi-agent`, `pi-agent.service` | `rpi-agent`, `rpi-agent.service` (**`rpi agent setup` migrates this automatically** — see below) |
+| Agent config dir | `/etc/pi` | `/etc/rpi` (auto-migrated) |
+| Agent state dir | `/var/lib/pi` | `/var/lib/rpi` (auto-migrated, `secret.key`/`state.db` move with it) |
+| Agent socket/log dirs | `/run/pi`, `/var/log/pi` | `/run/rpi`, `/var/log/rpi` (auto-migrated) |
 | Install method | build from source | `npm install -g rpi-deploy` (builds from source on install) |
 
-Everything else keeps its old name, so most of your setup carries over
-untouched:
+Two different migration styles, by design:
+
+- **The agent-side rename (user/group/unit/paths) is automatic.** Run
+  `sudo rpi agent setup` and it detects a `pi-agent` install and converts it
+  to `rpi-agent` in place — see "Migrate The Agent" below for exactly what it
+  does.
+- **The project config rename (`pi.toml` → `rpi.toml`) is manual, on
+  purpose.** It lives in your project repositories, not on the Pi, so there is
+  nothing for `rpi agent setup` to find and convert automatically. Rename it
+  yourself — see "Migrate The Client" below.
+
+Unchanged either way:
 
 | Unchanged |
-| --- |
-| Service user and unit: `pi-agent`, `pi-agent.service` |
-| Agent config: `/etc/pi/agent.toml` |
-| Agent state: `/var/lib/pi` (including `secret.key`, `state.db`) |
-| Agent socket and logs: `/run/pi/agent.sock`, `/var/log/pi` |
+| --- | --- |
 | Client config dir: `%APPDATA%\pi\config.toml` (Windows), `~/.config/pi/config.toml` (macOS/Linux) |
 | Environment variables: `PI_SERVER`, `PI_AGENT_URL` |
-
-In short: the `pi` command becomes `rpi`, and each project's `pi.toml` becomes
-`rpi.toml`. Nothing under `/etc/pi` or `/var/lib/pi` is renamed, and your client
-profile in `config.toml` still works as-is.
 
 ## Prerequisites
 
@@ -49,9 +53,8 @@ profile in `config.toml` still works as-is.
 
 ## Migrate The Agent (Raspberry Pi)
 
-There is no config to rename on the agent side. The migration is: install the
-new package, let `rpi agent setup` rewrite the systemd unit and swap the binary,
-then delete the old binary.
+`rpi agent setup` does the entire agent-side migration in one command — there
+is no separate "migrate" step.
 
 1. Install the v0.6 package (builds `rpi` from source):
 
@@ -62,17 +65,34 @@ then delete the old binary.
    If you were on a from-source v0.5 install, this is the same command — npm
    replaces the manual `cargo build` / `install` step.
 
-2. Rewrite the unit and install the binary:
+2. Run setup:
 
    ```bash
    sudo rpi agent setup
    ```
 
-   This is idempotent. It rewrites `/etc/systemd/system/pi-agent.service`
-   (backing up the previous unit to `pi-agent.service.bak` if it differs),
-   installs the running binary to `/usr/local/bin/rpi`, and restarts the agent.
-   It never touches `/etc/pi/agent.toml`, `secret.key`, or `state.db`. Use
-   `--dry-run` first if you want to preview the changes.
+   On a Pi still running the old `pi-agent` identity, this first converts it
+   to `rpi-agent` in place, then runs its normal idempotent bootstrap:
+
+   - stops the old `pi-agent.service` (best-effort — it may already be
+     stopped);
+   - `groupmod -n rpi-agent pi-agent`, then `usermod -l rpi-agent pi-agent`
+     — uid/gid are unchanged, so every file already owned by that id is
+     "renamed" for free, no `chown` needed;
+   - moves `/var/lib/pi` → `/var/lib/rpi`, `/etc/pi` → `/etc/rpi`,
+     `/var/log/pi` → `/var/log/rpi` (each only if the old path exists and the
+     new one doesn't — `secret.key`, `state.db`, and any cloudflared config
+     move with their directory, nothing is deleted);
+   - backs up the old unit file to
+     `/etc/systemd/system/pi-agent.service.bak` (never deleted) and writes
+     the new `rpi-agent.service`;
+   - re-enables `loginctl` linger under the new login name if cloudflared was
+     previously configured.
+
+   Then it installs the running binary to `/usr/local/bin/rpi` and restarts
+   the agent, same as a fresh install. Use `--dry-run` first if you want to
+   preview the changes — in dry-run mode the migration only reports what it
+   *would* do and makes no changes.
 
 3. Remove the stale v0.5 binary — `agent setup` installs `rpi` but leaves the
    old `pi` in place:
@@ -86,13 +106,15 @@ then delete the old binary.
    ```bash
    rpi doctor
    rpi agent status
-   systemctl status pi-agent
+   systemctl status rpi-agent
    ```
 
-   `systemctl status pi-agent` should show `active (running)`, and its
-   `ExecStart` should now read `/usr/local/bin/rpi agent run ...`.
+   `systemctl status rpi-agent` should show `active (running)`, and its
+   `ExecStart` should now read `/usr/local/bin/rpi agent run --config
+   /etc/rpi/agent.toml`.
 
-Updating an already-migrated agent later is the same two commands:
+Updating an already-migrated agent later is the same two commands, and the
+migration step is a no-op once `rpi-agent` already exists:
 
 ```bash
 sudo npm install -g rpi-deploy@latest
@@ -102,7 +124,9 @@ sudo rpi agent setup   # swaps the binary and restarts the agent
 ## Migrate The Client (Developer Machine / CI)
 
 The client migration has one manual step v0.5 users must not skip: renaming each
-project's `pi.toml` to `rpi.toml`.
+project's `pi.toml` to `rpi.toml`. Unlike the agent-side rename, this cannot be
+automated — the config lives in your project repositories, not on a machine
+`rpi agent setup` can reach.
 
 1. Install the v0.6 package:
 
@@ -177,6 +201,11 @@ project's `pi.toml` to `rpi.toml`.
 | `cargo build --release` + `install ... /usr/local/bin/pi` | `sudo npm install -g rpi-deploy` + `sudo rpi agent setup` |
 | `cargo install --path crates/bin` | `npm install -g rpi-deploy` |
 | `/usr/local/bin/pi`, `~/.cargo/bin/pi` | `/usr/local/bin/rpi`, `~/.cargo/bin/rpi` |
+| `pi-agent` user/group, `pi-agent.service` | `rpi-agent` user/group, `rpi-agent.service` (auto-migrated by `rpi agent setup`) |
+| `/etc/pi/agent.toml` | `/etc/rpi/agent.toml` (auto-migrated) |
+| `/var/lib/pi` (`secret.key`, `state.db`, secrets, cloudflared config) | `/var/lib/rpi` (auto-migrated, contents unchanged) |
+| `/run/pi/agent.sock` | `/run/rpi/agent.sock` (auto-migrated) |
+| `/var/log/pi` | `/var/log/rpi` (auto-migrated) |
 
 ## Troubleshooting
 
@@ -220,17 +249,46 @@ sudo rpi agent setup
 npm install -g rpi-deploy@latest
 ```
 
+### `systemctl status pi-agent` says "could not be found"
+
+Expected after migration — the unit is now named `rpi-agent.service`. Use
+`systemctl status rpi-agent`. If `rpi doctor` / `rpi agent status` also fail,
+check that `sudo rpi agent setup` completed without errors (re-run it; it is
+idempotent).
+
+### Migration ran but `groupmod`/`usermod` failed
+
+`rpi agent setup` reports this as an error and stops before touching any
+directories (it never leaves the install in a half-renamed state). The
+`pi-agent` user/group and its directories are untouched at that point — fix
+the underlying issue (commonly: the `pi-agent` user has a process still
+running under it, or `rpi-agent` already exists as a *different* uid from a
+manual partial migration) and re-run `sudo rpi agent setup`.
+
 ## Rollback
 
 If you need to return to v0.5:
 
 - **Client:** reinstall the v0.5 build and restore the old config filename
   (`git mv rpi.toml pi.toml`, or check out the pre-rename commit).
-- **Agent:** reinstall the v0.5 binary at `/usr/local/bin/pi`. If a v0.6
-  `rpi agent setup` had rewritten the unit, its previous version is at
-  `/etc/systemd/system/pi-agent.service.bak`; restore it and run
-  `sudo systemctl daemon-reload && sudo systemctl restart pi-agent`.
+- **Agent:** this is more involved than in earlier `pi.toml`-only migrations,
+  because the agent-side rename also touches the Linux user/group and three
+  directories:
+  1. Stop the agent: `sudo systemctl disable --now rpi-agent`.
+  2. Reverse the identity rename: `sudo groupmod -n pi-agent rpi-agent` then
+     `sudo usermod -l pi-agent rpi-agent` (uid/gid unchanged, so file
+     ownership is preserved the same way the forward migration preserved it).
+  3. Move the directories back: `sudo mv /var/lib/rpi /var/lib/pi`,
+     `sudo mv /etc/rpi /etc/pi`, `sudo mv /var/log/rpi /var/log/pi`.
+  4. Restore the old unit: the forward migration backed it up to
+     `/etc/systemd/system/pi-agent.service.bak` — restore it with
+     `sudo mv /etc/systemd/system/pi-agent.service.bak
+     /etc/systemd/system/pi-agent.service` (remove the v0.6
+     `rpi-agent.service` first: `sudo rm -f
+     /etc/systemd/system/rpi-agent.service`).
+  5. Reinstall the v0.5 binary at `/usr/local/bin/pi`, then
+     `sudo systemctl daemon-reload && sudo systemctl enable --now pi-agent`.
 
-Because `/etc/pi/agent.toml` and everything under `/var/lib/pi` (state and
-secrets) are never renamed or removed by the migration, agent state survives a
-rollback intact.
+  `secret.key`, `state.db`, and any cloudflared config are never deleted by
+  either direction of this migration, so agent state survives a rollback
+  intact as long as you move the directories back before reinstalling v0.5.

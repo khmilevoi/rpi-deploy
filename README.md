@@ -255,9 +255,14 @@ On the Pi, after the binary is installed (see above):
 sudo rpi agent setup
 ```
 
-This is idempotent: it creates the `pi-agent` user, directories, the systemd
-unit, and `/etc/pi/agent.toml` if missing, repairs `/var/log/pi`, and never
-touches `secret.key` or `state.db`. Re-running it is safe. Use `--dry-run` to
+This is idempotent: it creates the `rpi-agent` user, directories, the systemd
+unit, and `/etc/rpi/agent.toml` if missing, repairs `/var/log/rpi`, and never
+touches `secret.key` or `state.db`. On a Pi still running the old `pi-agent`
+identity (v0.5 and earlier v0.6 pre-releases), it converts it to `rpi-agent`
+in place first — renaming the Linux user/group and moving `/var/lib/pi`,
+`/etc/pi`, `/var/log/pi` to their `rpi`-named equivalents (all owned files
+move with their directories, nothing is deleted) — before running the steps
+above. Re-running it is safe. Use `--dry-run` to
 preview, `--with-cloudflared` to scaffold cloudflared.
 
 On the developer machine:
@@ -267,32 +272,32 @@ rpi setup            # wizard: server profile + SSH key + config.toml
 rpi init             # wizard: generate rpi.toml in the current project
 ```
 
-## Install `pi-agent`
+## Install `rpi-agent`
 
 Create the service user:
 
 ```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin pi-agent || true
-sudo usermod -aG docker pi-agent
-sudo usermod -aG pi-agent "$USER"
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin rpi-agent || true
+sudo usermod -aG docker rpi-agent
+sudo usermod -aG rpi-agent "$USER"
 ```
 
-`pi-agent` runs Docker. The login user is added to the `pi-agent` group so the
+`rpi-agent` runs Docker. The login user is added to the `rpi-agent` group so the
 SSH tunnel can connect to the agent's Unix socket.
 
 Create directories:
 
 ```bash
-sudo mkdir -p /var/lib/pi /etc/pi
-sudo chown -R pi-agent:pi-agent /var/lib/pi
+sudo mkdir -p /var/lib/rpi /etc/rpi
+sudo chown -R rpi-agent:rpi-agent /var/lib/rpi
 ```
 
-Create `/etc/pi/agent.toml`:
+Create `/etc/rpi/agent.toml`:
 
 ```bash
-sudo tee /etc/pi/agent.toml >/dev/null <<'EOF'
-data_dir = "/var/lib/pi"
-socket = "/run/pi/agent.sock"
+sudo tee /etc/rpi/agent.toml >/dev/null <<'EOF'
+data_dir = "/var/lib/rpi"
+socket = "/run/rpi/agent.sock"
 port_min = 8000
 port_max = 8999
 build_concurrency = 1
@@ -311,44 +316,44 @@ EOF
 Create the `systemd` unit:
 
 ```bash
-sudo tee /etc/systemd/system/pi-agent.service >/dev/null <<'EOF'
+sudo tee /etc/systemd/system/rpi-agent.service >/dev/null <<'EOF'
 [Unit]
 Description=pi deploy agent
 After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
-User=pi-agent
-Group=pi-agent
-ExecStart=/usr/local/bin/rpi agent run --config /etc/pi/agent.toml
+User=rpi-agent
+Group=rpi-agent
+ExecStart=/usr/local/bin/rpi agent run --config /etc/rpi/agent.toml
 RuntimeDirectory=pi
 RuntimeDirectoryMode=0750
 Restart=on-failure
-Environment=HOME=/var/lib/pi
-Environment=XDG_CONFIG_HOME=/var/lib/pi/.config
-Environment=XDG_CACHE_HOME=/var/lib/pi/.cache
-WorkingDirectory=/var/lib/pi
+Environment=HOME=/var/lib/rpi
+Environment=XDG_CONFIG_HOME=/var/lib/rpi/.config
+Environment=XDG_CACHE_HOME=/var/lib/rpi/.cache
+WorkingDirectory=/var/lib/rpi
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now pi-agent
-systemctl status pi-agent
+sudo systemctl enable --now rpi-agent
+systemctl status rpi-agent
 ```
 
 Agent logs:
 
 ```bash
-journalctl -u pi-agent -f
+journalctl -u rpi-agent -f
 ```
 
-After adding the login user to the `pi-agent` group, open a new SSH session.
+After adding the login user to the `rpi-agent` group, open a new SSH session.
 
-`pi-agent` is intentionally created without a home directory. Agent state lives
-in `/var/lib/pi`, and the `HOME` and `XDG_*` variables prevent Docker/BuildKit
-from trying to write to a missing `/home/pi-agent`.
+`rpi-agent` is intentionally created without a home directory. Agent state lives
+in `/var/lib/rpi`, and the `HOME` and `XDG_*` variables prevent Docker/BuildKit
+from trying to write to a missing `/home/rpi-agent`.
 
 ## Install The CLI On A Developer Machine
 
@@ -528,7 +533,7 @@ up = "2m"
 
 ## Docker Compose Requirements
 
-`pi-agent` writes an override file roughly like this:
+`rpi-agent` writes an override file roughly like this:
 
 ```yaml
 services:
@@ -614,7 +619,7 @@ rpi env send
 ```
 
 The CLI reads the local `.env`, sends the values to the agent, and the agent
-stores an encrypted bundle in `/var/lib/pi/secrets`. During `rpi deploy`, the
+stores an encrypted bundle in `/var/lib/rpi/secrets`. During `rpi deploy`, the
 agent writes `.env` into the project workdir before running Docker Compose.
 
 Before the first deploy of a project that needs secrets:
@@ -704,7 +709,7 @@ A typical locally managed `cloudflared` config:
 
 ```yaml
 tunnel: <tunnel-id-or-name>
-credentials-file: /var/lib/pi/cloudflared/<tunnel-id>.json
+credentials-file: /var/lib/rpi/cloudflared/<tunnel-id>.json
 
 ingress:
   - hostname: app.example.com
@@ -716,7 +721,7 @@ The final `http_status:404` rule must remain the catch-all.
 
 ### Manual Ingress
 
-If `/etc/pi/agent.toml` has no `[cloudflared]` section, deployment does not
+If `/etc/rpi/agent.toml` has no `[cloudflared]` section, deployment does not
 fail. The agent logs the address that must be routed manually:
 
 ```text
@@ -732,16 +737,16 @@ rpi ls
 ### Automatic Ingress
 
 To let the agent edit a local `cloudflared` config, add this to
-`/etc/pi/agent.toml`:
+`/etc/rpi/agent.toml`:
 
 ```toml
 [cloudflared]
-config = "/var/lib/pi/cloudflared/config.yml"
+config = "/var/lib/rpi/cloudflared/config.yml"
 tunnel = "home"
 restart = ["systemctl", "--user", "restart", "cloudflared"]
 ```
 
-`pi-agent` must be allowed to:
+`rpi-agent` must be allowed to:
 
 - read and write the configured `config.yml`;
 - run `cloudflared tunnel route dns`;
@@ -792,19 +797,19 @@ ssh -i ~/.ssh/id_ed25519_pi pi-user@pi-host.local true
 Check the agent on the Pi:
 
 ```bash
-systemctl status pi-agent
-journalctl -u pi-agent -n 100 --no-pager
-ls -l /run/pi/agent.sock
+systemctl status rpi-agent
+journalctl -u rpi-agent -n 100 --no-pager
+ls -l /run/rpi/agent.sock
 groups "$USER"
 ```
 
-After adding the login user to the `pi-agent` group, open a new SSH session.
+After adding the login user to the `rpi-agent` group, open a new SSH session.
 
 On the Pi itself, you can check the agent directly:
 
 ```bash
-curl --unix-socket /run/pi/agent.sock http://localhost/v1/version
-curl --unix-socket /run/pi/agent.sock http://localhost/v1/projects
+curl --unix-socket /run/rpi/agent.sock http://localhost/v1/version
+curl --unix-socket /run/rpi/agent.sock http://localhost/v1/projects
 ```
 
 ### Clone Fails With `Permission denied (publickey)`
@@ -818,22 +823,22 @@ After fixing access:
 rpi deploy
 ```
 
-### Docker Build Fails With `/home/pi-agent` Errors
+### Docker Build Fails With `/home/rpi-agent` Errors
 
 Check that the `systemd` unit contains:
 
 ```ini
-Environment=HOME=/var/lib/pi
-Environment=XDG_CONFIG_HOME=/var/lib/pi/.config
-Environment=XDG_CACHE_HOME=/var/lib/pi/.cache
-WorkingDirectory=/var/lib/pi
+Environment=HOME=/var/lib/rpi
+Environment=XDG_CONFIG_HOME=/var/lib/rpi/.config
+Environment=XDG_CACHE_HOME=/var/lib/rpi/.cache
+WorkingDirectory=/var/lib/rpi
 ```
 
 Then run:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl restart pi-agent
+sudo systemctl restart rpi-agent
 ```
 
 ### Docker Permission Denied
@@ -841,15 +846,15 @@ sudo systemctl restart pi-agent
 Check groups:
 
 ```bash
-groups pi-agent
+groups rpi-agent
 getent group docker
 ```
 
 Add the service user to the Docker group and restart the agent:
 
 ```bash
-sudo usermod -aG docker pi-agent
-sudo systemctl restart pi-agent
+sudo usermod -aG docker rpi-agent
+sudo systemctl restart rpi-agent
 ```
 
 ### Compose Does Not See `.env`
@@ -900,7 +905,7 @@ On the Pi:
 ```bash
 cargo build --release
 sudo install -m 755 target/release/rpi /usr/local/bin/rpi
-sudo systemctl restart pi-agent
+sudo systemctl restart rpi-agent
 ```
 
 On the developer machine:
@@ -911,7 +916,7 @@ cargo install --path crates/bin --locked
 
 ## Pre-Deploy Checklist
 
-1. On the Pi, `systemctl status pi-agent` shows `active (running)`.
+1. On the Pi, `systemctl status rpi-agent` shows `active (running)`.
 2. From the developer machine, `ssh pi-user@pi-host.local true` works without a
    password.
 3. From the developer machine, `rpi ls` responds.
