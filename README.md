@@ -196,13 +196,10 @@ npm install -g rpi-deploy@latest  # with sudo on the Pi
 sudo rpi agent setup              # Pi only: swaps the binary and restarts the agent
 ```
 
-Upgrading a v0.5 install: the command was renamed `pi` → `rpi`. `sudo rpi
-agent setup` rewrites the systemd unit (backing up the old one to
-`pi-agent.service.bak`); the old `/usr/local/bin/pi` binary is left behind —
-remove it with `sudo rm /usr/local/bin/pi`. The project config filename was
-also renamed `pi.toml` → `rpi.toml` — this is a hard cutover with no
-fallback, so rename each existing project's config manually:
-`mv pi.toml rpi.toml`.
+Upgrading from v0.5? The command was renamed `pi` → `rpi` and the project
+config `pi.toml` → `rpi.toml` (hard cutover, no fallback). Follow the
+step-by-step guide for both roles in
+[docs/migration-v0.5-to-v0.6.md](docs/migration-v0.5-to-v0.6.md).
 
 The npm package ships the Rust sources and builds them on install
 (`cargo build --release --locked`); rustup is installed automatically when
