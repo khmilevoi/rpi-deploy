@@ -10,7 +10,7 @@ pub struct GcReport {
 }
 
 /// Disk GC (§8.1): dangling images always; build cache only above the disk
-/// threshold. Runs as a post-success deploy stage and behind `pi gc`.
+/// threshold. Runs as a post-success deploy stage and behind `rpi gc`.
 pub struct RunGc {
     runtime: Arc<dyn ContainerRuntime>,
     disk: Arc<dyn DiskProbe>,

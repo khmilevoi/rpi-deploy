@@ -24,7 +24,7 @@ pub trait LogSink: Send + Sync {
 #[async_trait]
 pub trait Source: Send + Sync {
     /// Where this project's working copy lives on the agent host (used by
-    /// `pi env send --apply` to re-inject .env without a fetch, §10).
+    /// `rpi env send --apply` to re-inject .env without a fetch, §10).
     fn workdir(&self, project_name: &str) -> PathBuf;
 
     async fn fetch(
@@ -67,7 +67,7 @@ pub trait ContainerRuntime: Send + Sync {
         action: LifecycleAction,
         log: Arc<dyn LogSink>,
     ) -> Result<(), DomainError>;
-    /// `docker compose down` for `pi rm`; named volumes die only with the flag.
+    /// `docker compose down` for `rpi rm`; named volumes die only with the flag.
     async fn down(
         &self,
         stack: &ComposeStack,
@@ -84,7 +84,7 @@ pub trait DiskProbe: Send + Sync {
 }
 
 /// Detects the agent host's primary LAN IPv4 for building reachable URLs
-/// (used by `pi deploy`/`pi ls` for expose=lan projects). None when undetectable.
+/// (used by `rpi deploy`/`rpi ls` for expose=lan projects). None when undetectable.
 #[cfg_attr(feature = "mocks", automock)]
 pub trait HostNetwork: Send + Sync {
     fn primary_ipv4(&self) -> Option<std::net::IpAddr>;

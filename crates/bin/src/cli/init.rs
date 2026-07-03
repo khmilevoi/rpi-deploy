@@ -1,4 +1,4 @@
-/// Resolved field set for `pi init`, ready to render into pi.toml (§7).
+/// Resolved field set for `rpi init`, ready to render into pi.toml (§7).
 pub struct InitFields {
     pub name: String,
     pub repo: String,
@@ -142,7 +142,7 @@ pub fn resolve_init_fields(
 
 use crate::cli::prompt::InquirePrompter;
 
-/// Entrypoint for `pi init`: detect, resolve, write ./pi.toml (backup if present).
+/// Entrypoint for `rpi init`: detect, resolve, write ./pi.toml (backup if present).
 pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let det = detect_defaults(&cwd);
@@ -161,7 +161,7 @@ pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
     }
     std::fs::write(&path, &text)?;
     println!("wrote {}", path.display());
-    println!("next: `pi env send` (if you use secrets), then `pi deploy`");
+    println!("next: `rpi env send` (if you use secrets), then `rpi deploy`");
     Ok(())
 }
 

@@ -88,7 +88,7 @@ pub struct HealthcheckSection {
 
 #[derive(Debug, Deserialize)]
 pub struct EnvSection {
-    /// Which local file `pi env send` reads (§12).
+    /// Which local file `rpi env send` reads (§12).
     #[serde(default = "default_env_file")]
     pub file: String,
 }

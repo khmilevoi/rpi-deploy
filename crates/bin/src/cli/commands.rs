@@ -150,7 +150,7 @@ fn parse_env_file(text: &str) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(bundle.vars)
 }
 
-/// `pi ls` EXPOSE cell: `-` for private/unknown, `lan http://<ip>:<port>` for
+/// `rpi ls` EXPOSE cell: `-` for private/unknown, `lan http://<ip>:<port>` for
 /// expose=lan with a detected ip, `lan (ip n/a)` when the ip could not be
 /// detected (§12.1).
 fn expose_cell(expose: &str, lan_ip: Option<&str>, host_port: u16) -> String {
@@ -380,7 +380,7 @@ pub async fn doctor(connect: ConnectOpts) -> anyhow::Result<()> {
             "agent tunnel",
             false,
             e.to_string(),
-            Some("is pi-agent.service running on the Pi? try `pi agent status`"),
+            Some("is pi-agent.service running on the Pi? try `rpi agent status`"),
         )),
         Ok(tunnel) => {
             let api = ApiClient::new(tunnel.base_url.clone());
@@ -389,7 +389,7 @@ pub async fn doctor(connect: ConnectOpts) -> anyhow::Result<()> {
                     "agent api",
                     false,
                     e.to_string(),
-                    Some("agent is unreachable through the tunnel; `pi agent logs` for details"),
+                    Some("agent is unreachable through the tunnel; `rpi agent logs` for details"),
                 )),
                 Ok(v) => {
                     checks.push(check(
@@ -540,7 +540,7 @@ fn version_mismatch_warning(cli_version: &str, agent_version: &str) -> Option<St
     (cli_version != agent_version).then(|| {
         format!(
             "warning: CLI v{cli_version} and agent v{agent_version} differ - \
-rebuild/update the agent on the Pi (`pi agent update` ships in v0.5)"
+rebuild/update the agent on the Pi (`rpi agent update` ships in v0.5)"
         )
     })
 }
@@ -580,14 +580,14 @@ mod tests {
                 name: "disk space".into(),
                 passed: false,
                 detail: "91% used".into(),
-                hint: Some("run `pi gc`".into()),
+                hint: Some("run `rpi gc`".into()),
             },
         ];
         let (out, ok) = render_doctor(&checks);
         assert!(!ok);
         assert!(out.contains("PASS  docker daemon"), "{out}");
         assert!(out.contains("FAIL  disk space"), "{out}");
-        assert!(out.contains("hint: run `pi gc`"), "{out}");
+        assert!(out.contains("hint: run `rpi gc`"), "{out}");
         let (_, ok) = render_doctor(&checks[..1]);
         assert!(ok);
     }

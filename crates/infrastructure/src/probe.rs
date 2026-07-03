@@ -175,7 +175,7 @@ impl SystemProbe for HostSystemProbe {
                 passed: percent < self.disk_threshold_percent,
                 detail: format!("{percent}% used"),
                 hint: (percent >= self.disk_threshold_percent)
-                    .then(|| "run `pi gc` or free disk space".into()),
+                    .then(|| "run `rpi gc` or free disk space".into()),
             },
             Err(err) => DiagnosticCheck {
                 name: "disk space".into(),

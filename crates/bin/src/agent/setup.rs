@@ -60,7 +60,7 @@ Wants=network-online.target
 [Service]
 User=pi-agent
 Group=pi-agent
-ExecStart=/usr/local/bin/pi agent run --config /etc/pi/agent.toml
+ExecStart=/usr/local/bin/rpi agent run --config /etc/pi/agent.toml
 RuntimeDirectory=pi
 RuntimeDirectoryMode=0750
 Restart=on-failure
@@ -254,7 +254,7 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
             rep.warnings.push("systemctl daemon-reload failed".into());
         }
         if sys.run("systemctl", &["enable", "--now", "pi-agent"]).await.is_err() {
-            rep.warnings.push("systemctl enable --now pi-agent failed (is /usr/local/bin/pi installed?)".into());
+            rep.warnings.push("systemctl enable --now pi-agent failed (is /usr/local/bin/rpi installed?)".into());
         }
     }
 
@@ -332,7 +332,7 @@ pub async fn run_cmd(user: Option<String>, with_cloudflared: bool, dry_run: bool
         .or_else(|| std::env::var("SUDO_USER").ok())
         .filter(|u| !u.is_empty() && u != "root")
         .ok_or_else(|| anyhow::anyhow!(
-            "cannot determine the SSH login user; run via `sudo pi agent setup` or pass --user <name>"
+            "cannot determine the SSH login user; run via `sudo rpi agent setup` or pass --user <name>"
         ))?;
     let opts = SetupOpts { login_user, with_cloudflared, dry_run };
     run_with(&HostSys, &opts).await.map(|_| ())
@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn unit_template_matches_spec_byte_for_byte() {
         assert!(UNIT.starts_with("[Unit]\nDescription=pi deploy agent\n"));
-        assert!(UNIT.contains("ExecStart=/usr/local/bin/pi agent run --config /etc/pi/agent.toml\n"));
+        assert!(UNIT.contains("ExecStart=/usr/local/bin/rpi agent run --config /etc/pi/agent.toml\n"));
         assert!(UNIT.contains("Environment=XDG_CACHE_HOME=/var/lib/pi/.cache\n"));
         assert!(UNIT.ends_with("WantedBy=multi-user.target\n"));
     }

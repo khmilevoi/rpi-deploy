@@ -8,7 +8,7 @@ use pi_domain::error::DomainError;
 
 use crate::mask::MaskingSink;
 
-/// Result of `pi env send` (§10).
+/// Result of `rpi env send` (§10).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvSaved {
     pub keys: usize,
@@ -66,7 +66,7 @@ impl SendEnv {
 
         let registered = self.projects.get(project).await?.ok_or_else(|| {
             DomainError::NotFound(format!(
-                "project '{project}' is not deployed yet; run `pi deploy` first"
+                "project '{project}' is not deployed yet; run `rpi deploy` first"
             ))
         })?;
         let config = &registered.config;
@@ -102,7 +102,7 @@ impl SendEnv {
     }
 }
 
-/// Key names only, never values (§10: `pi env ls`).
+/// Key names only, never values (§10: `rpi env ls`).
 pub struct ListEnvKeys {
     secrets: Arc<dyn SecretStore>,
 }

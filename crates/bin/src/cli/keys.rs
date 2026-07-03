@@ -50,7 +50,7 @@ pub fn manual_copy_instructions(pubkey_text: &str, profile: &ServerProfile) -> S
         "Could not copy the SSH key automatically (password auth may be disabled on the Pi).\n\
          Append this public key to ~pi/.ssh/authorized_keys on {user}@{host} manually:\n\n\
          {pubkey}\n\n\
-         Then re-run `pi setup` (or `pi doctor --server <alias>`).",
+         Then re-run `rpi setup` (or `rpi doctor --server <alias>`).",
         pubkey = pubkey_text.trim(),
         user = profile.user,
         host = profile.host,

@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "pi",
+    name = "rpi",
     version,
     about = "deploy tool for Raspberry Pi (CLI + agent)"
 )]
