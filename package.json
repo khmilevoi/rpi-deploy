@@ -1,0 +1,25 @@
+{
+  "name": "rpi-deploy",
+  "version": "0.6.0",
+  "description": "Deployment tool for Docker Compose projects on Raspberry Pi. Builds the Rust CLI from source on install.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khmilevoi/rpi-deploy.git"
+  },
+  "bin": { "rpi": "bin/rpi.js" },
+  "files": [
+    "bin/",
+    "scripts/postinstall.js",
+    "scripts/check-version.js",
+    "crates/",
+    "Cargo.toml",
+    "Cargo.lock"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "prepublishOnly": "node scripts/check-version.js"
+  },
+  "engines": { "node": ">=18" },
+  "os": ["linux", "darwin", "win32"]
+}

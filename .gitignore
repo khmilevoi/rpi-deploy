@@ -4,3 +4,5 @@
 *.db-shm
 /.dev-data
 /.worktrees
+/dist
+/node_modules
