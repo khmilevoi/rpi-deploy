@@ -92,7 +92,7 @@ impl SystemProbe for HostSystemProbe {
                 "docker daemon",
                 "docker",
                 &["version", "--format", "{{.Server.Version}}"],
-                "start Docker and make sure the pi-agent user can access it",
+                "start Docker and make sure the rpi-agent user can access it",
             )
             .await,
             self.command_check(
@@ -108,25 +108,25 @@ impl SystemProbe for HostSystemProbe {
             Ok(out) => {
                 let in_docker_group = out.split_whitespace().any(|g| g == "docker");
                 DiagnosticCheck {
-                    name: "pi-agent group".into(),
+                    name: "rpi-agent group".into(),
                     passed: in_docker_group,
                     detail: format!("groups: {out}"),
                     hint: if !in_docker_group {
-                        Some("add pi-agent to the 'docker' group: sudo usermod -aG docker pi-agent".into())
+                        Some("add rpi-agent to the 'docker' group: sudo usermod -aG docker rpi-agent".into())
                     } else {
                         None
                     },
                 }
             }
             Err(err) => DiagnosticCheck {
-                name: "pi-agent group".into(),
+                name: "rpi-agent group".into(),
                 passed: false,
                 detail: err,
-                hint: Some("add pi-agent to the 'docker' group".into()),
+                hint: Some("add rpi-agent to the 'docker' group".into()),
             },
         });
 
-        checks.push(match self.runner.run("loginctl", &["show-user", "-P", "Linger", "pi-agent"]).await {
+        checks.push(match self.runner.run("loginctl", &["show-user", "-P", "Linger", "rpi-agent"]).await {
             Ok(out) => {
                 let linger_enabled = out == "yes";
                 DiagnosticCheck {
@@ -134,7 +134,7 @@ impl SystemProbe for HostSystemProbe {
                     passed: linger_enabled,
                     detail: format!("Linger={out}"),
                     hint: if !linger_enabled {
-                        Some("enable linger: loginctl enable-linger pi-agent".into())
+                        Some("enable linger: loginctl enable-linger rpi-agent".into())
                     } else {
                         None
                     },
@@ -144,7 +144,7 @@ impl SystemProbe for HostSystemProbe {
                 name: "systemd linger".into(),
                 passed: false,
                 detail: err,
-                hint: Some("enable linger: loginctl enable-linger pi-agent".into()),
+                hint: Some("enable linger: loginctl enable-linger rpi-agent".into()),
             },
         });
 

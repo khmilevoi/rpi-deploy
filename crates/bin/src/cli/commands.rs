@@ -380,7 +380,7 @@ pub async fn doctor(connect: ConnectOpts) -> anyhow::Result<()> {
             "agent tunnel",
             false,
             e.to_string(),
-            Some("is pi-agent.service running on the Pi? try `rpi agent status`"),
+            Some("is rpi-agent.service running on the Pi? try `rpi agent status`"),
         )),
         Ok(tunnel) => {
             let api = ApiClient::new(tunnel.base_url.clone());
@@ -440,11 +440,11 @@ pub async fn agent_status(connect: ConnectOpts) -> anyhow::Result<()> {
         Err(err) => {
             eprintln!("agent API unreachable ({err})");
             eprintln!(
-                "falling back to: ssh {}@{} systemctl status pi-agent",
+                "falling back to: ssh {}@{} systemctl status rpi-agent",
                 profile.user, profile.host
             );
             SshExec { profile: &profile }
-                .run(&["systemctl", "status", "pi-agent", "--no-pager"])
+                .run(&["systemctl", "status", "rpi-agent", "--no-pager"])
                 .await
         }
     }
@@ -467,7 +467,7 @@ pub(crate) fn build_agent_logs_query(
 }
 
 pub(crate) fn journalctl_args(follow: bool, since_unix: Option<i64>, tail: usize) -> Vec<String> {
-    let mut args: Vec<String> = ["journalctl", "-u", "pi-agent", "--no-pager", "-n"]
+    let mut args: Vec<String> = ["journalctl", "-u", "rpi-agent", "--no-pager", "-n"]
         .map(String::from)
         .to_vec();
     args.push(tail.to_string());
@@ -616,14 +616,14 @@ mod tests {
     fn journalctl_args_shape() {
         assert_eq!(
             journalctl_args(false, None, 100),
-            vec!["journalctl", "-u", "pi-agent", "--no-pager", "-n", "100"]
+            vec!["journalctl", "-u", "rpi-agent", "--no-pager", "-n", "100"]
         );
         assert_eq!(
             journalctl_args(true, Some(1234), 50),
             vec![
                 "journalctl",
                 "-u",
-                "pi-agent",
+                "rpi-agent",
                 "--no-pager",
                 "-n",
                 "50",

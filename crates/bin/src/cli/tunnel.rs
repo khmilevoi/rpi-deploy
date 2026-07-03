@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::cli::config::ServerProfile;
 
-pub const AGENT_SOCKET: &str = "/run/pi/agent.sock";
+pub const AGENT_SOCKET: &str = "/run/rpi/agent.sock";
 
 pub struct SshTunnel {
     child: Option<tokio::process::Child>,

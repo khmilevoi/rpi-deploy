@@ -72,7 +72,7 @@ pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     // windows
     if let Some(addr) = &config.tcp {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!("pi-agent listening on tcp {addr}");
+        tracing::info!("rpi-agent listening on tcp {addr}");
         axum::serve(listener, app).await?;
         return Ok(());
     }
@@ -88,7 +88,7 @@ pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         let listener = tokio::net::UnixListener::bind(&config.socket)?;
         std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o660))?;
         tracing::info!(
-            "pi-agent listening on unix socket {}",
+            "rpi-agent listening on unix socket {}",
             config.socket.display()
         );
         axum::serve(listener, app).await?;

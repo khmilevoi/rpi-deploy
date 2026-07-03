@@ -165,21 +165,21 @@ mod tests {
     #[test]
     fn git_ssh_command_uses_forward_slashes_and_pins_identity() {
         let cmd = git_ssh_command(
-            std::path::Path::new("/var/lib/pi/keys/rateme/id_ed25519"),
-            std::path::Path::new("/var/lib/pi/known_hosts"),
+            std::path::Path::new("/var/lib/rpi/keys/rateme/id_ed25519"),
+            std::path::Path::new("/var/lib/rpi/known_hosts"),
         );
         assert_eq!(
             cmd,
-            "ssh -i \"/var/lib/pi/keys/rateme/id_ed25519\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=\"/var/lib/pi/known_hosts\""
+            "ssh -i \"/var/lib/rpi/keys/rateme/id_ed25519\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=\"/var/lib/rpi/known_hosts\""
         );
     }
 
     #[test]
     fn workdir_is_under_data_dir_workdirs() {
-        let source = GitSource::new(std::path::Path::new("/var/lib/pi"));
+        let source = GitSource::new(std::path::Path::new("/var/lib/rpi"));
         assert_eq!(
             source.workdir("rateme"),
-            std::path::PathBuf::from("/var/lib/pi/workdirs/rateme")
+            std::path::PathBuf::from("/var/lib/rpi/workdirs/rateme")
         );
     }
 }

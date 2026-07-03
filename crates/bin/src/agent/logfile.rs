@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-pub const LOG_PREFIX: &str = "pi-agent.log.";
+pub const LOG_PREFIX: &str = "rpi-agent.log.";
 
 #[derive(Clone)]
 pub struct DailyMakeWriter {
@@ -202,8 +202,8 @@ mod tests {
     #[test]
     fn read_tail_keeps_last_lines_across_files() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("pi-agent.log.2026-01-01"), "a\nb\n").unwrap();
-        std::fs::write(dir.path().join("pi-agent.log.2026-01-02"), "c\n").unwrap();
+        std::fs::write(dir.path().join("rpi-agent.log.2026-01-01"), "a\nb\n").unwrap();
+        std::fs::write(dir.path().join("rpi-agent.log.2026-01-02"), "c\n").unwrap();
         assert_eq!(read(dir.path(), Some(2), None).unwrap(), vec!["b", "c"]);
     }
 
@@ -211,7 +211,7 @@ mod tests {
     fn since_filters_rfc3339_prefixes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("pi-agent.log.2026-01-01"),
+            dir.path().join("rpi-agent.log.2026-01-01"),
             "2026-01-01T00:00:00Z old\n2026-01-01T01:00:00Z new\n",
         )
         .unwrap();

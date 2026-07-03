@@ -177,7 +177,7 @@ enum EnvCmd {
 enum AgentCmd {
     /// Start the agent (foreground; under systemd)
     Run {
-        /// Path to agent.toml (default: /etc/pi/agent.toml)
+        /// Path to agent.toml (default: /etc/rpi/agent.toml)
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -199,7 +199,7 @@ enum AgentCmd {
     },
     /// Bootstrap the agent on this Pi (run with sudo; idempotent)
     Setup {
-        /// SSH login user to add to the pi-agent group (default: $SUDO_USER)
+        /// SSH login user to add to the rpi-agent group (default: $SUDO_USER)
         #[arg(long)]
         user: Option<String>,
         /// Also bootstrap cloudflared (linger + user unit)
@@ -211,7 +211,7 @@ enum AgentCmd {
     },
     /// Remove the agent (keeps data unless --purge)
     Uninstall {
-        /// Also delete /var/lib/pi, /etc/pi, /var/log/pi (irreversible)
+        /// Also delete /var/lib/rpi, /etc/rpi, /var/log/rpi (irreversible)
         #[arg(long)]
         purge: bool,
         #[arg(long)]
