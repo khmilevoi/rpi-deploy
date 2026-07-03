@@ -27,7 +27,7 @@ impl std::fmt::Debug for EnvBundle {
     }
 }
 
-/// Deploy gate settings from [healthcheck] in pi.toml (§8, §12).
+/// Deploy gate settings from [healthcheck] in rpi.toml (§8, §12).
 /// Per-deploy input: travels with ProjectConfig, not persisted in the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthcheckConfig {
@@ -68,7 +68,7 @@ impl Default for StageTimeouts {
 }
 
 impl StageTimeouts {
-    /// Project overrides from [timeouts] in pi.toml win over agent defaults (§12).
+    /// Project overrides from [timeouts] in rpi.toml win over agent defaults (§12).
     pub fn with_overrides(&self, overrides: &StageTimeoutOverrides) -> StageTimeouts {
         StageTimeouts {
             fetch_secs: overrides.fetch_secs.unwrap_or(self.fetch_secs),
@@ -78,7 +78,7 @@ impl StageTimeouts {
     }
 }
 
-/// Optional per-project overrides ([timeouts] in pi.toml, §12).
+/// Optional per-project overrides ([timeouts] in rpi.toml, §12).
 /// Travels with ProjectConfig like HealthcheckConfig; not persisted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StageTimeoutOverrides {
@@ -131,7 +131,7 @@ impl std::fmt::Display for ExposeMode {
     }
 }
 
-/// Project config from pi.toml (received in deploy request, §12).
+/// Project config from rpi.toml (received in deploy request, §12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectConfig {
     pub name: String,
@@ -147,9 +147,9 @@ pub struct ProjectConfig {
     pub hostname: Option<String>,
     /// How the host port should be exposed. Defaults private for existing configs.
     pub expose: ExposeMode,
-    /// Health gate settings ([healthcheck] from pi.toml). Not persisted in DB.
+    /// Health gate settings ([healthcheck] from rpi.toml). Not persisted in DB.
     pub healthcheck: HealthcheckConfig,
-    /// Stage timeout overrides ([timeouts] from pi.toml). Not persisted in DB.
+    /// Stage timeout overrides ([timeouts] from rpi.toml). Not persisted in DB.
     pub timeouts: StageTimeoutOverrides,
 }
 

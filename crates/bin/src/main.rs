@@ -60,9 +60,9 @@ struct SetupArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Deploy current project (reads ./pi.toml)
+    /// Deploy current project (reads ./rpi.toml)
     Deploy {
-        /// Branch or commit-sha (default — branch from pi.toml)
+        /// Branch or commit-sha (default — branch from rpi.toml)
         #[arg(long = "ref", conflicts_with = "cancel")]
         git_ref: Option<String>,
         /// Cancel the active deploy(s) of the current project instead
@@ -140,7 +140,7 @@ enum Cmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
-    /// Generate pi.toml in the current project (wizard; flags for CI)
+    /// Generate rpi.toml in the current project (wizard; flags for CI)
     Init(InitArgs),
     /// Configure a server profile on this machine (wizard; flags for CI)
     Setup(SetupArgs),

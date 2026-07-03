@@ -3,15 +3,15 @@ use std::path::Path;
 
 use crate::cli::api::ApiClient;
 use crate::cli::config::ConnectOpts;
-use crate::cli::pitoml::PiToml;
+use crate::cli::rpitoml::RpiToml;
 use crate::cli::ssh::SshExec;
 use crate::cli::tunnel::SshTunnel;
 use crate::duration::parse_duration_secs;
 use crate::proto::{DeployRequest, DiagnosticCheckDto};
 
 pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Result<()> {
-    let pitoml = PiToml::load(Path::new("pi.toml"))?;
-    let project = pitoml.to_project_config();
+    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let project = rpitoml.to_project_config();
 
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
@@ -55,8 +55,8 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
 }
 
 pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
-    let pitoml = PiToml::load(Path::new("pi.toml"))?;
-    let project_name = pitoml.project.name.clone();
+    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let project_name = rpitoml.project.name.clone();
 
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
@@ -86,9 +86,9 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
 }
 
 pub async fn env_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<()> {
-    let pitoml = PiToml::load(Path::new("pi.toml"))?;
-    let project_name = pitoml.project.name.clone();
-    let env_file = Path::new(&pitoml.env.file).to_path_buf();
+    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let project_name = rpitoml.project.name.clone();
+    let env_file = Path::new(&rpitoml.env.file).to_path_buf();
 
     let raw = std::fs::read_to_string(&env_file)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", env_file.display()))?;
@@ -125,8 +125,8 @@ pub async fn gc(connect: ConnectOpts) -> anyhow::Result<()> {
 }
 
 pub async fn env_ls(connect: ConnectOpts) -> anyhow::Result<()> {
-    let pitoml = PiToml::load(Path::new("pi.toml"))?;
-    let project_name = pitoml.project.name.clone();
+    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let project_name = rpitoml.project.name.clone();
 
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
