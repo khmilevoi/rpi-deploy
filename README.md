@@ -320,7 +320,7 @@ Wants=network-online.target
 [Service]
 User=pi-agent
 Group=pi-agent
-ExecStart=/usr/local/bin/pi agent run --config /etc/pi/agent.toml
+ExecStart=/usr/local/bin/rpi agent run --config /etc/pi/agent.toml
 RuntimeDirectory=pi
 RuntimeDirectoryMode=0750
 Restart=on-failure
