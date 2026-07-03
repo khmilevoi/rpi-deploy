@@ -188,12 +188,43 @@ async fn ensure_dir(sys: &dyn Sys, path: &str, owner_group: Option<&str>, dry: b
 /// install to rpi-agent. Never written to after migration.
 const OLD_UNIT_PATH: &str = "/etc/systemd/system/pi-agent.service";
 
-/// Convert an existing `pi-agent` install to `rpi-agent` in place: rename the
-/// Linux group and user login (uid/gid unchanged, so file ownership by id is
-/// preserved without any chown), move the three owned directories to their
-/// new names, and back up + remove the old unit file. No-op when `rpi-agent`
-/// already exists (fresh install or already migrated) or `pi-agent` does not
-/// (fresh install, nothing to migrate).
+/// The pi-agent owned path prefixes, paired with their rpi-agent names. Used
+/// both to move the directories and to rewrite the absolute paths baked into
+/// the config/unit files that ride along inside them.
+const OWNED_PATH_RENAMES: [(&str, &str); 4] = [
+    ("/var/lib/pi", "/var/lib/rpi"),
+    ("/var/log/pi", "/var/log/rpi"),
+    ("/etc/pi", "/etc/rpi"),
+    ("/run/pi", "/run/rpi"),
+];
+
+/// Rewrite the old pi-agent path prefixes to their rpi-agent names inside one
+/// migrated config/unit file, in place. No-op when the file is absent or has no
+/// old paths left. The four prefixes are disjoint and none is a substring of
+/// another's replacement, so a repeated run is idempotent.
+fn rewrite_owned_paths(sys: &dyn Sys, path: &Path, rep: &mut SetupReport) {
+    let Some(text) = sys.read(path) else { return };
+    let mut rewritten = text.clone();
+    for (old, new) in OWNED_PATH_RENAMES {
+        rewritten = rewritten.replace(old, new);
+    }
+    if rewritten == text {
+        return;
+    }
+    match sys.write(path, &rewritten) {
+        Ok(_) => rep.repaired.push(format!("rewrote paths in {}", path.display())),
+        Err(e) => rep.errors.push(format!("rewrite {}: {e}", path.display())),
+    }
+}
+
+/// Convert an existing `pi-agent` install to `rpi-agent` in place: stop the old
+/// unit and its lingering user session, rename the Linux group and user login
+/// (uid/gid unchanged, so file ownership by id is preserved without any chown),
+/// move the three owned directories to their new names, rewrite the old
+/// absolute paths baked into the moved config/unit files (agent.toml's
+/// data_dir/socket, the cloudflared unit + config), and back up the old unit
+/// file. No-op when `rpi-agent` already exists (fresh install or already
+/// migrated) or `pi-agent` does not (fresh install, nothing to migrate).
 async fn migrate_pi_agent_if_present(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
     if user_exists(sys, "rpi-agent").await {
         return;
@@ -208,6 +239,12 @@ async fn migrate_pi_agent_if_present(sys: &dyn Sys, dry: bool, rep: &mut SetupRe
 
     // Stop the old unit before touching the identity/paths it depends on.
     let _ = sys.run("systemctl", &["disable", "--now", "pi-agent"]).await;
+    // A lingering `systemd --user` manager (e.g. cloudflared) keeps the login
+    // name in use, which makes `usermod -l` fail with "user is currently used".
+    // Drop linger and terminate the user's session before renaming; harmless
+    // (and ignored) when the user has no session at all.
+    let _ = sys.run("loginctl", &["disable-linger", "pi-agent"]).await;
+    let _ = sys.run("loginctl", &["terminate-user", "pi-agent"]).await;
 
     // Rename group then user login. uid/gid are unchanged, so every file
     // already owned by this id is "renamed" for free — no chown needed.
@@ -230,6 +267,13 @@ async fn migrate_pi_agent_if_present(sys: &dyn Sys, dry: bool, rep: &mut SetupRe
                 rep.errors.push(format!("mv {old} {new} failed: {e}"));
             }
         }
+    }
+
+    // The moved files still hold the old absolute paths. Without this the agent
+    // would bind socket /run/pi/agent.sock (whose RuntimeDirectory no longer
+    // exists) and read data_dir /var/lib/pi (now moved) — a crash loop.
+    for file in [AGENT_TOML_PATH, CLOUDFLARED_UNIT_PATH, CLOUDFLARED_CONFIG_PATH] {
+        rewrite_owned_paths(sys, Path::new(file), rep);
     }
 
     if sys.exists(Path::new(OLD_UNIT_PATH)) {
@@ -360,6 +404,9 @@ pub async fn restart_agent_if_active(sys: &dyn Sys) -> Option<String> {
 }
 
 const CLOUDFLARED_UNIT_PATH: &str = "/var/lib/rpi/.config/systemd/user/cloudflared.service";
+
+/// Canonical cloudflared config the setup flow instructs operators to write.
+const CLOUDFLARED_CONFIG_PATH: &str = "/var/lib/rpi/cloudflared/config.yml";
 
 const CLOUDFLARED_UNIT: &str = "\
 [Unit]
@@ -609,6 +656,79 @@ mod tests {
         );
         assert!(rep.repaired.iter().any(|r| r.contains("migrated: pi-agent -> rpi-agent")));
         assert!(rep.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_quiesces_user_session_before_renaming_login() {
+        // usermod -l fails if the login is still in use (e.g. a lingering
+        // cloudflared user manager), so the session must be dropped first.
+        let sys = legacy_sys();
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        let calls = sys.calls();
+        let disable = calls.iter().position(|c| c == "loginctl disable-linger pi-agent");
+        let terminate = calls.iter().position(|c| c == "loginctl terminate-user pi-agent");
+        let usermod = calls.iter().position(|c| c == "usermod -l rpi-agent pi-agent");
+        assert!(disable.is_some(), "linger dropped: {calls:?}");
+        assert!(terminate.is_some(), "user session terminated: {calls:?}");
+        assert!(disable.unwrap() < usermod.unwrap(), "linger dropped before rename");
+        assert!(terminate.unwrap() < usermod.unwrap(), "session ended before rename");
+    }
+
+    #[tokio::test]
+    async fn migration_rewrites_stale_paths_in_agent_toml_preserving_custom_values() {
+        let mut sys = legacy_sys();
+        // A real v0.5 agent.toml carries the old absolute paths plus any operator
+        // customizations; only the paths must change.
+        sys.files.insert(
+            AGENT_TOML_PATH.into(),
+            "data_dir = \"/var/lib/pi\"\nsocket = \"/run/pi/agent.sock\"\nport_min = 9000\n".into(),
+        );
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        let writes = sys.writes.lock().unwrap();
+        let (_, content) = writes
+            .iter()
+            .find(|(p, _)| p == AGENT_TOML_PATH)
+            .expect("agent.toml rewritten");
+        assert!(content.contains("data_dir = \"/var/lib/rpi\""), "data_dir moved: {content}");
+        assert!(content.contains("socket = \"/run/rpi/agent.sock\""), "socket moved: {content}");
+        assert!(!content.contains("/var/lib/pi\""), "no stale data_dir left: {content}");
+        assert!(!content.contains("/run/pi/"), "no stale socket left: {content}");
+        assert!(content.contains("port_min = 9000"), "custom values preserved: {content}");
+    }
+
+    #[tokio::test]
+    async fn migration_rewrites_cloudflared_unit_and_config_paths() {
+        let mut sys = legacy_sys();
+        sys.paths.insert(CLOUDFLARED_UNIT_PATH.into());
+        sys.files.insert(
+            CLOUDFLARED_UNIT_PATH.into(),
+            "[Service]\nExecStart=/usr/local/bin/cloudflared tunnel --config /var/lib/pi/cloudflared/config.yml run\n".into(),
+        );
+        sys.files.insert(
+            CLOUDFLARED_CONFIG_PATH.into(),
+            "credentials-file: /var/lib/pi/cloudflared/home.json\n".into(),
+        );
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        let writes = sys.writes.lock().unwrap();
+        let unit = &writes.iter().find(|(p, _)| p == CLOUDFLARED_UNIT_PATH).expect("unit rewritten").1;
+        let cfg = &writes.iter().find(|(p, _)| p == CLOUDFLARED_CONFIG_PATH).expect("config rewritten").1;
+        assert!(unit.contains("/var/lib/rpi/cloudflared/config.yml"), "unit path moved: {unit}");
+        assert!(!unit.contains("/var/lib/pi/"), "no stale unit path: {unit}");
+        assert!(cfg.contains("/var/lib/rpi/cloudflared/home.json"), "creds path moved: {cfg}");
+    }
+
+    #[test]
+    fn rewrite_owned_paths_is_idempotent_and_skips_clean_files() {
+        // Already-migrated content must not be written again.
+        let mut sys = FakeSys::default();
+        sys.files.insert("/etc/rpi/agent.toml".into(), "data_dir = \"/var/lib/rpi\"\n".into());
+        let mut rep = SetupReport::default();
+        rewrite_owned_paths(&sys, Path::new("/etc/rpi/agent.toml"), &mut rep);
+        assert!(sys.writes.lock().unwrap().is_empty(), "clean file left untouched");
+        assert!(rep.repaired.is_empty());
     }
 
     #[tokio::test]
