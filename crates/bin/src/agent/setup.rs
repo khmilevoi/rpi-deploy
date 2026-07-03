@@ -1,5 +1,6 @@
 use std::path::Path;
 use async_trait::async_trait;
+use super::self_install::{self, SelfInstallAction};
 
 /// All OS effects setup needs, behind a trait so logic is testable off-Linux.
 #[async_trait]
@@ -209,7 +210,9 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
     } else {
         match sys.run("usermod", &["-aG", "docker", "pi-agent"]).await {
             Ok(_) => rep.created.push("pi-agent in docker group".into()),
-            Err(e) => rep.errors.push(format!("usermod pi-agent docker failed: {e}")),
+            Err(e) => rep.errors.push(format!(
+                "usermod pi-agent docker failed: {e}. Install Docker first: curl -fsSL https://get.docker.com | sh"
+            )),
         }
     }
 
@@ -265,13 +268,27 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
 
     // 10. dependency checks (warn, never fail)
     if sys.run("docker", &["version", "--format", "{{.Server.Version}}"]).await.is_err() {
-        rep.warnings.push("docker not available — install Docker Engine and add pi-agent to the docker group".into());
+        rep.warnings.push(
+            "docker not available — install Docker first: curl -fsSL https://get.docker.com | sh".into(),
+        );
     }
     if sys.run("docker", &["compose", "version"]).await.is_err() {
         rep.warnings.push("docker compose plugin missing — install Docker Compose v2".into());
     }
 
     rep
+}
+
+/// Restart pi-agent when it is active, so a replaced binary takes effect.
+/// Returns a printable note; None when the unit is not active.
+pub async fn restart_agent_if_active(sys: &dyn Sys) -> Option<String> {
+    if sys.run("systemctl", &["is-active", "--quiet", "pi-agent"]).await.is_err() {
+        return None;
+    }
+    match sys.run("systemctl", &["restart", "pi-agent"]).await {
+        Ok(_) => Some("restarted: pi-agent (new binary)".into()),
+        Err(e) => Some(format!("warning: systemctl restart pi-agent failed: {e}")),
+    }
 }
 
 const CLOUDFLARED_UNIT_PATH: &str = "/var/lib/pi/.config/systemd/user/cloudflared.service";
@@ -325,8 +342,10 @@ async fn run_with(sys: &dyn Sys, opts: &SetupOpts) -> anyhow::Result<SetupReport
     Ok(report)
 }
 
-/// CLI entrypoint: resolve the login user (--user or $SUDO_USER), run setup,
-/// print the report. Must run as root (under sudo) on the Pi.
+/// CLI entrypoint: resolve the login user (--user or $SUDO_USER), install the
+/// running binary to /usr/local/bin/rpi (npm installs live under node_modules,
+/// but the systemd unit expects the canonical path), run setup, and restart
+/// an active agent when the binary changed. Must run as root (under sudo).
 pub async fn run_cmd(user: Option<String>, with_cloudflared: bool, dry_run: bool) -> anyhow::Result<()> {
     let login_user = user
         .or_else(|| std::env::var("SUDO_USER").ok())
@@ -335,7 +354,39 @@ pub async fn run_cmd(user: Option<String>, with_cloudflared: bool, dry_run: bool
             "cannot determine the SSH login user; run via `sudo rpi agent setup` or pass --user <name>"
         ))?;
     let opts = SetupOpts { login_user, with_cloudflared, dry_run };
-    run_with(&HostSys, &opts).await.map(|_| ())
+
+    let current = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
+    let action = self_install::ensure_installed(
+        &current,
+        Path::new(self_install::AGENT_BIN_PATH),
+        dry_run,
+    )
+    .map_err(|e| anyhow::anyhow!("self-install {}: {e}", self_install::AGENT_BIN_PATH))?;
+    match &action {
+        SelfInstallAction::AlreadyCanonical => {
+            println!("ok (already present): {} (running from it)", self_install::AGENT_BIN_PATH);
+        }
+        SelfInstallAction::UpToDate => {
+            println!("ok (already present): {} (binary up to date)", self_install::AGENT_BIN_PATH);
+        }
+        SelfInstallAction::Installed => {
+            println!(
+                "{}: {} (from {})",
+                if dry_run { "would install" } else { "installed" },
+                self_install::AGENT_BIN_PATH,
+                current.display(),
+            );
+        }
+    }
+
+    run_with(&HostSys, &opts).await?;
+
+    if matches!(action, SelfInstallAction::Installed) && !dry_run {
+        if let Some(note) = restart_agent_if_active(&HostSys).await {
+            println!("{note}");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -537,7 +588,8 @@ mod tests {
         sys.err.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]));
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let report = setup(&sys, &opts).await;
-        assert!(report.warnings.iter().any(|w| w.contains("docker")));
+        let w = report.warnings.iter().find(|w| w.contains("docker")).expect("docker warning present");
+        assert!(w.contains("curl -fsSL https://get.docker.com | sh"), "warning includes the install command: {w}");
     }
 
     #[tokio::test]
@@ -594,5 +646,33 @@ mod tests {
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let res = run_with(&sys, &opts).await;
         assert!(res.is_err(), "non-zero exit when privileged step fails");
+    }
+
+    #[tokio::test]
+    async fn restart_runs_when_unit_active() {
+        let mut sys = FakeSys::default();
+        sys.ok.insert(FakeSys::key("systemctl", &["is-active", "--quiet", "pi-agent"]), "".into());
+        sys.ok.insert(FakeSys::key("systemctl", &["restart", "pi-agent"]), "".into());
+        let note = restart_agent_if_active(&sys).await;
+        assert!(note.unwrap().contains("restarted"), "reports the restart");
+        assert!(sys.calls().iter().any(|c| c == "systemctl restart pi-agent"));
+    }
+
+    #[tokio::test]
+    async fn restart_skipped_when_unit_inactive() {
+        let mut sys = FakeSys::default();
+        sys.err.insert(FakeSys::key("systemctl", &["is-active", "--quiet", "pi-agent"]));
+        let note = restart_agent_if_active(&sys).await;
+        assert!(note.is_none());
+        assert!(!sys.calls().iter().any(|c| c.contains("systemctl restart")), "no restart attempted");
+    }
+
+    #[tokio::test]
+    async fn restart_failure_returns_warning() {
+        let mut sys = FakeSys::default();
+        sys.ok.insert(FakeSys::key("systemctl", &["is-active", "--quiet", "pi-agent"]), "".into());
+        sys.err.insert(FakeSys::key("systemctl", &["restart", "pi-agent"]));
+        let note = restart_agent_if_active(&sys).await;
+        assert!(note.unwrap().starts_with("warning:"));
     }
 }
