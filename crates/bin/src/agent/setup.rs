@@ -184,11 +184,79 @@ async fn ensure_dir(sys: &dyn Sys, path: &str, owner_group: Option<&str>, dry: b
     }
 }
 
+/// Old (pre-v0.6.x) unit path — used only to detect and migrate a pi-agent
+/// install to rpi-agent. Never written to after migration.
+const OLD_UNIT_PATH: &str = "/etc/systemd/system/pi-agent.service";
+
+/// Convert an existing `pi-agent` install to `rpi-agent` in place: rename the
+/// Linux group and user login (uid/gid unchanged, so file ownership by id is
+/// preserved without any chown), move the three owned directories to their
+/// new names, and back up + remove the old unit file. No-op when `rpi-agent`
+/// already exists (fresh install or already migrated) or `pi-agent` does not
+/// (fresh install, nothing to migrate).
+async fn migrate_pi_agent_if_present(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
+    if user_exists(sys, "rpi-agent").await {
+        return;
+    }
+    if !user_exists(sys, "pi-agent").await {
+        return;
+    }
+    if dry {
+        rep.repaired.push("migrate: pi-agent -> rpi-agent (dry run)".into());
+        return;
+    }
+
+    // Stop the old unit before touching the identity/paths it depends on.
+    let _ = sys.run("systemctl", &["disable", "--now", "pi-agent"]).await;
+
+    // Rename group then user login. uid/gid are unchanged, so every file
+    // already owned by this id is "renamed" for free — no chown needed.
+    if let Err(e) = sys.run("groupmod", &["-n", "rpi-agent", "pi-agent"]).await {
+        rep.errors.push(format!("groupmod pi-agent -> rpi-agent failed: {e}"));
+        return;
+    }
+    if let Err(e) = sys.run("usermod", &["-l", "rpi-agent", "pi-agent"]).await {
+        rep.errors.push(format!("usermod -l rpi-agent pi-agent failed: {e}"));
+        return;
+    }
+
+    for (old, new) in [
+        ("/var/lib/pi", "/var/lib/rpi"),
+        ("/etc/pi", "/etc/rpi"),
+        ("/var/log/pi", "/var/log/rpi"),
+    ] {
+        if sys.exists(Path::new(old)) && !sys.exists(Path::new(new)) {
+            if let Err(e) = sys.run("mv", &[old, new]).await {
+                rep.errors.push(format!("mv {old} {new} failed: {e}"));
+            }
+        }
+    }
+
+    if sys.exists(Path::new(OLD_UNIT_PATH)) {
+        let _ = sys
+            .run("mv", &[OLD_UNIT_PATH, &format!("{OLD_UNIT_PATH}.bak")])
+            .await;
+    }
+
+    if sys.exists(Path::new(CLOUDFLARED_UNIT_PATH)) {
+        // cloudflared linger state is keyed by login name; re-enable it
+        // under the new one now that /var/lib/pi (with its config) moved.
+        let _ = sys.run("loginctl", &["enable-linger", "rpi-agent"]).await;
+    }
+
+    rep.repaired.push(
+        "migrated: pi-agent -> rpi-agent (user, group, /var/lib, /etc, /var/log)".into(),
+    );
+}
+
 /// Idempotent agent bootstrap (spec §4). Adopt & preserve; never touches
 /// secret.key/state.db. Returns a report; does not restart the agent.
 pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
     let mut rep = SetupReport::default();
     let dry = opts.dry_run;
+
+    // 0. migrate an existing pi-agent install in place, if present.
+    migrate_pi_agent_if_present(sys, dry, &mut rep).await;
 
     // 1. service user
     if user_exists(sys, "rpi-agent").await {
@@ -495,11 +563,135 @@ mod tests {
         let mut sys = FakeSys::default();
         // user absent, no dirs/files exist; group lookups succeed but show no membership.
         sys.err.insert(FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.err.insert(FakeSys::key("id", &["-u", "pi-agent"])); // no legacy install to migrate
         sys.ok.insert(FakeSys::key("id", &["-nG", "rpi-agent"]), "rpi-agent".into());
         sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo".into());
         sys.ok.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]), "27.0".into());
         sys.ok.insert(FakeSys::key("docker", &["compose", "version"]), "v2".into());
         sys
+    }
+
+    fn legacy_sys() -> FakeSys {
+        let mut sys = FakeSys::default();
+        sys.err.insert(FakeSys::key("id", &["-u", "rpi-agent"])); // not migrated yet
+        sys.ok.insert(FakeSys::key("id", &["-u", "pi-agent"]), "999".into()); // legacy install present
+        sys.ok.insert(FakeSys::key("systemctl", &["disable", "--now", "pi-agent"]), "".into());
+        sys.ok.insert(FakeSys::key("groupmod", &["-n", "rpi-agent", "pi-agent"]), "".into());
+        sys.ok.insert(FakeSys::key("usermod", &["-l", "rpi-agent", "pi-agent"]), "".into());
+        for p in ["/var/lib/pi", "/etc/pi", "/var/log/pi", OLD_UNIT_PATH] {
+            sys.paths.insert(p.into());
+        }
+        sys.ok.insert(FakeSys::key("mv", &["/var/lib/pi", "/var/lib/rpi"]), "".into());
+        sys.ok.insert(FakeSys::key("mv", &["/etc/pi", "/etc/rpi"]), "".into());
+        sys.ok.insert(FakeSys::key("mv", &["/var/log/pi", "/var/log/rpi"]), "".into());
+        sys.ok.insert(
+            FakeSys::key("mv", &[OLD_UNIT_PATH, &format!("{OLD_UNIT_PATH}.bak")]),
+            "".into(),
+        );
+        sys
+    }
+
+    #[tokio::test]
+    async fn migrates_existing_pi_agent_install_in_place() {
+        let sys = legacy_sys();
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        let calls = sys.calls();
+        assert!(calls.iter().any(|c| c == "systemctl disable --now pi-agent"), "stops the old unit");
+        assert!(calls.iter().any(|c| c == "groupmod -n rpi-agent pi-agent"));
+        assert!(calls.iter().any(|c| c == "usermod -l rpi-agent pi-agent"));
+        assert!(calls.iter().any(|c| c == "mv /var/lib/pi /var/lib/rpi"));
+        assert!(calls.iter().any(|c| c == "mv /etc/pi /etc/rpi"));
+        assert!(calls.iter().any(|c| c == "mv /var/log/pi /var/log/rpi"));
+        assert!(
+            calls.iter().any(|c| *c == format!("mv {OLD_UNIT_PATH} {OLD_UNIT_PATH}.bak")),
+            "old unit backed up, not just deleted"
+        );
+        assert!(rep.repaired.iter().any(|r| r.contains("migrated: pi-agent -> rpi-agent")));
+        assert!(rep.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_skips_directories_that_do_not_exist() {
+        let mut sys = legacy_sys();
+        sys.paths.remove("/etc/pi"); // e.g. never had /etc/pi for some reason
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(!sys.calls().iter().any(|c| c.starts_with("mv /etc/pi")), "nothing to move");
+    }
+
+    #[tokio::test]
+    async fn migration_reenables_linger_when_cloudflared_was_configured() {
+        let mut sys = legacy_sys();
+        sys.paths.insert(CLOUDFLARED_UNIT_PATH.into());
+        sys.ok.insert(FakeSys::key("loginctl", &["enable-linger", "rpi-agent"]), "".into());
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(sys.calls().iter().any(|c| c == "loginctl enable-linger rpi-agent"));
+    }
+
+    #[tokio::test]
+    async fn migration_is_noop_when_already_rpi_agent() {
+        let mut sys = fresh_sys();
+        sys.err.remove(&FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.ok.insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(sys.calls().len() == 1, "only the rpi-agent probe ran: {:?}", sys.calls());
+        assert!(rep.repaired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_is_noop_when_no_legacy_install() {
+        let sys = fresh_sys(); // both rpi-agent and pi-agent absent
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(sys.calls().iter().all(|c| c.starts_with("id ")), "only the two probes ran: {:?}", sys.calls());
+        assert!(rep.repaired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_dry_run_reports_but_makes_no_changes() {
+        let sys = legacy_sys();
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, true, &mut rep).await;
+        assert!(sys.calls().iter().all(|c| c.starts_with("id ")), "only the two probes ran: {:?}", sys.calls());
+        assert!(rep.repaired.iter().any(|r| r.contains("dry run")));
+    }
+
+    #[tokio::test]
+    async fn migration_failure_on_groupmod_stops_before_touching_directories() {
+        let mut sys = legacy_sys();
+        sys.ok.remove(&FakeSys::key("groupmod", &["-n", "rpi-agent", "pi-agent"]));
+        sys.err.insert(FakeSys::key("groupmod", &["-n", "rpi-agent", "pi-agent"]));
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(!sys.calls().iter().any(|c| c.starts_with("mv ")), "no directories touched after groupmod failure");
+        assert!(rep.errors.iter().any(|e| e.contains("groupmod")));
+    }
+
+    #[tokio::test]
+    async fn setup_migrates_legacy_install_before_creating_a_fresh_user() {
+        let mut sys = legacy_sys();
+        // downstream steps after migration also need to probe cleanly; fresh_sys()-style
+        // group/docker mocks so setup() doesn't error out past the migration step.
+        sys.ok.insert(FakeSys::key("id", &["-nG", "rpi-agent"]), "rpi-agent".into());
+        sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo".into());
+        sys.ok.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]), "27.0".into());
+        sys.ok.insert(FakeSys::key("docker", &["compose", "version"]), "v2".into());
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let _ = setup(&sys, &opts).await;
+        let calls = sys.calls();
+        let migrate_idx = calls.iter().position(|c| c == "groupmod -n rpi-agent pi-agent");
+        let useradd_idx = calls.iter().position(|c| c.starts_with("useradd --system"));
+        assert!(migrate_idx.is_some(), "migration ran");
+        // FakeSys does not simulate id -u rpi-agent flipping to Ok after usermod -l, so
+        // setup()'s own idempotency check still sees rpi-agent as absent and creates it
+        // too — harmless on a fake double, and on a real system `id -u rpi-agent` would
+        // succeed post-rename so this second create step would be skipped for real.
+        if let Some(u) = useradd_idx {
+            assert!(migrate_idx.unwrap() < u, "migration runs before the fresh-install branch");
+        }
     }
 
     #[tokio::test]
