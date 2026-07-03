@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // rpi-deploy postinstall: builds the rpi binary from the bundled Rust sources.
-// Never runs apt/brew/winget and never checks Docker (that is `rpi agent
-// setup`'s job). May auto-install rustup when cargo is missing.
+// Only runs when installed as a package (under node_modules); a bare
+// `npm install` in a source checkout is a no-op. Never runs apt/brew/winget and
+// never checks Docker (that is `rpi agent setup`'s job). May auto-install
+// rustup when cargo is missing.
 'use strict';
 
 const { spawnSync } = require('node:child_process');
@@ -15,6 +17,14 @@ const cargoBinDir = path.join(os.homedir(), '.cargo', 'bin');
 
 function log(msg) {
   console.log(`rpi-deploy: ${msg}`);
+}
+
+// True only when npm is installing this package into a node_modules tree
+// (global install or as a dependency). In a source checkout the script lives at
+// the repo root instead, where `npm install`/`npm ci` must NOT build — and must
+// never delete the developer's target/ directory.
+function isPackageInstall() {
+  return /[\\/]node_modules[\\/]/.test(pkgDir);
 }
 
 function fail(msg) {
@@ -76,6 +86,11 @@ function checkCToolchain() {
 }
 
 async function main() {
+  if (!isPackageInstall()) {
+    log('source checkout detected (not installed under node_modules); skipping build and leaving target/ untouched. Build directly with `cargo build --release`.');
+    return;
+  }
+
   if (!hasCargo()) await installRustup();
   checkCToolchain();
 
