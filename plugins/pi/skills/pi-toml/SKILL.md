@@ -7,7 +7,7 @@ description: Use when creating, editing, validating, reviewing, or troubleshooti
 
 ## Overview
 
-Use this skill for `pi.toml`, the project-level deployment config read by `pi deploy`, `pi deploy --cancel`, `pi env send`, and `pi env ls`. Keep config advice aligned with `crates/bin/src/cli/pitoml.rs` and `README.md`.
+Use this skill for `pi.toml`, the project-level deployment config read by `rpi deploy`, `rpi deploy --cancel`, `rpi env send`, and `rpi env ls`. Keep config advice aligned with `crates/bin/src/cli/pitoml.rs` and `README.md`.
 
 ## Minimal Shape
 
@@ -64,15 +64,15 @@ port = 3000
 | `schema` | yes | none | Must be `1`. |
 | `project.name` | yes | none | Compose project name and agent state key. |
 | `source.repo` | yes | none | Git URL fetched by the Pi. |
-| `source.branch` | no | `"main"` | Default ref for `pi deploy`. |
+| `source.branch` | no | `"main"` | Default ref for `rpi deploy`. |
 | `build.compose` | no | `"docker-compose.yml"` | Compose file inside the project repo. |
-| `ingress.service` | yes | none | Compose service managed by pi. |
+| `ingress.service` | yes | none | Compose service managed by rpi. |
 | `ingress.port` | yes | none | Container port, not host port. |
 | `ingress.hostname` | no | none | Public hostname for Cloudflare/manual ingress. |
 | `healthcheck.path` | no | none | HTTP path; omitted means TCP probe. |
 | `healthcheck.expect` | no | none | `"2xx"`, `"3xx"`, or exact 3-digit code. |
 | `healthcheck.timeout` | no | `"60s"` | Duration string or bare seconds. |
-| `env.file` | no | `".env"` | Local file read by `pi env send`. |
+| `env.file` | no | `".env"` | Local file read by `rpi env send`. |
 
 Optional per-project stage timeouts:
 
@@ -117,7 +117,7 @@ services:
       - "3000"
 ```
 
-Avoid fixed host ports for the pi-managed service:
+Avoid fixed host ports for the rpi-managed service:
 
 ```yaml
 services:
@@ -126,7 +126,7 @@ services:
       - "127.0.0.1:3000:3000"
 ```
 
-That can conflict with pi's stable host port allocator.
+That can conflict with rpi's stable host port allocator.
 
 For mutable runtime files, mount directories instead of individual files that may not exist in a fresh clone:
 

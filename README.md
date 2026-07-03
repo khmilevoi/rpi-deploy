@@ -1,37 +1,40 @@
-# pi
+# rpi-deploy
 
-`pi` is a deployment tool for Docker Compose projects on Raspberry Pi. The Pi
-runs an agent, while the CLI runs on a developer machine or in CI. The CLI
-connects to the agent through an SSH tunnel; the agent clones the Git
-repository, builds the Compose stack, and starts the containers.
+`rpi` (package `rpi-deploy`) is a deployment tool for Docker Compose projects
+on Raspberry Pi. The Pi runs an agent, while the CLI runs on a developer
+machine or in CI. The CLI connects to the agent through an SSH tunnel; the
+agent clones the Git repository, builds the Compose stack, and starts the
+containers.
 
-Status: v0.5 (Install & UX) — deploy/env/ingress/CI (v0.1-v0.3), `pi logs`,
-`pi stats`, `pi start|stop|restart`, `pi rm`, `pi status`, `pi doctor`,
-`pi agent status|logs`, rolling agent logs (v0.4), plus one-command setup:
-`sudo pi agent setup` on the Pi and `pi setup` / `pi init` on the developer
-machine. `pi agent uninstall` removes the install. Manual install from source
-remains as a fallback (see "Build And Install The Binary" below).
+Status: v0.6 (npm install) — everything from v0.1–v0.5 (deploy/env/ingress/CI,
+`rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`, `rpi status`,
+`rpi doctor`, `rpi agent status|logs`, one-command setup) plus
+`npm install -g rpi-deploy` for both roles: the CLI command is now `rpi`, the
+package builds it from source on install, and `sudo rpi agent setup` installs
+the running binary to `/usr/local/bin/rpi` and restarts the agent on updates.
+Manual install from source remains as a fallback (see "Build And Install The
+Binary" below).
 
 Supported features:
 
-- `pi deploy`;
-- `pi deploy --cancel`;
-- `pi ls`;
-- `pi env send`;
-- `pi env ls`;
-- `pi gc`;
-- `pi logs <project> [-f]`;
-- `pi stats [project]`;
-- `pi start|stop|restart <project>`;
-- `pi rm <project> [--volumes]`;
-- `pi status`;
-- `pi doctor`;
-- `pi agent status`;
-- `pi agent logs [-f] [--since 2h]`;
-- `pi setup`;
-- `pi init`;
-- `pi agent setup`;
-- `pi agent uninstall`;
+- `rpi deploy`;
+- `rpi deploy --cancel`;
+- `rpi ls`;
+- `rpi env send`;
+- `rpi env ls`;
+- `rpi gc`;
+- `rpi logs <project> [-f]`;
+- `rpi stats [project]`;
+- `rpi start|stop|restart <project>`;
+- `rpi rm <project> [--volumes]`;
+- `rpi status`;
+- `rpi doctor`;
+- `rpi agent status`;
+- `rpi agent logs [-f] [--since 2h]`;
+- `rpi setup`;
+- `rpi init`;
+- `rpi agent setup`;
+- `rpi agent uninstall`;
 - stable host port allocation;
 - Docker Compose overrides;
 - health checks;
@@ -41,17 +44,17 @@ Supported features:
 
 ## Runtime Model
 
-`pi` has two parts:
+`rpi` has two parts:
 
-- `pi agent run` is a daemon on the Raspberry Pi, usually managed by `systemd`.
+- `rpi agent run` is a daemon on the Raspberry Pi, usually managed by `systemd`.
   It stores state in SQLite, selects a stable host port, writes a Compose
   override, runs `docker compose build`, and then runs
   `docker compose up -d --remove-orphans`.
-- `pi deploy`, `pi ls`, `pi env ...`, and `pi gc` are client commands that run
+- `rpi deploy`, `rpi ls`, `rpi env ...`, and `rpi gc` are client commands that run
   on a developer machine or CI runner. They open an SSH tunnel to the agent's
   Unix socket.
 
-Each deployable project must contain a `pi.toml` file. Run `pi deploy` from the
+Each deployable project must contain a `pi.toml` file. Run `rpi deploy` from the
 root of the project you want to deploy, not necessarily from the root of this
 repository.
 
@@ -162,6 +165,49 @@ Test it:
 ssh pi-home true
 ```
 
+## Install Via npm
+
+Client and agent are the same package; the role comes from what you run after
+installing. Node.js >= 18 and npm are required (on Raspberry Pi OS:
+`sudo apt-get install -y nodejs npm`).
+
+Developer machine (Linux/macOS/Windows):
+
+```bash
+npm install -g rpi-deploy
+rpi setup
+rpi init
+```
+
+Raspberry Pi (agent). Docker must already be installed — the install itself
+builds without it, but `rpi agent setup` requires it
+(`curl -fsSL https://get.docker.com | sh`):
+
+```bash
+sudo npm install -g rpi-deploy    # builds from source, ~10 minutes on a Pi
+sudo rpi agent setup              # installs /usr/local/bin/rpi, unit, start
+rpi doctor
+```
+
+Update (both roles):
+
+```bash
+npm install -g rpi-deploy@latest  # with sudo on the Pi
+sudo rpi agent setup              # Pi only: swaps the binary and restarts the agent
+```
+
+Upgrading a v0.5 install: the command was renamed `pi` → `rpi`. `sudo rpi
+agent setup` rewrites the systemd unit (backing up the old one to
+`pi-agent.service.bak`); the old `/usr/local/bin/pi` binary is left behind —
+remove it with `sudo rm /usr/local/bin/pi`.
+
+The npm package ships the Rust sources and builds them on install
+(`cargo build --release --locked`); rustup is installed automatically when
+cargo is missing, and the build directory is removed afterwards to save disk
+space. Building on Windows needs the Visual Studio Build Tools C++ workload.
+Installing with `--ignore-scripts` leaves the CLI unusable (`rpi` will report
+that the binary was not built).
+
 ## Build And Install The Binary
 
 ### Option A: Build On The Pi
@@ -175,13 +221,13 @@ source "$HOME/.cargo/env"
 git clone <this-repository-url> pi
 cd pi
 cargo build --release
-sudo install -m 755 target/release/pi /usr/local/bin/pi
+sudo install -m 755 target/release/rpi /usr/local/bin/rpi
 ```
 
 Check it:
 
 ```bash
-pi --help
+rpi --help
 ```
 
 ### Option B: Cross-Build On The Developer Machine
@@ -191,22 +237,22 @@ Run these commands from the root of this repository.
 ```bash
 cargo install cross
 cross build --release --target aarch64-unknown-linux-gnu
-scp target/aarch64-unknown-linux-gnu/release/pi pi-user@pi-host.local:/tmp/pi
+scp target/aarch64-unknown-linux-gnu/release/rpi pi-user@pi-host.local:/tmp/rpi
 ```
 
 On the Pi:
 
 ```bash
-sudo install -m 755 /tmp/pi /usr/local/bin/pi
-pi --help
+sudo install -m 755 /tmp/rpi /usr/local/bin/rpi
+rpi --help
 ```
 
-## Quick Setup (v0.5)
+## Quick Setup
 
 On the Pi, after the binary is installed (see above):
 
 ```bash
-sudo pi agent setup
+sudo rpi agent setup
 ```
 
 This is idempotent: it creates the `pi-agent` user, directories, the systemd
@@ -217,8 +263,8 @@ preview, `--with-cloudflared` to scaffold cloudflared.
 On the developer machine:
 
 ```bash
-pi setup            # wizard: server profile + SSH key + config.toml
-pi init             # wizard: generate pi.toml in the current project
+rpi setup            # wizard: server profile + SSH key + config.toml
+rpi init             # wizard: generate pi.toml in the current project
 ```
 
 ## Install `pi-agent`
@@ -312,10 +358,10 @@ PowerShell:
 
 ```powershell
 cargo install --path .\crates\bin --locked
-pi --help
+rpi --help
 ```
 
-If `pi` is not found in the current PowerShell session:
+If `rpi` is not found in the current PowerShell session:
 
 ```powershell
 $env:PATH += ";$env:USERPROFILE\.cargo\bin"
@@ -325,10 +371,10 @@ Unix shell:
 
 ```bash
 cargo install --path crates/bin --locked
-pi --help
+rpi --help
 ```
 
-If `pi` is not found:
+If `rpi` is not found:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -371,7 +417,7 @@ key = "~/.ssh/id_ed25519_pi"
 Check it:
 
 ```bash
-pi ls
+rpi ls
 ```
 
 If no projects have been deployed yet, the expected output is:
@@ -383,15 +429,15 @@ no projects deployed yet
 For CI or a one-off command, you can skip the config file:
 
 ```bash
-pi ls --host pi-host.local --user pi-user --key ~/.ssh/id_ed25519_pi
-pi deploy --host pi-host.local --user pi-user --key ~/.ssh/id_ed25519_pi
+rpi ls --host pi-host.local --user pi-user --key ~/.ssh/id_ed25519_pi
+rpi deploy --host pi-host.local --user pi-user --key ~/.ssh/id_ed25519_pi
 ```
 
 Select a specific profile:
 
 ```bash
-pi ls --server home
-PI_SERVER=home pi ls
+rpi ls --server home
+PI_SERVER=home rpi ls
 ```
 
 ## Prepare A Project For Deployment
@@ -462,14 +508,14 @@ Fields:
 - `project.name` is the Compose project name and the state key used by the
   agent.
 - `source.repo` is the Git URL cloned by the Pi.
-- `source.branch` is the default ref used by `pi deploy`.
+- `source.branch` is the default ref used by `rpi deploy`.
 - `build.compose` is the Compose file inside the project repository.
 - `ingress.service` is the service name in Compose.
 - `ingress.port` is the port inside the container.
 - `ingress.hostname` is optional; use it for public ingress.
 - `healthcheck.path` is the HTTP endpoint checked through the allocated host
   port. If the path is not set, the agent uses a TCP probe.
-- `env.file` is the local file read by `pi env send`.
+- `env.file` is the local file read by `rpi env send`.
 
 Optional per-project timeouts:
 
@@ -505,7 +551,7 @@ services:
       - "3000"
 ```
 
-Avoid this for a service managed by `pi`:
+Avoid this for a service managed by `rpi`:
 
 ```yaml
 services:
@@ -564,33 +610,33 @@ file = ".env"
 send secrets from the root of the deployable project:
 
 ```bash
-pi env send
+rpi env send
 ```
 
 The CLI reads the local `.env`, sends the values to the agent, and the agent
-stores an encrypted bundle in `/var/lib/pi/secrets`. During `pi deploy`, the
+stores an encrypted bundle in `/var/lib/pi/secrets`. During `rpi deploy`, the
 agent writes `.env` into the project workdir before running Docker Compose.
 
 Before the first deploy of a project that needs secrets:
 
 ```bash
-pi env send
-pi deploy
+rpi env send
+rpi deploy
 ```
 
 After changing secrets for an already running project:
 
 ```bash
-pi env send --apply
+rpi env send --apply
 ```
 
 `--apply` restarts the Compose stack with the new `.env`. Without `--apply`, the
-values are only saved and will be applied by the next `pi deploy`.
+values are only saved and will be applied by the next `rpi deploy`.
 
 List stored keys without values:
 
 ```bash
-pi env ls
+rpi env ls
 ```
 
 ## Deploy
@@ -598,34 +644,34 @@ pi env ls
 From the root of the deployable project:
 
 ```bash
-pi deploy
+rpi deploy
 ```
 
 Deploy a specific branch, tag, or commit SHA:
 
 ```bash
-pi deploy --ref <git-ref>
+rpi deploy --ref <git-ref>
 ```
 
 List projects:
 
 ```bash
-pi ls
+rpi ls
 ```
 
 Cancel active deployments for the current project:
 
 ```bash
-pi deploy --cancel
+rpi deploy --cancel
 ```
 
 Prune Docker images and build cache on the Pi:
 
 ```bash
-pi gc
+rpi gc
 ```
 
-`pi deploy` reads `./pi.toml`, asks the agent to clone or fetch the configured
+`rpi deploy` reads `./pi.toml`, asks the agent to clone or fetch the configured
 repository, builds the Compose stack, starts containers, runs the health check,
 and prints the final status.
 
@@ -637,7 +683,7 @@ For a private repository, the first fetch may fail and print a public deploy
 key. Add that key to the repository as a read-only deploy key and retry:
 
 ```bash
-pi deploy
+rpi deploy
 ```
 
 For GitHub, this is located at:
@@ -680,7 +726,7 @@ hostname -> http://127.0.0.1:<host-port>
 You can see `host-port` with:
 
 ```bash
-pi ls
+rpi ls
 ```
 
 ### Automatic Ingress
@@ -735,7 +781,7 @@ export PI_AGENT_URL="http://127.0.0.1:7700"
 
 ## Troubleshooting
 
-### `pi ls` Does Not Connect
+### `rpi ls` Does Not Connect
 
 Check SSH from the developer machine:
 
@@ -769,7 +815,7 @@ agent, or configure another SSH key with read access to the repository.
 After fixing access:
 
 ```bash
-pi deploy
+rpi deploy
 ```
 
 ### Docker Build Fails With `/home/pi-agent` Errors
@@ -811,14 +857,14 @@ sudo systemctl restart pi-agent
 Send the env bundle before deploying:
 
 ```bash
-pi env send
-pi deploy
+rpi env send
+rpi deploy
 ```
 
 For an already running project:
 
 ```bash
-pi env send --apply
+rpi env send --apply
 ```
 
 ### Health Check Fails
@@ -853,7 +899,7 @@ On the Pi:
 
 ```bash
 cargo build --release
-sudo install -m 755 target/release/pi /usr/local/bin/pi
+sudo install -m 755 target/release/rpi /usr/local/bin/rpi
 sudo systemctl restart pi-agent
 ```
 
@@ -868,7 +914,7 @@ cargo install --path crates/bin --locked
 1. On the Pi, `systemctl status pi-agent` shows `active (running)`.
 2. From the developer machine, `ssh pi-user@pi-host.local true` works without a
    password.
-3. From the developer machine, `pi ls` responds.
+3. From the developer machine, `rpi ls` responds.
 4. The deployable project contains `pi.toml`.
 5. `[source].repo` is reachable from the Pi.
 6. `[source].branch` is the intended default branch.
@@ -877,8 +923,8 @@ cargo install --path crates/bin --locked
 9. `[ingress].port` matches the container port.
 10. Compose does not define a conflicting fixed host port.
 11. Mutable runtime files are stored in mounted directories.
-12. If the project needs secrets, `pi env send` has been run.
-13. `pi deploy` finishes with `deploy finished: success`.
-14. `pi ls` shows the project, branch, host port, hostname if configured,
+12. If the project needs secrets, `rpi env send` has been run.
+13. `rpi deploy` finishes with `deploy finished: success`.
+14. `rpi ls` shows the project, branch, host port, hostname if configured,
     expose mode (`-` for private, `lan http://<lan-ip>:<port>` for
     `expose = "lan"`), and service status.
