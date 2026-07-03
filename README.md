@@ -54,7 +54,7 @@ Supported features:
   on a developer machine or CI runner. They open an SSH tunnel to the agent's
   Unix socket.
 
-Each deployable project must contain a `pi.toml` file. Run `rpi deploy` from the
+Each deployable project must contain a `rpi.toml` file. Run `rpi deploy` from the
 root of the project you want to deploy, not necessarily from the root of this
 repository.
 
@@ -199,7 +199,10 @@ sudo rpi agent setup              # Pi only: swaps the binary and restarts the a
 Upgrading a v0.5 install: the command was renamed `pi` → `rpi`. `sudo rpi
 agent setup` rewrites the systemd unit (backing up the old one to
 `pi-agent.service.bak`); the old `/usr/local/bin/pi` binary is left behind —
-remove it with `sudo rm /usr/local/bin/pi`.
+remove it with `sudo rm /usr/local/bin/pi`. The project config filename was
+also renamed `pi.toml` → `rpi.toml` — this is a hard cutover with no
+fallback, so rename each existing project's config manually:
+`mv pi.toml rpi.toml`.
 
 The npm package ships the Rust sources and builds them on install
 (`cargo build --release --locked`); rustup is installed automatically when
@@ -264,7 +267,7 @@ On the developer machine:
 
 ```bash
 rpi setup            # wizard: server profile + SSH key + config.toml
-rpi init             # wizard: generate pi.toml in the current project
+rpi init             # wizard: generate rpi.toml in the current project
 ```
 
 ## Install `pi-agent`
@@ -442,7 +445,7 @@ PI_SERVER=home rpi ls
 
 ## Prepare A Project For Deployment
 
-Add `pi.toml` to the root of the project you want to deploy.
+Add `rpi.toml` to the root of the project you want to deploy.
 
 ### Web Service
 
@@ -600,7 +603,7 @@ services:
 
 ## Secrets And `.env`
 
-If `pi.toml` contains:
+If `rpi.toml` contains:
 
 ```toml
 [env]
@@ -671,7 +674,7 @@ Prune Docker images and build cache on the Pi:
 rpi gc
 ```
 
-`rpi deploy` reads `./pi.toml`, asks the agent to clone or fetch the configured
+`rpi deploy` reads `./rpi.toml`, asks the agent to clone or fetch the configured
 repository, builds the Compose stack, starts containers, runs the health check,
 and prints the final status.
 
@@ -915,7 +918,7 @@ cargo install --path crates/bin --locked
 2. From the developer machine, `ssh pi-user@pi-host.local true` works without a
    password.
 3. From the developer machine, `rpi ls` responds.
-4. The deployable project contains `pi.toml`.
+4. The deployable project contains `rpi.toml`.
 5. `[source].repo` is reachable from the Pi.
 6. `[source].branch` is the intended default branch.
 7. `[build].compose` points to an existing Compose file.

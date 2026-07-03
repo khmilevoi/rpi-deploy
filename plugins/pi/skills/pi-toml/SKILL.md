@@ -1,13 +1,13 @@
 ---
 name: pi-toml
-description: Use when creating, editing, validating, reviewing, or troubleshooting pi.toml files for pi deployments, including schema 1 fields, project/source/build/ingress/healthcheck/env/timeouts sections, Docker Compose service and port mapping, public hostname ingress, worker services, and per-project deploy settings.
+description: Use when creating, editing, validating, reviewing, or troubleshooting rpi.toml files for pi deployments, including schema 1 fields, project/source/build/ingress/healthcheck/env/timeouts sections, Docker Compose service and port mapping, public hostname ingress, worker services, and per-project deploy settings.
 ---
 
 # Pi TOML
 
 ## Overview
 
-Use this skill for `pi.toml`, the project-level deployment config read by `rpi deploy`, `rpi deploy --cancel`, `rpi env send`, and `rpi env ls`. Keep config advice aligned with `crates/bin/src/cli/pitoml.rs` and `README.md`.
+Use this skill for `rpi.toml`, the project-level deployment config read by `rpi deploy`, `rpi deploy --cancel`, `rpi env send`, and `rpi env ls`. Keep config advice aligned with `crates/bin/src/cli/rpitoml.rs` and `README.md`.
 
 ## Minimal Shape
 
@@ -141,7 +141,7 @@ services:
 
 ## Validation Notes
 
-`pi.toml` is parsed by `crates/bin/src/cli/pitoml.rs`:
+`rpi.toml` is parsed by `crates/bin/src/cli/rpitoml.rs`:
 
 - Unknown schema versions are rejected.
 - Missing `[build]`, `[healthcheck]`, `[env]`, and `[timeouts]` sections can fall back to defaults.
@@ -151,6 +151,6 @@ services:
 
 When editing the parser or adding fields, update:
 
-- `crates/bin/src/cli/pitoml.rs`
+- `crates/bin/src/cli/rpitoml.rs`
 - `README.md`
 - examples in this skill if the public config surface changes

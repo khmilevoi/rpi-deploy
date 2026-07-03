@@ -1,4 +1,4 @@
 interface:
   display_name: "Pi TOML"
-  short_description: "Author pi.toml deploy configs"
-  default_prompt: "Use $pi-toml to create or review a pi.toml file."
+  short_description: "Author rpi.toml deploy configs"
+  default_prompt: "Use $pi-toml to create or review a rpi.toml file."

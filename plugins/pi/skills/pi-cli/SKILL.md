@@ -22,7 +22,7 @@ Primary references in this repo:
 | --- | --- |
 | Deploy current project | `rpi deploy` |
 | Deploy a ref | `rpi deploy --ref <branch-tag-or-sha>` |
-| Cancel active deploys for current `pi.toml` project | `rpi deploy --cancel` |
+| Cancel active deploys for current `rpi.toml` project | `rpi deploy --cancel` |
 | List projects | `rpi ls` or `rpi ps` |
 | Send env bundle | `rpi env send` |
 | Send env bundle and restart running stack | `rpi env send --apply` |
@@ -87,7 +87,7 @@ Use local mode for CLI/API testing. Use SSH profile mode when validating real Pi
 Before `rpi deploy`:
 
 1. Run from the deployable project's root, not necessarily from this repository root.
-2. Confirm `./pi.toml` exists and has the intended project name, repo, branch, service, and port.
+2. Confirm `./rpi.toml` exists and has the intended project name, repo, branch, service, and port.
 3. Confirm the Pi can read `source.repo`; private repos may require a deploy key on the Pi.
 4. If `[env] file = ".env"` is used and secrets are required, run `rpi env send` before the first deploy.
 5. Prefer Compose `expose` for the managed service; avoid fixed host `ports` that conflict with rpi's allocator.
