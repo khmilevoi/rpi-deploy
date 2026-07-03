@@ -1,14 +1,14 @@
 {
-  "name": "pi-local",
+  "name": "rpi-local",
   "interface": {
-    "displayName": "Pi Local"
+    "displayName": "Rpi Local"
   },
   "plugins": [
     {
-      "name": "pi",
+      "name": "rpi",
       "source": {
         "source": "local",
-        "path": "./plugins/pi"
+        "path": "./plugins/rpi"
       },
       "policy": {
         "installation": "AVAILABLE",

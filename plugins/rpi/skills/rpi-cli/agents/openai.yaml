@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rpi CLI"
+  short_description: "Operate the rpi deploy CLI"
+  default_prompt: "Use $rpi-cli to deploy and inspect a project."

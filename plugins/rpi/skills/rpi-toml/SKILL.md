@@ -1,9 +1,9 @@
 ---
-name: pi-toml
-description: Use when creating, editing, validating, reviewing, or troubleshooting rpi.toml files for pi deployments, including schema 1 fields, project/source/build/ingress/healthcheck/env/timeouts sections, Docker Compose service and port mapping, public hostname ingress, worker services, and per-project deploy settings.
+name: rpi-toml
+description: Use when creating, editing, validating, reviewing, or troubleshooting rpi.toml files for rpi deployments, including schema 1 fields, project/source/build/ingress/healthcheck/env/timeouts sections, Docker Compose service and port mapping, public hostname ingress, worker services, and per-project deploy settings.
 ---
 
-# Pi TOML
+# Rpi TOML
 
 ## Overview
 

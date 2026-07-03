@@ -1,0 +1,20 @@
+{
+  "name": "rpi",
+  "version": "0.1.0",
+  "description": "Portable skills for operating the rpi deploy CLI and authoring rpi.toml project configs.",
+  "author": {
+    "name": "rpi maintainers"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Rpi",
+    "shortDescription": "Operate rpi deploy workflows and project configs.",
+    "longDescription": "Portable skills for working with the rpi Raspberry Pi deployment tool: CLI operations, SSH/server profiles, env bundles, deployment checks, and rpi.toml authoring.",
+    "developerName": "rpi maintainers",
+    "category": "Productivity",
+    "capabilities": [
+      "Write"
+    ],
+    "defaultPrompt": "Use rpi skills to prepare a deploy."
+  }
+}

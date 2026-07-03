@@ -1,9 +1,9 @@
 ---
-name: pi-cli
+name: rpi-cli
 description: Use when operating, installing, testing, or troubleshooting the rpi deploy CLI, including rpi deploy, rpi ls, rpi env send, rpi env ls, rpi gc, rpi agent run, SSH profiles, PI_SERVER, PI_AGENT_URL, local dev agents, and CLI-to-agent connection failures.
 ---
 
-# Pi CLI
+# Rpi CLI
 
 ## Overview
 
