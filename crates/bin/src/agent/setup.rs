@@ -1,5 +1,6 @@
 use std::path::Path;
 use async_trait::async_trait;
+use super::self_install::{self, SelfInstallAction};
 
 /// All OS effects setup needs, behind a trait so logic is testable off-Linux.
 #[async_trait]
@@ -47,36 +48,36 @@ impl Sys for HostSys {
     }
 }
 
-pub const UNIT_PATH: &str = "/etc/systemd/system/pi-agent.service";
-pub const AGENT_TOML_PATH: &str = "/etc/pi/agent.toml";
+pub const UNIT_PATH: &str = "/etc/systemd/system/rpi-agent.service";
+pub const AGENT_TOML_PATH: &str = "/etc/rpi/agent.toml";
 
 /// Canonical systemd unit — byte-for-byte the working install (spec §9).
 pub const UNIT: &str = "\
 [Unit]
-Description=pi deploy agent
+Description=rpi deploy agent
 After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
-User=pi-agent
-Group=pi-agent
-ExecStart=/usr/local/bin/pi agent run --config /etc/pi/agent.toml
-RuntimeDirectory=pi
+User=rpi-agent
+Group=rpi-agent
+ExecStart=/usr/local/bin/rpi agent run --config /etc/rpi/agent.toml
+RuntimeDirectory=rpi
 RuntimeDirectoryMode=0750
 Restart=on-failure
-Environment=HOME=/var/lib/pi
-Environment=XDG_CONFIG_HOME=/var/lib/pi/.config
-Environment=XDG_CACHE_HOME=/var/lib/pi/.cache
-WorkingDirectory=/var/lib/pi
+Environment=HOME=/var/lib/rpi
+Environment=XDG_CONFIG_HOME=/var/lib/rpi/.config
+Environment=XDG_CACHE_HOME=/var/lib/rpi/.cache
+WorkingDirectory=/var/lib/rpi
 
 [Install]
 WantedBy=multi-user.target
 ";
 
-/// Canonical agent.toml — written only when /etc/pi/agent.toml is absent (spec §9).
+/// Canonical agent.toml — written only when /etc/rpi/agent.toml is absent (spec §9).
 pub const AGENT_TOML: &str = "\
-data_dir = \"/var/lib/pi\"
-socket = \"/run/pi/agent.sock\"
+data_dir = \"/var/lib/rpi\"
+socket = \"/run/rpi/agent.sock\"
 port_min = 8000
 port_max = 8999
 build_concurrency = 1
@@ -142,15 +143,15 @@ impl SetupReport {
         for s in &self.skipped { println!("ok (already present): {s}"); }
         for w in &self.warnings { println!("warning: {w}"); }
         for e in &self.errors { println!("error: {e}"); }
-        if self.repaired.iter().any(|r| r.contains("/var/log/pi")) {
-            println!("note: run `sudo systemctl restart pi-agent` to activate file logs");
+        if self.repaired.iter().any(|r| r.contains("/var/log/rpi")) {
+            println!("note: run `sudo systemctl restart rpi-agent` to activate file logs");
         }
     }
 }
 
 async fn ensure_dir(sys: &dyn Sys, path: &str, owner_group: Option<&str>, dry: bool, rep: &mut SetupReport, repair: bool) {
     if sys.exists(Path::new(path)) {
-        // Repair ownership of pre-existing state dir to current pi-agent UID (PR #7 K1):
+        // Repair ownership of pre-existing state dir to current rpi-agent UID (PR #7 K1):
         // after uninstall+reinstall the kept files keep an old numeric UID.
         if let Some(og) = owner_group {
             if !dry {
@@ -183,52 +184,166 @@ async fn ensure_dir(sys: &dyn Sys, path: &str, owner_group: Option<&str>, dry: b
     }
 }
 
+/// Old (pre-v0.6.x) unit path — used only to detect and migrate a pi-agent
+/// install to rpi-agent. Never written to after migration.
+const OLD_UNIT_PATH: &str = "/etc/systemd/system/pi-agent.service";
+
+/// The pi-agent owned path prefixes, paired with their rpi-agent names. Used
+/// both to move the directories and to rewrite the absolute paths baked into
+/// the config/unit files that ride along inside them.
+const OWNED_PATH_RENAMES: [(&str, &str); 4] = [
+    ("/var/lib/pi", "/var/lib/rpi"),
+    ("/var/log/pi", "/var/log/rpi"),
+    ("/etc/pi", "/etc/rpi"),
+    ("/run/pi", "/run/rpi"),
+];
+
+/// Rewrite the old pi-agent path prefixes to their rpi-agent names inside one
+/// migrated config/unit file, in place. No-op when the file is absent or has no
+/// old paths left. The four prefixes are disjoint and none is a substring of
+/// another's replacement, so a repeated run is idempotent.
+fn rewrite_owned_paths(sys: &dyn Sys, path: &Path, rep: &mut SetupReport) {
+    let Some(text) = sys.read(path) else { return };
+    let mut rewritten = text.clone();
+    for (old, new) in OWNED_PATH_RENAMES {
+        rewritten = rewritten.replace(old, new);
+    }
+    if rewritten == text {
+        return;
+    }
+    match sys.write(path, &rewritten) {
+        Ok(_) => rep.repaired.push(format!("rewrote paths in {}", path.display())),
+        Err(e) => rep.errors.push(format!("rewrite {}: {e}", path.display())),
+    }
+}
+
+/// Convert an existing `pi-agent` install to `rpi-agent` in place: stop the old
+/// unit and its lingering user session, rename the Linux group and user login
+/// (uid/gid unchanged, so file ownership by id is preserved without any chown),
+/// move the three owned directories to their new names, rewrite the old
+/// absolute paths baked into the moved config/unit files (agent.toml's
+/// data_dir/socket, the cloudflared unit + config), and back up the old unit
+/// file. No-op when `rpi-agent` already exists (fresh install or already
+/// migrated) or `pi-agent` does not (fresh install, nothing to migrate).
+async fn migrate_pi_agent_if_present(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
+    if user_exists(sys, "rpi-agent").await {
+        return;
+    }
+    if !user_exists(sys, "pi-agent").await {
+        return;
+    }
+    if dry {
+        rep.repaired.push("migrate: pi-agent -> rpi-agent (dry run)".into());
+        return;
+    }
+
+    // Stop the old unit before touching the identity/paths it depends on.
+    let _ = sys.run("systemctl", &["disable", "--now", "pi-agent"]).await;
+    // A lingering `systemd --user` manager (e.g. cloudflared) keeps the login
+    // name in use, which makes `usermod -l` fail with "user is currently used".
+    // Drop linger and terminate the user's session before renaming; harmless
+    // (and ignored) when the user has no session at all.
+    let _ = sys.run("loginctl", &["disable-linger", "pi-agent"]).await;
+    let _ = sys.run("loginctl", &["terminate-user", "pi-agent"]).await;
+
+    // Rename group then user login. uid/gid are unchanged, so every file
+    // already owned by this id is "renamed" for free — no chown needed.
+    if let Err(e) = sys.run("groupmod", &["-n", "rpi-agent", "pi-agent"]).await {
+        rep.errors.push(format!("groupmod pi-agent -> rpi-agent failed: {e}"));
+        return;
+    }
+    if let Err(e) = sys.run("usermod", &["-l", "rpi-agent", "pi-agent"]).await {
+        rep.errors.push(format!("usermod -l rpi-agent pi-agent failed: {e}"));
+        return;
+    }
+
+    for (old, new) in [
+        ("/var/lib/pi", "/var/lib/rpi"),
+        ("/etc/pi", "/etc/rpi"),
+        ("/var/log/pi", "/var/log/rpi"),
+    ] {
+        if sys.exists(Path::new(old)) && !sys.exists(Path::new(new)) {
+            if let Err(e) = sys.run("mv", &[old, new]).await {
+                rep.errors.push(format!("mv {old} {new} failed: {e}"));
+            }
+        }
+    }
+
+    // The moved files still hold the old absolute paths. Without this the agent
+    // would bind socket /run/pi/agent.sock (whose RuntimeDirectory no longer
+    // exists) and read data_dir /var/lib/pi (now moved) — a crash loop.
+    for file in [AGENT_TOML_PATH, CLOUDFLARED_UNIT_PATH, CLOUDFLARED_CONFIG_PATH] {
+        rewrite_owned_paths(sys, Path::new(file), rep);
+    }
+
+    if sys.exists(Path::new(OLD_UNIT_PATH)) {
+        let _ = sys
+            .run("mv", &[OLD_UNIT_PATH, &format!("{OLD_UNIT_PATH}.bak")])
+            .await;
+    }
+
+    if sys.exists(Path::new(CLOUDFLARED_UNIT_PATH)) {
+        // cloudflared linger state is keyed by login name; re-enable it
+        // under the new one now that /var/lib/pi (with its config) moved.
+        let _ = sys.run("loginctl", &["enable-linger", "rpi-agent"]).await;
+    }
+
+    rep.repaired.push(
+        "migrated: pi-agent -> rpi-agent (user, group, /var/lib, /etc, /var/log)".into(),
+    );
+}
+
 /// Idempotent agent bootstrap (spec §4). Adopt & preserve; never touches
 /// secret.key/state.db. Returns a report; does not restart the agent.
 pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
     let mut rep = SetupReport::default();
     let dry = opts.dry_run;
 
+    // 0. migrate an existing pi-agent install in place, if present.
+    migrate_pi_agent_if_present(sys, dry, &mut rep).await;
+
     // 1. service user
-    if user_exists(sys, "pi-agent").await {
-        rep.skipped.push("user pi-agent".into());
+    if user_exists(sys, "rpi-agent").await {
+        rep.skipped.push("user rpi-agent".into());
     } else if dry {
-        rep.created.push("user pi-agent".into());
+        rep.created.push("user rpi-agent".into());
     } else {
-        match sys.run("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]).await {
-            Ok(_) => rep.created.push("user pi-agent".into()),
-            Err(e) => rep.errors.push(format!("useradd pi-agent failed: {e}")),
+        match sys.run("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "rpi-agent"]).await {
+            Ok(_) => rep.created.push("user rpi-agent".into()),
+            Err(e) => rep.errors.push(format!("useradd rpi-agent failed: {e}")),
         }
     }
 
-    // 2. pi-agent in docker group
-    if in_group(sys, "pi-agent", "docker").await {
-        rep.skipped.push("pi-agent in docker group".into());
+    // 2. rpi-agent in docker group
+    if in_group(sys, "rpi-agent", "docker").await {
+        rep.skipped.push("rpi-agent in docker group".into());
     } else if dry {
-        rep.created.push("pi-agent in docker group".into());
+        rep.created.push("rpi-agent in docker group".into());
     } else {
-        match sys.run("usermod", &["-aG", "docker", "pi-agent"]).await {
-            Ok(_) => rep.created.push("pi-agent in docker group".into()),
-            Err(e) => rep.errors.push(format!("usermod pi-agent docker failed: {e}")),
+        match sys.run("usermod", &["-aG", "docker", "rpi-agent"]).await {
+            Ok(_) => rep.created.push("rpi-agent in docker group".into()),
+            Err(e) => rep.errors.push(format!(
+                "usermod rpi-agent docker failed: {e}. Install Docker first: curl -fsSL https://get.docker.com | sh"
+            )),
         }
     }
 
-    // 3. login user in pi-agent group
-    if in_group(sys, &opts.login_user, "pi-agent").await {
-        rep.skipped.push(format!("{} in pi-agent group", opts.login_user));
+    // 3. login user in rpi-agent group
+    if in_group(sys, &opts.login_user, "rpi-agent").await {
+        rep.skipped.push(format!("{} in rpi-agent group", opts.login_user));
     } else if dry {
-        rep.created.push(format!("{} in pi-agent group", opts.login_user));
+        rep.created.push(format!("{} in rpi-agent group", opts.login_user));
     } else {
-        match sys.run("usermod", &["-aG", "pi-agent", &opts.login_user]).await {
-            Ok(_) => rep.created.push(format!("{} in pi-agent group", opts.login_user)),
-            Err(e) => rep.errors.push(format!("usermod {u} pi-agent failed: {e}", u = opts.login_user)),
+        match sys.run("usermod", &["-aG", "rpi-agent", &opts.login_user]).await {
+            Ok(_) => rep.created.push(format!("{} in rpi-agent group", opts.login_user)),
+            Err(e) => rep.errors.push(format!("usermod {u} rpi-agent failed: {e}", u = opts.login_user)),
         }
     }
 
     // 4-6. directories
-    ensure_dir(sys, "/var/lib/pi", Some("pi-agent"), dry, &mut rep, false).await;
-    ensure_dir(sys, "/var/log/pi", Some("pi-agent"), dry, &mut rep, true).await; // repair (§2.5)
-    ensure_dir(sys, "/etc/pi", None, dry, &mut rep, false).await;
+    ensure_dir(sys, "/var/lib/rpi", Some("rpi-agent"), dry, &mut rep, false).await;
+    ensure_dir(sys, "/var/log/rpi", Some("rpi-agent"), dry, &mut rep, true).await; // repair (§2.5)
+    ensure_dir(sys, "/etc/rpi", None, dry, &mut rep, false).await;
 
     // 7. agent.toml (only if absent)
     if sys.exists(Path::new(AGENT_TOML_PATH)) {
@@ -253,8 +368,8 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
         if sys.run("systemctl", &["daemon-reload"]).await.is_err() {
             rep.warnings.push("systemctl daemon-reload failed".into());
         }
-        if sys.run("systemctl", &["enable", "--now", "pi-agent"]).await.is_err() {
-            rep.warnings.push("systemctl enable --now pi-agent failed (is /usr/local/bin/pi installed?)".into());
+        if sys.run("systemctl", &["enable", "--now", "rpi-agent"]).await.is_err() {
+            rep.warnings.push("systemctl enable --now rpi-agent failed (is /usr/local/bin/rpi installed?)".into());
         }
     }
 
@@ -265,7 +380,9 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
 
     // 10. dependency checks (warn, never fail)
     if sys.run("docker", &["version", "--format", "{{.Server.Version}}"]).await.is_err() {
-        rep.warnings.push("docker not available — install Docker Engine and add pi-agent to the docker group".into());
+        rep.warnings.push(
+            "docker not available — install Docker first: curl -fsSL https://get.docker.com | sh".into(),
+        );
     }
     if sys.run("docker", &["compose", "version"]).await.is_err() {
         rep.warnings.push("docker compose plugin missing — install Docker Compose v2".into());
@@ -274,15 +391,30 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
     rep
 }
 
-const CLOUDFLARED_UNIT_PATH: &str = "/var/lib/pi/.config/systemd/user/cloudflared.service";
+/// Restart rpi-agent when it is active, so a replaced binary takes effect.
+/// Returns a printable note; None when the unit is not active.
+pub async fn restart_agent_if_active(sys: &dyn Sys) -> Option<String> {
+    if sys.run("systemctl", &["is-active", "--quiet", "rpi-agent"]).await.is_err() {
+        return None;
+    }
+    match sys.run("systemctl", &["restart", "rpi-agent"]).await {
+        Ok(_) => Some("restarted: rpi-agent (new binary)".into()),
+        Err(e) => Some(format!("warning: systemctl restart rpi-agent failed: {e}")),
+    }
+}
+
+const CLOUDFLARED_UNIT_PATH: &str = "/var/lib/rpi/.config/systemd/user/cloudflared.service";
+
+/// Canonical cloudflared config the setup flow instructs operators to write.
+const CLOUDFLARED_CONFIG_PATH: &str = "/var/lib/rpi/cloudflared/config.yml";
 
 const CLOUDFLARED_UNIT: &str = "\
 [Unit]
-Description=cloudflared tunnel (pi-agent)
+Description=cloudflared tunnel (rpi-agent)
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/cloudflared tunnel --config /var/lib/pi/cloudflared/config.yml run
+ExecStart=/usr/local/bin/cloudflared tunnel --config /var/lib/rpi/cloudflared/config.yml run
 Restart=on-failure
 
 [Install]
@@ -293,23 +425,23 @@ WantedBy=default.target
 /// The interactive `cloudflared tunnel login` step is left to the operator.
 async fn cloudflared_bootstrap(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
     if !dry {
-        let _ = sys.run("loginctl", &["enable-linger", "pi-agent"]).await;
+        let _ = sys.run("loginctl", &["enable-linger", "rpi-agent"]).await;
     }
-    rep.created.push("systemd linger for pi-agent".into());
+    rep.created.push("systemd linger for rpi-agent".into());
 
     if sys.exists(Path::new(CLOUDFLARED_UNIT_PATH)) {
         rep.skipped.push(CLOUDFLARED_UNIT_PATH.into());
     } else {
         if !dry {
-            let _ = sys.run("install", &["-d", "-o", "pi-agent", "-g", "pi-agent", "/var/lib/pi/.config/systemd/user"]).await;
+            let _ = sys.run("install", &["-d", "-o", "rpi-agent", "-g", "rpi-agent", "/var/lib/rpi/.config/systemd/user"]).await;
             let _ = sys.write(Path::new(CLOUDFLARED_UNIT_PATH), CLOUDFLARED_UNIT);
         }
         rep.created.push(CLOUDFLARED_UNIT_PATH.into());
     }
     rep.warnings.push(
         "cloudflared: finish manually — run `cloudflared tunnel login`, create a tunnel, \
-         write /var/lib/pi/cloudflared/config.yml, add [cloudflared] to /etc/pi/agent.toml, \
-         then `systemctl --user enable --now cloudflared` as pi-agent".into(),
+         write /var/lib/rpi/cloudflared/config.yml, add [cloudflared] to /etc/rpi/agent.toml, \
+         then `systemctl --user enable --now cloudflared` as rpi-agent".into(),
     );
 }
 
@@ -325,17 +457,51 @@ async fn run_with(sys: &dyn Sys, opts: &SetupOpts) -> anyhow::Result<SetupReport
     Ok(report)
 }
 
-/// CLI entrypoint: resolve the login user (--user or $SUDO_USER), run setup,
-/// print the report. Must run as root (under sudo) on the Pi.
+/// CLI entrypoint: resolve the login user (--user or $SUDO_USER), install the
+/// running binary to /usr/local/bin/rpi (npm installs live under node_modules,
+/// but the systemd unit expects the canonical path), run setup, and restart
+/// an active agent when the binary changed. Must run as root (under sudo).
 pub async fn run_cmd(user: Option<String>, with_cloudflared: bool, dry_run: bool) -> anyhow::Result<()> {
     let login_user = user
         .or_else(|| std::env::var("SUDO_USER").ok())
         .filter(|u| !u.is_empty() && u != "root")
         .ok_or_else(|| anyhow::anyhow!(
-            "cannot determine the SSH login user; run via `sudo pi agent setup` or pass --user <name>"
+            "cannot determine the SSH login user; run via `sudo rpi agent setup` or pass --user <name>"
         ))?;
     let opts = SetupOpts { login_user, with_cloudflared, dry_run };
-    run_with(&HostSys, &opts).await.map(|_| ())
+
+    let current = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
+    let action = self_install::ensure_installed(
+        &current,
+        Path::new(self_install::AGENT_BIN_PATH),
+        dry_run,
+    )
+    .map_err(|e| anyhow::anyhow!("self-install {}: {e}", self_install::AGENT_BIN_PATH))?;
+    match &action {
+        SelfInstallAction::AlreadyCanonical => {
+            println!("ok (already present): {} (running from it)", self_install::AGENT_BIN_PATH);
+        }
+        SelfInstallAction::UpToDate => {
+            println!("ok (already present): {} (binary up to date)", self_install::AGENT_BIN_PATH);
+        }
+        SelfInstallAction::Installed => {
+            println!(
+                "{}: {} (from {})",
+                if dry_run { "would install" } else { "installed" },
+                self_install::AGENT_BIN_PATH,
+                current.display(),
+            );
+        }
+    }
+
+    run_with(&HostSys, &opts).await?;
+
+    if matches!(action, SelfInstallAction::Installed) && !dry_run {
+        if let Some(note) = restart_agent_if_active(&HostSys).await {
+            println!("{note}");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -394,27 +560,27 @@ mod tests {
     #[tokio::test]
     async fn user_exists_reflects_id_result() {
         let mut sys = FakeSys::default();
-        sys.ok.insert(FakeSys::key("id", &["-u", "pi-agent"]), "999".into());
-        assert!(user_exists(&sys, "pi-agent").await);
+        sys.ok.insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+        assert!(user_exists(&sys, "rpi-agent").await);
 
         let mut absent = FakeSys::default();
-        absent.err.insert(FakeSys::key("id", &["-u", "pi-agent"]));
-        assert!(!user_exists(&absent, "pi-agent").await);
+        absent.err.insert(FakeSys::key("id", &["-u", "rpi-agent"]));
+        assert!(!user_exists(&absent, "rpi-agent").await);
     }
 
     #[tokio::test]
     async fn in_group_parses_id_ng() {
         let mut sys = FakeSys::default();
-        sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo docker pi-agent".into());
+        sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo docker rpi-agent".into());
         assert!(in_group(&sys, "piuser", "docker").await);
         assert!(!in_group(&sys, "piuser", "wheel").await);
     }
 
     #[test]
     fn unit_template_matches_spec_byte_for_byte() {
-        assert!(UNIT.starts_with("[Unit]\nDescription=pi deploy agent\n"));
-        assert!(UNIT.contains("ExecStart=/usr/local/bin/pi agent run --config /etc/pi/agent.toml\n"));
-        assert!(UNIT.contains("Environment=XDG_CACHE_HOME=/var/lib/pi/.cache\n"));
+        assert!(UNIT.starts_with("[Unit]\nDescription=rpi deploy agent\n"));
+        assert!(UNIT.contains("ExecStart=/usr/local/bin/rpi agent run --config /etc/rpi/agent.toml\n"));
+        assert!(UNIT.contains("Environment=XDG_CACHE_HOME=/var/lib/rpi/.cache\n"));
         assert!(UNIT.ends_with("WantedBy=multi-user.target\n"));
     }
 
@@ -436,19 +602,216 @@ mod tests {
         let action = write_unit_with_backup(&sys, false).unwrap();
         assert!(matches!(action, WriteAction::BackedUp));
         let writes = sys.writes.lock().unwrap();
-        assert!(writes.iter().any(|(p, _)| p.ends_with("pi-agent.service.bak")), "backup written");
+        assert!(writes.iter().any(|(p, _)| p.ends_with("rpi-agent.service.bak")), "backup written");
         assert!(writes.iter().any(|(p, c)| p == UNIT_PATH && c == UNIT), "canonical written");
     }
 
     fn fresh_sys() -> FakeSys {
         let mut sys = FakeSys::default();
         // user absent, no dirs/files exist; group lookups succeed but show no membership.
-        sys.err.insert(FakeSys::key("id", &["-u", "pi-agent"]));
-        sys.ok.insert(FakeSys::key("id", &["-nG", "pi-agent"]), "pi-agent".into());
+        sys.err.insert(FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.err.insert(FakeSys::key("id", &["-u", "pi-agent"])); // no legacy install to migrate
+        sys.ok.insert(FakeSys::key("id", &["-nG", "rpi-agent"]), "rpi-agent".into());
         sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo".into());
         sys.ok.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]), "27.0".into());
         sys.ok.insert(FakeSys::key("docker", &["compose", "version"]), "v2".into());
         sys
+    }
+
+    fn legacy_sys() -> FakeSys {
+        let mut sys = FakeSys::default();
+        sys.err.insert(FakeSys::key("id", &["-u", "rpi-agent"])); // not migrated yet
+        sys.ok.insert(FakeSys::key("id", &["-u", "pi-agent"]), "999".into()); // legacy install present
+        sys.ok.insert(FakeSys::key("systemctl", &["disable", "--now", "pi-agent"]), "".into());
+        sys.ok.insert(FakeSys::key("groupmod", &["-n", "rpi-agent", "pi-agent"]), "".into());
+        sys.ok.insert(FakeSys::key("usermod", &["-l", "rpi-agent", "pi-agent"]), "".into());
+        for p in ["/var/lib/pi", "/etc/pi", "/var/log/pi", OLD_UNIT_PATH] {
+            sys.paths.insert(p.into());
+        }
+        sys.ok.insert(FakeSys::key("mv", &["/var/lib/pi", "/var/lib/rpi"]), "".into());
+        sys.ok.insert(FakeSys::key("mv", &["/etc/pi", "/etc/rpi"]), "".into());
+        sys.ok.insert(FakeSys::key("mv", &["/var/log/pi", "/var/log/rpi"]), "".into());
+        sys.ok.insert(
+            FakeSys::key("mv", &[OLD_UNIT_PATH, &format!("{OLD_UNIT_PATH}.bak")]),
+            "".into(),
+        );
+        sys
+    }
+
+    #[tokio::test]
+    async fn migrates_existing_pi_agent_install_in_place() {
+        let sys = legacy_sys();
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        let calls = sys.calls();
+        assert!(calls.iter().any(|c| c == "systemctl disable --now pi-agent"), "stops the old unit");
+        assert!(calls.iter().any(|c| c == "groupmod -n rpi-agent pi-agent"));
+        assert!(calls.iter().any(|c| c == "usermod -l rpi-agent pi-agent"));
+        assert!(calls.iter().any(|c| c == "mv /var/lib/pi /var/lib/rpi"));
+        assert!(calls.iter().any(|c| c == "mv /etc/pi /etc/rpi"));
+        assert!(calls.iter().any(|c| c == "mv /var/log/pi /var/log/rpi"));
+        assert!(
+            calls.iter().any(|c| *c == format!("mv {OLD_UNIT_PATH} {OLD_UNIT_PATH}.bak")),
+            "old unit backed up, not just deleted"
+        );
+        assert!(rep.repaired.iter().any(|r| r.contains("migrated: pi-agent -> rpi-agent")));
+        assert!(rep.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_quiesces_user_session_before_renaming_login() {
+        // usermod -l fails if the login is still in use (e.g. a lingering
+        // cloudflared user manager), so the session must be dropped first.
+        let sys = legacy_sys();
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        let calls = sys.calls();
+        let disable = calls.iter().position(|c| c == "loginctl disable-linger pi-agent");
+        let terminate = calls.iter().position(|c| c == "loginctl terminate-user pi-agent");
+        let usermod = calls.iter().position(|c| c == "usermod -l rpi-agent pi-agent");
+        assert!(disable.is_some(), "linger dropped: {calls:?}");
+        assert!(terminate.is_some(), "user session terminated: {calls:?}");
+        assert!(disable.unwrap() < usermod.unwrap(), "linger dropped before rename");
+        assert!(terminate.unwrap() < usermod.unwrap(), "session ended before rename");
+    }
+
+    #[tokio::test]
+    async fn migration_rewrites_stale_paths_in_agent_toml_preserving_custom_values() {
+        let mut sys = legacy_sys();
+        // A real v0.5 agent.toml carries the old absolute paths plus any operator
+        // customizations; only the paths must change.
+        sys.files.insert(
+            AGENT_TOML_PATH.into(),
+            "data_dir = \"/var/lib/pi\"\nsocket = \"/run/pi/agent.sock\"\nport_min = 9000\n".into(),
+        );
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        let writes = sys.writes.lock().unwrap();
+        let (_, content) = writes
+            .iter()
+            .find(|(p, _)| p == AGENT_TOML_PATH)
+            .expect("agent.toml rewritten");
+        assert!(content.contains("data_dir = \"/var/lib/rpi\""), "data_dir moved: {content}");
+        assert!(content.contains("socket = \"/run/rpi/agent.sock\""), "socket moved: {content}");
+        assert!(!content.contains("/var/lib/pi\""), "no stale data_dir left: {content}");
+        assert!(!content.contains("/run/pi/"), "no stale socket left: {content}");
+        assert!(content.contains("port_min = 9000"), "custom values preserved: {content}");
+    }
+
+    #[tokio::test]
+    async fn migration_rewrites_cloudflared_unit_and_config_paths() {
+        let mut sys = legacy_sys();
+        sys.paths.insert(CLOUDFLARED_UNIT_PATH.into());
+        sys.files.insert(
+            CLOUDFLARED_UNIT_PATH.into(),
+            "[Service]\nExecStart=/usr/local/bin/cloudflared tunnel --config /var/lib/pi/cloudflared/config.yml run\n".into(),
+        );
+        sys.files.insert(
+            CLOUDFLARED_CONFIG_PATH.into(),
+            "credentials-file: /var/lib/pi/cloudflared/home.json\n".into(),
+        );
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        let writes = sys.writes.lock().unwrap();
+        let unit = &writes.iter().find(|(p, _)| p == CLOUDFLARED_UNIT_PATH).expect("unit rewritten").1;
+        let cfg = &writes.iter().find(|(p, _)| p == CLOUDFLARED_CONFIG_PATH).expect("config rewritten").1;
+        assert!(unit.contains("/var/lib/rpi/cloudflared/config.yml"), "unit path moved: {unit}");
+        assert!(!unit.contains("/var/lib/pi/"), "no stale unit path: {unit}");
+        assert!(cfg.contains("/var/lib/rpi/cloudflared/home.json"), "creds path moved: {cfg}");
+    }
+
+    #[test]
+    fn rewrite_owned_paths_is_idempotent_and_skips_clean_files() {
+        // Already-migrated content must not be written again.
+        let mut sys = FakeSys::default();
+        sys.files.insert("/etc/rpi/agent.toml".into(), "data_dir = \"/var/lib/rpi\"\n".into());
+        let mut rep = SetupReport::default();
+        rewrite_owned_paths(&sys, Path::new("/etc/rpi/agent.toml"), &mut rep);
+        assert!(sys.writes.lock().unwrap().is_empty(), "clean file left untouched");
+        assert!(rep.repaired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_skips_directories_that_do_not_exist() {
+        let mut sys = legacy_sys();
+        sys.paths.remove("/etc/pi"); // e.g. never had /etc/pi for some reason
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(!sys.calls().iter().any(|c| c.starts_with("mv /etc/pi")), "nothing to move");
+    }
+
+    #[tokio::test]
+    async fn migration_reenables_linger_when_cloudflared_was_configured() {
+        let mut sys = legacy_sys();
+        sys.paths.insert(CLOUDFLARED_UNIT_PATH.into());
+        sys.ok.insert(FakeSys::key("loginctl", &["enable-linger", "rpi-agent"]), "".into());
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(sys.calls().iter().any(|c| c == "loginctl enable-linger rpi-agent"));
+    }
+
+    #[tokio::test]
+    async fn migration_is_noop_when_already_rpi_agent() {
+        let mut sys = fresh_sys();
+        sys.err.remove(&FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.ok.insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(sys.calls().len() == 1, "only the rpi-agent probe ran: {:?}", sys.calls());
+        assert!(rep.repaired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_is_noop_when_no_legacy_install() {
+        let sys = fresh_sys(); // both rpi-agent and pi-agent absent
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(sys.calls().iter().all(|c| c.starts_with("id ")), "only the two probes ran: {:?}", sys.calls());
+        assert!(rep.repaired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_dry_run_reports_but_makes_no_changes() {
+        let sys = legacy_sys();
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, true, &mut rep).await;
+        assert!(sys.calls().iter().all(|c| c.starts_with("id ")), "only the two probes ran: {:?}", sys.calls());
+        assert!(rep.repaired.iter().any(|r| r.contains("dry run")));
+    }
+
+    #[tokio::test]
+    async fn migration_failure_on_groupmod_stops_before_touching_directories() {
+        let mut sys = legacy_sys();
+        sys.ok.remove(&FakeSys::key("groupmod", &["-n", "rpi-agent", "pi-agent"]));
+        sys.err.insert(FakeSys::key("groupmod", &["-n", "rpi-agent", "pi-agent"]));
+        let mut rep = SetupReport::default();
+        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        assert!(!sys.calls().iter().any(|c| c.starts_with("mv ")), "no directories touched after groupmod failure");
+        assert!(rep.errors.iter().any(|e| e.contains("groupmod")));
+    }
+
+    #[tokio::test]
+    async fn setup_migrates_legacy_install_before_creating_a_fresh_user() {
+        let mut sys = legacy_sys();
+        // downstream steps after migration also need to probe cleanly; fresh_sys()-style
+        // group/docker mocks so setup() doesn't error out past the migration step.
+        sys.ok.insert(FakeSys::key("id", &["-nG", "rpi-agent"]), "rpi-agent".into());
+        sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo".into());
+        sys.ok.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]), "27.0".into());
+        sys.ok.insert(FakeSys::key("docker", &["compose", "version"]), "v2".into());
+        let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
+        let _ = setup(&sys, &opts).await;
+        let calls = sys.calls();
+        let migrate_idx = calls.iter().position(|c| c == "groupmod -n rpi-agent pi-agent");
+        let useradd_idx = calls.iter().position(|c| c.starts_with("useradd --system"));
+        assert!(migrate_idx.is_some(), "migration ran");
+        // FakeSys does not simulate id -u rpi-agent flipping to Ok after usermod -l, so
+        // setup()'s own idempotency check still sees rpi-agent as absent and creates it
+        // too — harmless on a fake double, and on a real system `id -u rpi-agent` would
+        // succeed post-rename so this second create step would be skipped for real.
+        if let Some(u) = useradd_idx {
+            assert!(migrate_idx.unwrap() < u, "migration runs before the fresh-install branch");
+        }
     }
 
     #[tokio::test]
@@ -457,29 +820,29 @@ mod tests {
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let report = setup(&sys, &opts).await;
         let calls = sys.calls();
-        assert!(calls.iter().any(|c| c.starts_with("useradd --system")), "creates pi-agent");
-        assert!(calls.iter().any(|c| c == "usermod -aG docker pi-agent"));
-        assert!(calls.iter().any(|c| c == "usermod -aG pi-agent piuser"));
-        assert!(calls.iter().any(|c| c.contains("install -d -o pi-agent -g pi-agent /var/lib/pi")));
-        assert!(calls.iter().any(|c| c.contains("install -d -o pi-agent -g pi-agent /var/log/pi")));
+        assert!(calls.iter().any(|c| c.starts_with("useradd --system")), "creates rpi-agent");
+        assert!(calls.iter().any(|c| c == "usermod -aG docker rpi-agent"));
+        assert!(calls.iter().any(|c| c == "usermod -aG rpi-agent piuser"));
+        assert!(calls.iter().any(|c| c.contains("install -d -o rpi-agent -g rpi-agent /var/lib/rpi")));
+        assert!(calls.iter().any(|c| c.contains("install -d -o rpi-agent -g rpi-agent /var/log/rpi")));
         assert!(calls.iter().any(|c| c == "systemctl daemon-reload"));
-        assert!(calls.iter().any(|c| c == "systemctl enable --now pi-agent"));
+        assert!(calls.iter().any(|c| c == "systemctl enable --now rpi-agent"));
         assert!(report.warnings.is_empty(), "docker present -> no warnings");
     }
 
     #[tokio::test]
     async fn repairs_only_missing_var_log_pi_on_working_install() {
         let mut sys = FakeSys::default();
-        // user exists and is in both groups; all dirs exist EXCEPT /var/log/pi; unit identical.
-        sys.ok.insert(FakeSys::key("id", &["-u", "pi-agent"]), "999".into());
-        sys.ok.insert(FakeSys::key("id", &["-nG", "pi-agent"]), "pi-agent docker".into());
-        sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo docker pi-agent".into());
+        // user exists and is in both groups; all dirs exist EXCEPT /var/log/rpi; unit identical.
+        sys.ok.insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+        sys.ok.insert(FakeSys::key("id", &["-nG", "rpi-agent"]), "rpi-agent docker".into());
+        sys.ok.insert(FakeSys::key("id", &["-nG", "piuser"]), "piuser sudo docker rpi-agent".into());
         sys.ok.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]), "27.0".into());
         sys.ok.insert(FakeSys::key("docker", &["compose", "version"]), "v2".into());
-        for p in ["/var/lib/pi", "/etc/pi", UNIT_PATH, AGENT_TOML_PATH] {
+        for p in ["/var/lib/rpi", "/etc/rpi", UNIT_PATH, AGENT_TOML_PATH] {
             sys.paths.insert(p.into());
         }
-        sys.ok.insert(FakeSys::key("stat", &["-c", "%U:%G", "/var/lib/pi"]), "pi-agent:pi-agent".into());
+        sys.ok.insert(FakeSys::key("stat", &["-c", "%U:%G", "/var/lib/rpi"]), "rpi-agent:rpi-agent".into());
         sys.files.insert(UNIT_PATH.into(), UNIT.into());
         sys.files.insert(AGENT_TOML_PATH.into(), AGENT_TOML.into());
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
@@ -487,37 +850,37 @@ mod tests {
         let calls = sys.calls();
         assert!(!calls.iter().any(|c| c.starts_with("useradd")), "user not recreated");
         assert!(!calls.iter().any(|c| c.starts_with("usermod")), "groups untouched");
-        assert!(calls.iter().any(|c| c.contains("install -d -o pi-agent -g pi-agent /var/log/pi")));
-        assert!(report.repaired.iter().any(|r| r.contains("/var/log/pi")));
+        assert!(calls.iter().any(|c| c.contains("install -d -o rpi-agent -g rpi-agent /var/log/rpi")));
+        assert!(report.repaired.iter().any(|r| r.contains("/var/log/rpi")));
         assert!(sys.writes.lock().unwrap().is_empty(), "agent.toml/unit untouched");
     }
 
     #[tokio::test]
     async fn ensure_dir_repairs_ownership_when_uid_drifted() {
         let mut sys = fresh_sys();
-        // /var/lib/pi существует, но владелец — старый UID (не pi-agent:pi-agent)
-        sys.paths.insert("/var/lib/pi".into());
-        sys.ok.insert(FakeSys::key("stat", &["-c", "%U:%G", "/var/lib/pi"]), "999:999".into());
+        // /var/lib/rpi существует, но владелец — старый UID (не rpi-agent:rpi-agent)
+        sys.paths.insert("/var/lib/rpi".into());
+        sys.ok.insert(FakeSys::key("stat", &["-c", "%U:%G", "/var/lib/rpi"]), "999:999".into());
         // useradd succeeds (новый UID)
-        sys.ok.insert(FakeSys::key("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]), "".into());
+        sys.ok.insert(FakeSys::key("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "rpi-agent"]), "".into());
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let report = setup(&sys, &opts).await;
         let calls = sys.calls();
-        assert!(calls.iter().any(|c| c == "chown -R pi-agent:pi-agent /var/lib/pi"), "chown -R issued");
-        assert!(report.repaired.iter().any(|r| r.contains("/var/lib/pi (ownership)")), "ownership repair reported");
-        assert!(!report.skipped.iter().any(|s| s == "/var/lib/pi"), "not skipped when ownership drifted");
+        assert!(calls.iter().any(|c| c == "chown -R rpi-agent:rpi-agent /var/lib/rpi"), "chown -R issued");
+        assert!(report.repaired.iter().any(|r| r.contains("/var/lib/rpi (ownership)")), "ownership repair reported");
+        assert!(!report.skipped.iter().any(|s| s == "/var/lib/rpi"), "not skipped when ownership drifted");
     }
 
     #[tokio::test]
     async fn ensure_dir_skips_when_ownership_already_correct() {
         let mut sys = fresh_sys();
-        sys.paths.insert("/var/lib/pi".into());
-        sys.ok.insert(FakeSys::key("stat", &["-c", "%U:%G", "/var/lib/pi"]), "pi-agent:pi-agent".into());
+        sys.paths.insert("/var/lib/rpi".into());
+        sys.ok.insert(FakeSys::key("stat", &["-c", "%U:%G", "/var/lib/rpi"]), "rpi-agent:rpi-agent".into());
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let report = setup(&sys, &opts).await;
         let calls = sys.calls();
         assert!(!calls.iter().any(|c| c.contains("chown")), "no chown when ownership ok");
-        assert!(report.skipped.iter().any(|s| s == "/var/lib/pi"));
+        assert!(report.skipped.iter().any(|s| s == "/var/lib/rpi"));
     }
 
     #[tokio::test]
@@ -537,7 +900,8 @@ mod tests {
         sys.err.insert(FakeSys::key("docker", &["version", "--format", "{{.Server.Version}}"]));
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let report = setup(&sys, &opts).await;
-        assert!(report.warnings.iter().any(|w| w.contains("docker")));
+        let w = report.warnings.iter().find(|w| w.contains("docker")).expect("docker warning present");
+        assert!(w.contains("curl -fsSL https://get.docker.com | sh"), "warning includes the install command: {w}");
     }
 
     #[tokio::test]
@@ -546,7 +910,7 @@ mod tests {
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: true, dry_run: false };
         let report = setup(&sys, &opts).await;
         let calls = sys.calls();
-        assert!(calls.iter().any(|c| c == "loginctl enable-linger pi-agent"));
+        assert!(calls.iter().any(|c| c == "loginctl enable-linger rpi-agent"));
         assert!(report.created.iter().any(|c| c.contains("linger")));
         assert!(report.warnings.iter().any(|w| w.contains("cloudflared tunnel login")), "prints manual login step");
     }
@@ -562,7 +926,7 @@ mod tests {
     #[test]
     fn cloudflared_unit_points_at_canonical_config_path() {
         assert!(
-            CLOUDFLARED_UNIT.contains("cloudflared tunnel --config /var/lib/pi/cloudflared/config.yml run"),
+            CLOUDFLARED_UNIT.contains("cloudflared tunnel --config /var/lib/rpi/cloudflared/config.yml run"),
             "ExecStart must use the canonical config path the setup flow instructs operators to write"
         );
     }
@@ -570,29 +934,57 @@ mod tests {
     #[tokio::test]
     async fn useradd_failure_records_error_not_created() {
         let mut sys = fresh_sys();
-        sys.err.insert(FakeSys::key("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]));
+        sys.err.insert(FakeSys::key("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "rpi-agent"]));
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let report = setup(&sys, &opts).await;
         assert!(report.errors.iter().any(|e| e.contains("useradd")), "error recorded");
-        assert!(!report.created.iter().any(|c| c == "user pi-agent"), "no false created");
+        assert!(!report.created.iter().any(|c| c == "user rpi-agent"), "no false created");
     }
 
     #[tokio::test]
     async fn mkdir_failure_records_error_not_created() {
         let mut sys = fresh_sys();
-        sys.err.insert(FakeSys::key("install", &["-d", "-o", "pi-agent", "-g", "pi-agent", "/var/lib/pi"]));
+        sys.err.insert(FakeSys::key("install", &["-d", "-o", "rpi-agent", "-g", "rpi-agent", "/var/lib/rpi"]));
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let report = setup(&sys, &opts).await;
-        assert!(report.errors.iter().any(|e| e.contains("/var/lib/pi")), "mkdir error recorded");
-        assert!(!report.created.iter().any(|c| c.contains("/var/lib/pi")));
+        assert!(report.errors.iter().any(|e| e.contains("/var/lib/rpi")), "mkdir error recorded");
+        assert!(!report.created.iter().any(|c| c.contains("/var/lib/rpi")));
     }
 
     #[tokio::test]
     async fn run_with_bails_on_errors() {
         let mut sys = fresh_sys();
-        sys.err.insert(FakeSys::key("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-agent"]));
+        sys.err.insert(FakeSys::key("useradd", &["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "rpi-agent"]));
         let opts = SetupOpts { login_user: "piuser".into(), with_cloudflared: false, dry_run: false };
         let res = run_with(&sys, &opts).await;
         assert!(res.is_err(), "non-zero exit when privileged step fails");
+    }
+
+    #[tokio::test]
+    async fn restart_runs_when_unit_active() {
+        let mut sys = FakeSys::default();
+        sys.ok.insert(FakeSys::key("systemctl", &["is-active", "--quiet", "rpi-agent"]), "".into());
+        sys.ok.insert(FakeSys::key("systemctl", &["restart", "rpi-agent"]), "".into());
+        let note = restart_agent_if_active(&sys).await;
+        assert!(note.unwrap().contains("restarted"), "reports the restart");
+        assert!(sys.calls().iter().any(|c| c == "systemctl restart rpi-agent"));
+    }
+
+    #[tokio::test]
+    async fn restart_skipped_when_unit_inactive() {
+        let mut sys = FakeSys::default();
+        sys.err.insert(FakeSys::key("systemctl", &["is-active", "--quiet", "rpi-agent"]));
+        let note = restart_agent_if_active(&sys).await;
+        assert!(note.is_none());
+        assert!(!sys.calls().iter().any(|c| c.contains("systemctl restart")), "no restart attempted");
+    }
+
+    #[tokio::test]
+    async fn restart_failure_returns_warning() {
+        let mut sys = FakeSys::default();
+        sys.ok.insert(FakeSys::key("systemctl", &["is-active", "--quiet", "rpi-agent"]), "".into());
+        sys.err.insert(FakeSys::key("systemctl", &["restart", "rpi-agent"]));
+        let note = restart_agent_if_active(&sys).await;
+        assert!(note.unwrap().starts_with("warning:"));
     }
 }

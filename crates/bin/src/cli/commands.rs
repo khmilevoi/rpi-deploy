@@ -3,15 +3,15 @@ use std::path::Path;
 
 use crate::cli::api::ApiClient;
 use crate::cli::config::ConnectOpts;
-use crate::cli::pitoml::PiToml;
+use crate::cli::rpitoml::RpiToml;
 use crate::cli::ssh::SshExec;
 use crate::cli::tunnel::SshTunnel;
 use crate::duration::parse_duration_secs;
 use crate::proto::{DeployRequest, DiagnosticCheckDto};
 
 pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Result<()> {
-    let pitoml = PiToml::load(Path::new("pi.toml"))?;
-    let project = pitoml.to_project_config();
+    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let project = rpitoml.to_project_config();
 
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
@@ -55,8 +55,8 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
 }
 
 pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
-    let pitoml = PiToml::load(Path::new("pi.toml"))?;
-    let project_name = pitoml.project.name.clone();
+    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let project_name = rpitoml.project.name.clone();
 
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
@@ -86,9 +86,9 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
 }
 
 pub async fn env_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<()> {
-    let pitoml = PiToml::load(Path::new("pi.toml"))?;
-    let project_name = pitoml.project.name.clone();
-    let env_file = Path::new(&pitoml.env.file).to_path_buf();
+    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let project_name = rpitoml.project.name.clone();
+    let env_file = Path::new(&rpitoml.env.file).to_path_buf();
 
     let raw = std::fs::read_to_string(&env_file)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", env_file.display()))?;
@@ -125,8 +125,8 @@ pub async fn gc(connect: ConnectOpts) -> anyhow::Result<()> {
 }
 
 pub async fn env_ls(connect: ConnectOpts) -> anyhow::Result<()> {
-    let pitoml = PiToml::load(Path::new("pi.toml"))?;
-    let project_name = pitoml.project.name.clone();
+    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let project_name = rpitoml.project.name.clone();
 
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
@@ -150,7 +150,7 @@ fn parse_env_file(text: &str) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(bundle.vars)
 }
 
-/// `pi ls` EXPOSE cell: `-` for private/unknown, `lan http://<ip>:<port>` for
+/// `rpi ls` EXPOSE cell: `-` for private/unknown, `lan http://<ip>:<port>` for
 /// expose=lan with a detected ip, `lan (ip n/a)` when the ip could not be
 /// detected (§12.1).
 fn expose_cell(expose: &str, lan_ip: Option<&str>, host_port: u16) -> String {
@@ -380,7 +380,7 @@ pub async fn doctor(connect: ConnectOpts) -> anyhow::Result<()> {
             "agent tunnel",
             false,
             e.to_string(),
-            Some("is pi-agent.service running on the Pi? try `pi agent status`"),
+            Some("is rpi-agent.service running on the Pi? try `rpi agent status`"),
         )),
         Ok(tunnel) => {
             let api = ApiClient::new(tunnel.base_url.clone());
@@ -389,7 +389,7 @@ pub async fn doctor(connect: ConnectOpts) -> anyhow::Result<()> {
                     "agent api",
                     false,
                     e.to_string(),
-                    Some("agent is unreachable through the tunnel; `pi agent logs` for details"),
+                    Some("agent is unreachable through the tunnel; `rpi agent logs` for details"),
                 )),
                 Ok(v) => {
                     checks.push(check(
@@ -440,11 +440,11 @@ pub async fn agent_status(connect: ConnectOpts) -> anyhow::Result<()> {
         Err(err) => {
             eprintln!("agent API unreachable ({err})");
             eprintln!(
-                "falling back to: ssh {}@{} systemctl status pi-agent",
+                "falling back to: ssh {}@{} systemctl status rpi-agent",
                 profile.user, profile.host
             );
             SshExec { profile: &profile }
-                .run(&["systemctl", "status", "pi-agent", "--no-pager"])
+                .run(&["systemctl", "status", "rpi-agent", "--no-pager"])
                 .await
         }
     }
@@ -467,7 +467,7 @@ pub(crate) fn build_agent_logs_query(
 }
 
 pub(crate) fn journalctl_args(follow: bool, since_unix: Option<i64>, tail: usize) -> Vec<String> {
-    let mut args: Vec<String> = ["journalctl", "-u", "pi-agent", "--no-pager", "-n"]
+    let mut args: Vec<String> = ["journalctl", "-u", "rpi-agent", "--no-pager", "-n"]
         .map(String::from)
         .to_vec();
     args.push(tail.to_string());
@@ -540,7 +540,7 @@ fn version_mismatch_warning(cli_version: &str, agent_version: &str) -> Option<St
     (cli_version != agent_version).then(|| {
         format!(
             "warning: CLI v{cli_version} and agent v{agent_version} differ - \
-rebuild/update the agent on the Pi (`pi agent update` ships in v0.5)"
+rebuild/update the agent on the Pi (`rpi agent update` ships in v0.5)"
         )
     })
 }
@@ -580,14 +580,14 @@ mod tests {
                 name: "disk space".into(),
                 passed: false,
                 detail: "91% used".into(),
-                hint: Some("run `pi gc`".into()),
+                hint: Some("run `rpi gc`".into()),
             },
         ];
         let (out, ok) = render_doctor(&checks);
         assert!(!ok);
         assert!(out.contains("PASS  docker daemon"), "{out}");
         assert!(out.contains("FAIL  disk space"), "{out}");
-        assert!(out.contains("hint: run `pi gc`"), "{out}");
+        assert!(out.contains("hint: run `rpi gc`"), "{out}");
         let (_, ok) = render_doctor(&checks[..1]);
         assert!(ok);
     }
@@ -616,14 +616,14 @@ mod tests {
     fn journalctl_args_shape() {
         assert_eq!(
             journalctl_args(false, None, 100),
-            vec!["journalctl", "-u", "pi-agent", "--no-pager", "-n", "100"]
+            vec!["journalctl", "-u", "rpi-agent", "--no-pager", "-n", "100"]
         );
         assert_eq!(
             journalctl_args(true, Some(1234), 50),
             vec![
                 "journalctl",
                 "-u",
-                "pi-agent",
+                "rpi-agent",
                 "--no-pager",
                 "-n",
                 "50",

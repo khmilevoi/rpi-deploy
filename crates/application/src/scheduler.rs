@@ -253,7 +253,7 @@ impl DeployScheduler {
                 p.sink.line(note);
                 // The entry is already out of the slot and will never run; report
                 // the cancel as done even if the status write failed, so callers
-                // (pi deploy --cancel) do not retry or abort on a phantom error.
+                // (rpi deploy --cancel) do not retry or abort on a phantom error.
                 if let Err(err) = self
                     .history
                     .record_finished(&p.id, DeploymentStatus::Canceled, None, now, note)

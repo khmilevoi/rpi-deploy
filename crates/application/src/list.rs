@@ -5,7 +5,7 @@ use pi_domain::contracts::{ContainerRuntime, HostNetwork, ProjectRepository};
 use pi_domain::entities::{ExposeMode, ServiceState};
 use pi_domain::error::DomainError;
 
-/// Line for `pi ls`: project + state of its services (§7 ListProjects).
+/// Line for `rpi ls`: project + state of its services (§7 ListProjects).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectView {
     pub name: String,
@@ -15,7 +15,7 @@ pub struct ProjectView {
     pub host_port: u16,
     pub expose: ExposeMode,
     /// Detected LAN ip for expose=lan projects (None for private or when
-    /// undetectable). Used by `pi ls` to render `lan http://<ip>:<port>`.
+    /// undetectable). Used by `rpi ls` to render `lan http://<ip>:<port>`.
     pub lan_ip: Option<IpAddr>,
     pub services: Vec<ServiceState>,
 }

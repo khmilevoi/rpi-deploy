@@ -60,7 +60,7 @@ use crate::cli::config::{ClientConfig, ConnectOpts};
 use crate::cli::prompt::InquirePrompter;
 use crate::cli::ssh::SshExec;
 
-/// Entrypoint for `pi setup`: profile + key bootstrap + save + connectivity test.
+/// Entrypoint for `rpi setup`: profile + key bootstrap + save + connectivity test.
 pub async fn run(flags: SetupFlags) -> anyhow::Result<()> {
     let mut prompter = InquirePrompter;
     let ssh_dir = dirs::home_dir().map(|h| h.join(".ssh")).unwrap_or_default();
@@ -93,7 +93,7 @@ pub async fn run(flags: SetupFlags) -> anyhow::Result<()> {
     println!("testing connection...");
     if let Err(e) = ssh.check().await {
         println!("ssh check failed: {e}");
-        println!("fix SSH access, then run `pi doctor --server {name}`");
+        println!("fix SSH access, then run `rpi doctor --server {name}`");
         return Ok(());
     }
     let connect = ConnectOpts { server: Some(name.clone()), host: None, user: None, key: None };

@@ -275,7 +275,7 @@ mod tests {
         serde_yaml::from_str(yaml).unwrap()
     }
 
-    const BASE: &str = "tunnel: home\ncredentials-file: /var/lib/pi/cloudflared/home.json\ningress:\n  - hostname: old.example.com\n    service: http://127.0.0.1:8001\n  - service: http_status:404\n";
+    const BASE: &str = "tunnel: home\ncredentials-file: /var/lib/rpi/cloudflared/home.json\ningress:\n  - hostname: old.example.com\n    service: http://127.0.0.1:8001\n  - service: http_status:404\n";
 
     #[test]
     fn adds_new_rule_before_catch_all() {

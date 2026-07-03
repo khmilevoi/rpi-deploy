@@ -5,7 +5,7 @@ use pi_domain::entities::{ExposeMode, HealthcheckConfig, ProjectConfig, StageTim
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
-pub struct PiToml {
+pub struct RpiToml {
     pub schema: u32,
     pub project: ProjectSection,
     pub source: SourceSection,
@@ -69,7 +69,7 @@ pub struct IngressSection {
     pub expose: Option<String>,
 }
 
-/// [timeouts] in pi.toml — per-project stage overrides (§12, §8.1).
+/// [timeouts] in rpi.toml — per-project stage overrides (§12, §8.1).
 #[derive(Debug, Default, Deserialize)]
 pub struct TimeoutsSection {
     pub fetch: Option<String>,
@@ -88,7 +88,7 @@ pub struct HealthcheckSection {
 
 #[derive(Debug, Deserialize)]
 pub struct EnvSection {
-    /// Which local file `pi env send` reads (§12).
+    /// Which local file `rpi env send` reads (§12).
     #[serde(default = "default_env_file")]
     pub file: String,
 }
@@ -117,18 +117,18 @@ fn validate_expect(expect: &str) -> Result<(), String> {
     }
 }
 
-impl PiToml {
-    pub fn parse(text: &str) -> anyhow::Result<PiToml> {
-        let parsed: PiToml = toml::from_str(text)?;
+impl RpiToml {
+    pub fn parse(text: &str) -> anyhow::Result<RpiToml> {
+        let parsed: RpiToml = toml::from_str(text)?;
         if parsed.schema != 1 {
             anyhow::bail!(
-                "unsupported pi.toml schema {} (this pi supports schema 1)",
+                "unsupported rpi.toml schema {} (this rpi supports schema 1)",
                 parsed.schema
             );
         }
         if let Some(timeout) = &parsed.healthcheck.timeout {
             parse_duration_secs(timeout)
-                .map_err(|e| anyhow::anyhow!("pi.toml [healthcheck]: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("rpi.toml [healthcheck]: {e}"))?;
         }
         for (field, value) in [
             ("fetch", &parsed.timeouts.fetch),
@@ -137,30 +137,30 @@ impl PiToml {
         ] {
             if let Some(timeout) = value {
                 parse_duration_secs(timeout)
-                    .map_err(|e| anyhow::anyhow!("pi.toml [timeouts].{field}: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("rpi.toml [timeouts].{field}: {e}"))?;
             }
         }
         if let Some(expect) = &parsed.healthcheck.expect {
-            validate_expect(expect).map_err(|e| anyhow::anyhow!("pi.toml [healthcheck]: {e}"))?;
+            validate_expect(expect).map_err(|e| anyhow::anyhow!("rpi.toml [healthcheck]: {e}"))?;
         }
         if let Some(expose) = &parsed.ingress.expose {
             if ExposeMode::parse(expose).is_none() {
                 anyhow::bail!(
-                    "invalid pi.toml [ingress].expose '{expose}' (use \"private\" or \"lan\")"
+                    "invalid rpi.toml [ingress].expose '{expose}' (use \"private\" or \"lan\")"
                 );
             }
         }
         Ok(parsed)
     }
 
-    pub fn load(path: &Path) -> anyhow::Result<PiToml> {
+    pub fn load(path: &Path) -> anyhow::Result<RpiToml> {
         let text = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!(
                 "cannot read {}: {e} (run from the project root, see §12)",
                 path.display()
             )
         })?;
-        PiToml::parse(&text)
+        RpiToml::parse(&text)
     }
 
     pub fn to_project_config(&self) -> ProjectConfig {
@@ -240,7 +240,7 @@ file = ".env"
 
     #[test]
     fn parses_spec_sample_and_tolerates_future_sections() {
-        let parsed = PiToml::parse(SAMPLE).unwrap();
+        let parsed = RpiToml::parse(SAMPLE).unwrap();
         let config = parsed.to_project_config();
         assert_eq!(config.name, "rateme");
         assert_eq!(config.repo, "git@github.com:isskelo/rateme.git");
@@ -254,13 +254,13 @@ file = ".env"
     #[test]
     fn rejects_unknown_schema_version() {
         let toml = SAMPLE.replace("schema = 1", "schema = 2");
-        let err = PiToml::parse(&toml).unwrap_err().to_string();
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
         assert!(err.contains("schema"), "got: {err}");
     }
 
     #[test]
     fn env_and_healthcheck_sections_are_parsed_with_defaults() {
-        let parsed = PiToml::parse(SAMPLE).unwrap();
+        let parsed = RpiToml::parse(SAMPLE).unwrap();
         assert_eq!(parsed.env.file, ".env");
         let config = parsed.to_project_config();
         assert_eq!(config.healthcheck.path.as_deref(), Some("/"));
@@ -273,7 +273,7 @@ file = ".env"
         let toml = SAMPLE
             .replace("[healthcheck]\npath = \"/\"\n", "")
             .replace("[env]\nfile = \".env\"\n", "");
-        let parsed = PiToml::parse(&toml).unwrap();
+        let parsed = RpiToml::parse(&toml).unwrap();
         assert_eq!(parsed.env.file, ".env");
         let config = parsed.to_project_config();
         assert_eq!(config.healthcheck.path, None, "no path -> TCP probe");
@@ -286,14 +286,14 @@ file = ".env"
             "path = \"/\"",
             "path = \"/\"\ntimeout = \"2m\"\nexpect = \"204\"",
         );
-        let config = PiToml::parse(&toml).unwrap().to_project_config();
+        let config = RpiToml::parse(&toml).unwrap().to_project_config();
         assert_eq!(config.healthcheck.timeout_secs, 120);
         assert_eq!(config.healthcheck.expect.as_deref(), Some("204"));
 
         let bad = SAMPLE.replace("path = \"/\"", "path = \"/\"\ntimeout = \"soon\"");
-        assert!(PiToml::parse(&bad).is_err());
+        assert!(RpiToml::parse(&bad).is_err());
         let bad = SAMPLE.replace("path = \"/\"", "path = \"/\"\nexpect = \"ok\"");
-        assert!(PiToml::parse(&bad).is_err());
+        assert!(RpiToml::parse(&bad).is_err());
     }
 
     #[test]
@@ -302,7 +302,7 @@ file = ".env"
             "[healthcheck]",
             "[timeouts]\nfetch = \"3m\"\nup = \"120s\"\n\n[healthcheck]",
         );
-        let config = PiToml::parse(&toml).unwrap().to_project_config();
+        let config = RpiToml::parse(&toml).unwrap().to_project_config();
         assert_eq!(config.timeouts.fetch_secs, Some(180));
         assert_eq!(config.timeouts.build_secs, None, "not set -> agent default");
         assert_eq!(config.timeouts.up_secs, Some(120));
@@ -311,32 +311,32 @@ file = ".env"
             "[healthcheck]",
             "[timeouts]\nbuild = \"soon\"\n\n[healthcheck]",
         );
-        assert!(PiToml::parse(&bad).is_err());
+        assert!(RpiToml::parse(&bad).is_err());
     }
 
     #[test]
     fn missing_timeouts_section_means_no_overrides() {
-        let config = PiToml::parse(SAMPLE).unwrap().to_project_config();
+        let config = RpiToml::parse(SAMPLE).unwrap().to_project_config();
         assert_eq!(config.timeouts, Default::default());
     }
 
     #[test]
     fn expose_defaults_private_and_parses_lan() {
-        let default_cfg = PiToml::parse(SAMPLE).unwrap().to_project_config();
+        let default_cfg = RpiToml::parse(SAMPLE).unwrap().to_project_config();
         assert_eq!(
             default_cfg.expose,
             pi_domain::entities::ExposeMode::Private
         );
 
         let lan = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"lan\"");
-        let lan_cfg = PiToml::parse(&lan).unwrap().to_project_config();
+        let lan_cfg = RpiToml::parse(&lan).unwrap().to_project_config();
         assert_eq!(lan_cfg.expose, pi_domain::entities::ExposeMode::Lan);
     }
 
     #[test]
     fn invalid_expose_is_rejected() {
         let bad = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"public\"");
-        let err = PiToml::parse(&bad).unwrap_err().to_string();
+        let err = RpiToml::parse(&bad).unwrap_err().to_string();
         assert!(err.contains("expose"), "got: {err}");
     }
 }

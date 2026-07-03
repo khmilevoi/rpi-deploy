@@ -1,4 +1,4 @@
-//! Dotenv parse/serialize shared by the CLI (`pi env send` reads a local
+//! Dotenv parse/serialize shared by the CLI (`rpi env send` reads a local
 //! file) and the agent (bundle payload <-> workdir `.env`) (§10, §12).
 
 use pi_domain::entities::EnvBundle;

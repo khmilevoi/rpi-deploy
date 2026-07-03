@@ -442,7 +442,7 @@ mod tests {
         m.source.expect_fetch().times(1).returning(move |_, _, _| {
             stage_order.lock().unwrap().push("fetch");
             Ok(FetchedSource {
-                workdir: PathBuf::from("/var/lib/pi/workdirs/rateme"),
+                workdir: PathBuf::from("/var/lib/rpi/workdirs/rateme"),
                 commit_sha: SHA.into(),
             })
         });
@@ -466,7 +466,7 @@ mod tests {
             .times(1)
             .returning(move |_, _, _, _, _| {
                 stage_order.lock().unwrap().push("override");
-                Ok(PathBuf::from("/var/lib/pi/overrides/rateme.yml"))
+                Ok(PathBuf::from("/var/lib/rpi/overrides/rateme.yml"))
             });
         let stage_order = Arc::clone(&order);
         m.runtime
@@ -474,8 +474,8 @@ mod tests {
             .withf(|stack, _| {
                 stack.project_name == "rateme"
                     && stack.compose_file
-                        == PathBuf::from("/var/lib/pi/workdirs/rateme/docker-compose.yml")
-                    && stack.override_file == PathBuf::from("/var/lib/pi/overrides/rateme.yml")
+                        == PathBuf::from("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
+                    && stack.override_file == PathBuf::from("/var/lib/rpi/overrides/rateme.yml")
             })
             .times(1)
             .returning(move |_, _| {
@@ -488,8 +488,8 @@ mod tests {
             .withf(|stack, _| {
                 stack.project_name == "rateme"
                     && stack.compose_file
-                        == PathBuf::from("/var/lib/pi/workdirs/rateme/docker-compose.yml")
-                    && stack.override_file == PathBuf::from("/var/lib/pi/overrides/rateme.yml")
+                        == PathBuf::from("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
+                    && stack.override_file == PathBuf::from("/var/lib/rpi/overrides/rateme.yml")
             })
             .times(1)
             .returning(move |_, _| {

@@ -1,4 +1,4 @@
-/// Resolved field set for `pi init`, ready to render into pi.toml (§7).
+/// Resolved field set for `rpi init`, ready to render into rpi.toml (§7).
 pub struct InitFields {
     pub name: String,
     pub repo: String,
@@ -18,8 +18,8 @@ fn toml_str(s: &str) -> String {
     toml::Value::String(s.to_string()).to_string()
 }
 
-/// Render canonical pi.toml text (schema 1, §12) from resolved fields.
-pub fn render_pi_toml(f: &InitFields) -> String {
+/// Render canonical rpi.toml text (schema 1, §12) from resolved fields.
+pub fn render_rpi_toml(f: &InitFields) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "schema = 1\n");
     let _ = writeln!(s, "[project]");
@@ -70,7 +70,7 @@ pub struct DetectedDefaults {
     pub env_file: Option<String>,
 }
 
-/// Best-effort auto-detection of pi.toml defaults from the project dir (§7).
+/// Best-effort auto-detection of rpi.toml defaults from the project dir (§7).
 pub fn detect_defaults(cwd: &Path) -> DetectedDefaults {
     let name = cwd
         .file_name()
@@ -142,51 +142,51 @@ pub fn resolve_init_fields(
 
 use crate::cli::prompt::InquirePrompter;
 
-/// Entrypoint for `pi init`: detect, resolve, write ./pi.toml (backup if present).
+/// Entrypoint for `rpi init`: detect, resolve, write ./rpi.toml (backup if present).
 pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let det = detect_defaults(&cwd);
     let mut prompter = InquirePrompter;
     let fields = resolve_init_fields(&flags, &det, &mut prompter)?;
-    let text = render_pi_toml(&fields);
+    let text = render_rpi_toml(&fields);
 
-    let path = cwd.join("pi.toml");
+    let path = cwd.join("rpi.toml");
     if path.exists() {
-        let overwrite = flags.yes || prompter.confirm("pi.toml exists — overwrite? (a .bak is kept)", false)?;
+        let overwrite = flags.yes || prompter.confirm("rpi.toml exists — overwrite? (a .bak is kept)", false)?;
         if !overwrite {
-            println!("aborted: pi.toml left unchanged");
+            println!("aborted: rpi.toml left unchanged");
             return Ok(());
         }
-        backup_existing_pi_toml(&path)?;
+        backup_existing_rpi_toml(&path)?;
     }
     std::fs::write(&path, &text)?;
     println!("wrote {}", path.display());
-    println!("next: `pi env send` (if you use secrets), then `pi deploy`");
+    println!("next: `rpi env send` (if you use secrets), then `rpi deploy`");
     Ok(())
 }
 
-/// Move `pi.toml` aside to `pi.toml.bak`, rotating any existing `.bak` to `.bak.1`,
+/// Move `rpi.toml` aside to `rpi.toml.bak`, rotating any existing `.bak` to `.bak.1`,
 /// `.bak.1` to `.bak.2`, …, up to `.bak.4` (oldest dropped). Windows-safe: the
 /// highest index is removed before each rename so destinations are always free.
-/// Returns the backup path. No-op-as-error if `pi.toml` does not exist.
-pub fn backup_existing_pi_toml(pi_toml: &std::path::Path) -> std::io::Result<PathBuf> {
-    let dir = pi_toml.parent().unwrap_or(std::path::Path::new("."));
-    let bak = dir.join("pi.toml.bak");
+/// Returns the backup path. No-op-as-error if `rpi.toml` does not exist.
+pub fn backup_existing_rpi_toml(rpi_toml: &std::path::Path) -> std::io::Result<PathBuf> {
+    let dir = rpi_toml.parent().unwrap_or(std::path::Path::new("."));
+    let bak = dir.join("rpi.toml.bak");
     if bak.exists() {
         // rotate .bak.(N-1) -> .bak.N for N=4..1, then .bak -> .bak.1
         for n in (1..=4).rev() {
-            let cur = dir.join(format!("pi.toml.bak.{n}"));
+            let cur = dir.join(format!("rpi.toml.bak.{n}"));
             if cur.exists() {
                 if n == 4 {
                     std::fs::remove_file(&cur)?;
                 } else {
-                    std::fs::rename(&cur, dir.join(format!("pi.toml.bak.{}", n + 1)))?;
+                    std::fs::rename(&cur, dir.join(format!("rpi.toml.bak.{}", n + 1)))?;
                 }
             }
         }
-        std::fs::rename(&bak, dir.join("pi.toml.bak.1"))?;
+        std::fs::rename(&bak, dir.join("rpi.toml.bak.1"))?;
     }
-    std::fs::rename(pi_toml, &bak)?;
+    std::fs::rename(rpi_toml, &bak)?;
     Ok(bak)
 }
 
@@ -211,8 +211,8 @@ mod tests {
 
     #[test]
     fn render_is_parseable_and_round_trips() {
-        let text = render_pi_toml(&sample());
-        let parsed = crate::cli::pitoml::PiToml::parse(&text).unwrap();
+        let text = render_rpi_toml(&sample());
+        let parsed = crate::cli::rpitoml::RpiToml::parse(&text).unwrap();
         let cfg = parsed.to_project_config();
         assert_eq!(cfg.name, "rateme");
         assert_eq!(cfg.service, "web");
@@ -226,10 +226,10 @@ mod tests {
         let mut f = sample();
         f.hostname = None;
         f.expose = Some("lan".into());
-        let text = render_pi_toml(&f);
+        let text = render_rpi_toml(&f);
         assert!(!text.contains("hostname"));
         assert!(text.contains("expose = \"lan\""));
-        let cfg = crate::cli::pitoml::PiToml::parse(&text).unwrap().to_project_config();
+        let cfg = crate::cli::rpitoml::RpiToml::parse(&text).unwrap().to_project_config();
         assert_eq!(cfg.expose, pi_domain::entities::ExposeMode::Lan);
     }
 
@@ -238,9 +238,9 @@ mod tests {
         let mut f = sample();
         f.name = "a\"b".into();
         f.env_file = Some("C:\\app\\.env".into());
-        let text = render_pi_toml(&f);
+        let text = render_rpi_toml(&f);
         // Сгенерированный файл должен быть валидным TOML и разбор возвращать исходные значения.
-        let parsed = crate::cli::pitoml::PiToml::parse(&text).unwrap();
+        let parsed = crate::cli::rpitoml::RpiToml::parse(&text).unwrap();
         assert_eq!(parsed.project.name, "a\"b");
         assert_eq!(parsed.env.file, "C:\\app\\.env");
         // И должно содержать эскейпированные литералы в тексте.
@@ -312,37 +312,37 @@ mod tests {
     #[test]
     fn backup_rotates_existing_bak_to_bak1() {
         let dir = tempfile::tempdir().unwrap();
-        let cur = dir.path().join("pi.toml");
-        let bak = dir.path().join("pi.toml.bak");
-        let bak1 = dir.path().join("pi.toml.bak.1");
+        let cur = dir.path().join("rpi.toml");
+        let bak = dir.path().join("rpi.toml.bak");
+        let bak1 = dir.path().join("rpi.toml.bak.1");
         std::fs::write(&cur, "current").unwrap();
         std::fs::write(&bak, "previous").unwrap();
 
-        let dest = super::backup_existing_pi_toml(&cur).unwrap();
+        let dest = super::backup_existing_rpi_toml(&cur).unwrap();
         assert_eq!(dest, bak, "returns the .bak path");
         assert_eq!(std::fs::read_to_string(&bak).unwrap(), "current", "current moved to .bak");
         assert_eq!(std::fs::read_to_string(&bak1).unwrap(), "previous", "previous .bak rotated to .bak.1");
-        assert!(!cur.exists(), "current pi.toml moved away");
+        assert!(!cur.exists(), "current rpi.toml moved away");
     }
 
     #[test]
     fn backup_caps_at_four_history_files() {
         let dir = tempfile::tempdir().unwrap();
-        let cur = dir.path().join("pi.toml");
+        let cur = dir.path().join("rpi.toml");
         std::fs::write(&cur, "cur").unwrap();
         // pre-seed .bak, .bak.1 .. .bak.4
-        std::fs::write(dir.path().join("pi.toml.bak"), "b0").unwrap();
-        std::fs::write(dir.path().join("pi.toml.bak.1"), "b1").unwrap();
-        std::fs::write(dir.path().join("pi.toml.bak.2"), "b2").unwrap();
-        std::fs::write(dir.path().join("pi.toml.bak.3"), "b3").unwrap();
-        std::fs::write(dir.path().join("pi.toml.bak.4"), "b4-oldest").unwrap();
+        std::fs::write(dir.path().join("rpi.toml.bak"), "b0").unwrap();
+        std::fs::write(dir.path().join("rpi.toml.bak.1"), "b1").unwrap();
+        std::fs::write(dir.path().join("rpi.toml.bak.2"), "b2").unwrap();
+        std::fs::write(dir.path().join("rpi.toml.bak.3"), "b3").unwrap();
+        std::fs::write(dir.path().join("rpi.toml.bak.4"), "b4-oldest").unwrap();
 
-        super::backup_existing_pi_toml(&cur).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak")).unwrap(), "cur");
-        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak.1")).unwrap(), "b0");
-        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak.2")).unwrap(), "b1");
-        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak.3")).unwrap(), "b2");
-        assert_eq!(std::fs::read_to_string(dir.path().join("pi.toml.bak.4")).unwrap(), "b3");
-        assert!(!dir.path().join("pi.toml.bak.5").exists(), "cap at 4 history files");
+        super::backup_existing_rpi_toml(&cur).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak")).unwrap(), "cur");
+        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak.1")).unwrap(), "b0");
+        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak.2")).unwrap(), "b1");
+        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak.3")).unwrap(), "b2");
+        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak.4")).unwrap(), "b3");
+        assert!(!dir.path().join("rpi.toml.bak.5").exists(), "cap at 4 history files");
     }
 }

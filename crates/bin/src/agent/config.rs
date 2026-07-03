@@ -87,10 +87,10 @@ fn default_restart() -> Vec<String> {
 }
 
 fn default_data_dir() -> PathBuf {
-    PathBuf::from("/var/lib/pi")
+    PathBuf::from("/var/lib/rpi")
 }
 fn default_socket() -> PathBuf {
-    PathBuf::from("/run/pi/agent.sock")
+    PathBuf::from("/run/rpi/agent.sock")
 }
 fn default_port_min() -> u16 {
     8000
@@ -108,7 +108,7 @@ fn default_disk_threshold() -> u8 {
     85
 }
 fn default_log_dir() -> PathBuf {
-    PathBuf::from("/var/log/pi")
+    PathBuf::from("/var/log/rpi")
 }
 fn default_log_retention_days() -> u64 {
     14
@@ -147,7 +147,7 @@ impl AgentConfig {
     pub fn load(path: Option<&Path>) -> anyhow::Result<AgentConfig> {
         let path = path
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("/etc/pi/agent.toml"));
+            .unwrap_or_else(|| PathBuf::from("/etc/rpi/agent.toml"));
         if path.exists() {
             AgentConfig::parse(&std::fs::read_to_string(&path)?)
         } else {
@@ -163,10 +163,10 @@ mod tests {
     #[test]
     fn empty_config_gives_spec_defaults() {
         let config = AgentConfig::parse("").unwrap();
-        assert_eq!(config.data_dir, std::path::PathBuf::from("/var/lib/pi"));
+        assert_eq!(config.data_dir, std::path::PathBuf::from("/var/lib/rpi"));
         assert_eq!(
             config.socket,
-            std::path::PathBuf::from("/run/pi/agent.sock")
+            std::path::PathBuf::from("/run/rpi/agent.sock")
         );
         assert!(config.tcp.is_none());
         assert_eq!((config.port_min, config.port_max), (8000, 8999));
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn cloudflared_section_parses_with_default_restart() {
         let config = AgentConfig::parse(
-            "[cloudflared]\nconfig = \"/var/lib/pi/cloudflared/config.yml\"\ntunnel = \"home\"",
+            "[cloudflared]\nconfig = \"/var/lib/rpi/cloudflared/config.yml\"\ntunnel = \"home\"",
         )
         .unwrap();
         let cf = config.cloudflared.unwrap();
@@ -207,7 +207,7 @@ mod tests {
             "deployments kept per project (§18)"
         );
         assert_eq!(config.gc.disk_threshold_percent, 85, "§8.1");
-        assert_eq!(config.logs.dir, PathBuf::from("/var/log/pi"));
+        assert_eq!(config.logs.dir, PathBuf::from("/var/log/rpi"));
         assert_eq!(config.logs.retention_days, 14);
         let t = config.stage_timeouts().unwrap();
         assert_eq!((t.fetch_secs, t.build_secs, t.up_secs), (120, 1800, 300));

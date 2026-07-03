@@ -268,7 +268,7 @@ async fn list_projects(
     Ok(Json(views.into_iter().map(Into::into).collect()))
 }
 
-/// Active (queued/running) deployments of a project — used by `pi deploy --cancel`.
+/// Active (queued/running) deployments of a project — used by `rpi deploy --cancel`.
 async fn active_deployments(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -435,7 +435,7 @@ async fn deployment_logs(
     }
 }
 
-/// `pi env send --apply` runs `up -d` synchronously; its output goes to the
+/// `rpi env send --apply` runs `up -d` synchronously; its output goes to the
 /// agent log (journald), the CLI gets a compact JSON summary.
 struct TracingSink;
 

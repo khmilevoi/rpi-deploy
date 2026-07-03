@@ -12,7 +12,7 @@ impl EnvBundle {
         self.vars.is_empty()
     }
 
-    /// Key names only (sorted, BTreeMap order) — what `pi env ls` shows (§10).
+    /// Key names only (sorted, BTreeMap order) — what `rpi env ls` shows (§10).
     pub fn keys(&self) -> Vec<String> {
         self.vars.keys().cloned().collect()
     }
@@ -27,7 +27,7 @@ impl std::fmt::Debug for EnvBundle {
     }
 }
 
-/// Deploy gate settings from [healthcheck] in pi.toml (§8, §12).
+/// Deploy gate settings from [healthcheck] in rpi.toml (§8, §12).
 /// Per-deploy input: travels with ProjectConfig, not persisted in the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthcheckConfig {
@@ -68,7 +68,7 @@ impl Default for StageTimeouts {
 }
 
 impl StageTimeouts {
-    /// Project overrides from [timeouts] in pi.toml win over agent defaults (§12).
+    /// Project overrides from [timeouts] in rpi.toml win over agent defaults (§12).
     pub fn with_overrides(&self, overrides: &StageTimeoutOverrides) -> StageTimeouts {
         StageTimeouts {
             fetch_secs: overrides.fetch_secs.unwrap_or(self.fetch_secs),
@@ -78,7 +78,7 @@ impl StageTimeouts {
     }
 }
 
-/// Optional per-project overrides ([timeouts] in pi.toml, §12).
+/// Optional per-project overrides ([timeouts] in rpi.toml, §12).
 /// Travels with ProjectConfig like HealthcheckConfig; not persisted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StageTimeoutOverrides {
@@ -131,7 +131,7 @@ impl std::fmt::Display for ExposeMode {
     }
 }
 
-/// Project config from pi.toml (received in deploy request, §12).
+/// Project config from rpi.toml (received in deploy request, §12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectConfig {
     pub name: String,
@@ -147,9 +147,9 @@ pub struct ProjectConfig {
     pub hostname: Option<String>,
     /// How the host port should be exposed. Defaults private for existing configs.
     pub expose: ExposeMode,
-    /// Health gate settings ([healthcheck] from pi.toml). Not persisted in DB.
+    /// Health gate settings ([healthcheck] from rpi.toml). Not persisted in DB.
     pub healthcheck: HealthcheckConfig,
-    /// Stage timeout overrides ([timeouts] from pi.toml). Not persisted in DB.
+    /// Stage timeout overrides ([timeouts] from rpi.toml). Not persisted in DB.
     pub timeouts: StageTimeoutOverrides,
 }
 
@@ -252,7 +252,7 @@ pub struct FetchedSource {
     pub commit_sha: String,
 }
 
-/// State of one service in a compose stack (for `pi ls`).
+/// State of one service in a compose stack (for `rpi ls`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceState {
     pub service: String,
@@ -272,7 +272,7 @@ pub struct ComposeStack {
     pub override_file: PathBuf,
 }
 
-/// Live container metrics of one compose service (`pi stats`, v0.4 design §4).
+/// Live container metrics of one compose service (`rpi stats`, v0.4 design §4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceStats {
     pub service: String,
@@ -281,7 +281,7 @@ pub struct ServiceStats {
     pub mem_limit_bytes: u64,
 }
 
-/// Per-project slice of `pi stats`. last_deploy is filled by the GetStats
+/// Per-project slice of `rpi stats`. last_deploy is filled by the GetStats
 /// use-case from DeploymentHistory, not by the stats provider.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectStats {
@@ -300,14 +300,14 @@ pub struct HostStats {
     pub uptime_secs: u64,
 }
 
-/// Full `pi stats` payload.
+/// Full `rpi stats` payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatsReport {
     pub host: HostStats,
     pub projects: Vec<ProjectStats>,
 }
 
-/// One PASS/FAIL check of `pi doctor` (§14).
+/// One PASS/FAIL check of `rpi doctor` (§14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticCheck {
     pub name: String,
@@ -317,7 +317,7 @@ pub struct DiagnosticCheck {
     pub hint: Option<String>,
 }
 
-/// `pi doctor` result (§14).
+/// `rpi doctor` result (§14).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DiagnosticReport {
     pub checks: Vec<DiagnosticCheck>,
@@ -329,7 +329,7 @@ impl DiagnosticReport {
     }
 }
 
-/// `pi start|stop|restart` (§16). Maps 1:1 to compose subcommands.
+/// `rpi start|stop|restart` (§16). Maps 1:1 to compose subcommands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleAction {
     Start,
@@ -360,7 +360,7 @@ impl std::str::FromStr for LifecycleAction {
     }
 }
 
-/// `pi status` summary (v0.4 design §4).
+/// `rpi status` summary (v0.4 design §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentOverview {
     pub version: String,

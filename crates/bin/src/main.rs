@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "pi",
+    name = "rpi",
     version,
     about = "deploy tool for Raspberry Pi (CLI + agent)"
 )]
@@ -60,9 +60,9 @@ struct SetupArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Deploy current project (reads ./pi.toml)
+    /// Deploy current project (reads ./rpi.toml)
     Deploy {
-        /// Branch or commit-sha (default — branch from pi.toml)
+        /// Branch or commit-sha (default — branch from rpi.toml)
         #[arg(long = "ref", conflicts_with = "cancel")]
         git_ref: Option<String>,
         /// Cancel the active deploy(s) of the current project instead
@@ -140,7 +140,7 @@ enum Cmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
-    /// Generate pi.toml in the current project (wizard; flags for CI)
+    /// Generate rpi.toml in the current project (wizard; flags for CI)
     Init(InitArgs),
     /// Configure a server profile on this machine (wizard; flags for CI)
     Setup(SetupArgs),
@@ -177,7 +177,7 @@ enum EnvCmd {
 enum AgentCmd {
     /// Start the agent (foreground; under systemd)
     Run {
-        /// Path to agent.toml (default: /etc/pi/agent.toml)
+        /// Path to agent.toml (default: /etc/rpi/agent.toml)
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -199,7 +199,7 @@ enum AgentCmd {
     },
     /// Bootstrap the agent on this Pi (run with sudo; idempotent)
     Setup {
-        /// SSH login user to add to the pi-agent group (default: $SUDO_USER)
+        /// SSH login user to add to the rpi-agent group (default: $SUDO_USER)
         #[arg(long)]
         user: Option<String>,
         /// Also bootstrap cloudflared (linger + user unit)
@@ -211,7 +211,7 @@ enum AgentCmd {
     },
     /// Remove the agent (keeps data unless --purge)
     Uninstall {
-        /// Also delete /var/lib/pi, /etc/pi, /var/log/pi (irreversible)
+        /// Also delete /var/lib/rpi, /etc/rpi, /var/log/rpi (irreversible)
         #[arg(long)]
         purge: bool,
         #[arg(long)]

@@ -303,7 +303,7 @@ mod tests {
             project_name: "rateme".into(),
             workdir: workdir.to_path_buf(),
             compose_file: workdir.join("docker-compose.yml"),
-            override_file: PathBuf::from("/var/lib/pi/overrides/rateme.yml"),
+            override_file: PathBuf::from("/var/lib/rpi/overrides/rateme.yml"),
         }
     }
 
