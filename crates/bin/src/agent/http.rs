@@ -1211,7 +1211,11 @@ mod tests {
     #[tokio::test]
     async fn secrets_send_then_ls_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
 
         // "PEM" -> base64 "UEVN"
         let body = serde_json::json!({
@@ -1219,7 +1223,8 @@ mod tests {
             "files": { "certs/server.pem": "UEVN" },
             "apply": false
         });
-        let (status, json) = request(app.clone(), put_json("/v1/projects/rateme/secrets", &body)).await;
+        let (status, json) =
+            request(app.clone(), put_json("/v1/projects/rateme/secrets", &body)).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["saved_keys"], 1);
         assert_eq!(json["saved_files"], 1);
@@ -1234,7 +1239,11 @@ mod tests {
     #[tokio::test]
     async fn secrets_send_rejects_bad_paths_base64_and_oversize() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
 
         for bad in [
             serde_json::json!({ "vars": {}, "files": { "../escape": "UEVN" } }),
@@ -1250,17 +1259,25 @@ mod tests {
         }
 
         use base64::Engine as _;
-        let big = base64::engine::general_purpose::STANDARD
-            .encode(vec![0u8; crate::proto::MAX_SECRET_FILE_BYTES + 1]);
+        let big = base64::engine::general_purpose::STANDARD.encode(vec![
+            0u8;
+            crate::proto::MAX_SECRET_FILE_BYTES
+                + 1
+        ]);
         let body = serde_json::json!({ "vars": {}, "files": { "big.bin": big } });
-        let (status, json) = request(app.clone(), put_json("/v1/projects/rateme/secrets", &body)).await;
+        let (status, json) =
+            request(app.clone(), put_json("/v1/projects/rateme/secrets", &body)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
     }
 
     #[tokio::test]
     async fn secrets_apply_for_unknown_project_is_404() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
         let body = serde_json::json!({ "vars": { "A_KEY": "value-long-enough" }, "files": {}, "apply": true });
         let (status, _) = request(app, put_json("/v1/projects/ghost/secrets", &body)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1269,7 +1286,11 @@ mod tests {
     #[tokio::test]
     async fn secrets_ls_for_unknown_project_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
         let (status, json) = request(app, get_req("/v1/projects/ghost/secrets")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["keys"], serde_json::json!([]));
@@ -1289,7 +1310,11 @@ mod tests {
     #[tokio::test]
     async fn legacy_env_routes_still_work_pending_task_8_removal() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
         let body = serde_json::json!({ "vars": { "A": "1" } });
         let (status, json) = request(app.clone(), put_json("/v1/projects/rateme/env", &body)).await;
         assert_eq!(status, StatusCode::OK, "{json}");

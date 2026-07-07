@@ -508,11 +508,16 @@ mod tests {
     fn secrets_commands_parse_and_env_is_gone() {
         let cli = Cli::try_parse_from(["pi", "secrets", "send", "--apply"]).unwrap();
         match cli.cmd {
-            Cmd::Secrets { cmd: SecretsCmd::Send { apply, .. } } => assert!(apply),
+            Cmd::Secrets {
+                cmd: SecretsCmd::Send { apply, .. },
+            } => assert!(apply),
             _ => panic!("expected secrets send"),
         }
         assert!(Cli::try_parse_from(["pi", "secrets", "ls"]).is_ok());
-        assert!(Cli::try_parse_from(["pi", "env", "send"]).is_err(), "env is removed");
+        assert!(
+            Cli::try_parse_from(["pi", "env", "send"]).is_err(),
+            "env is removed"
+        );
     }
 
     #[test]

@@ -67,7 +67,12 @@ mod tests {
 
     #[test]
     fn accepts_plain_and_nested_forward_slash_paths() {
-        for p in ["certs/server.pem", ".env.production", "a/b/c.txt", "config.json"] {
+        for p in [
+            "certs/server.pem",
+            ".env.production",
+            "a/b/c.txt",
+            "config.json",
+        ] {
             assert!(validate_rel_path(p).is_ok(), "{p}");
         }
     }
@@ -75,16 +80,16 @@ mod tests {
     #[test]
     fn rejects_escapes_absolutes_and_platform_specifics() {
         for p in [
-            "",                    // empty
-            "/etc/passwd",         // absolute
-            "../outside",          // parent escape
-            "a/../b",              // nested escape
-            "./a",                 // current-dir component
-            "a//b",                // empty component
-            "a/",                  // trailing slash
-            r"certs\server.pem",   // backslash (Windows separator)
-            "C:/x",                // drive letter
-            "a\0b",                // NUL
+            "",                  // empty
+            "/etc/passwd",       // absolute
+            "../outside",        // parent escape
+            "a/../b",            // nested escape
+            "./a",               // current-dir component
+            "a//b",              // empty component
+            "a/",                // trailing slash
+            r"certs\server.pem", // backslash (Windows separator)
+            "C:/x",              // drive letter
+            "a\0b",              // NUL
         ] {
             assert!(validate_rel_path(p).is_err(), "{p:?} must be rejected");
         }

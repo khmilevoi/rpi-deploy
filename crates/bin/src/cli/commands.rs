@@ -92,9 +92,7 @@ pub async fn secrets_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<(
     let project_name = rpitoml.project.name.clone();
     let (vars, files) = collect_secrets(Path::new("."), &rpitoml.secrets)?;
     if vars.is_empty() && files.is_empty() {
-        anyhow::bail!(
-            "no secrets to send: env file has no variables and [secrets].files is empty"
-        );
+        anyhow::bail!("no secrets to send: env file has no variables and [secrets].files is empty");
     }
 
     let profile = connect.resolve()?;

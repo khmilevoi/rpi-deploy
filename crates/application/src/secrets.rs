@@ -150,7 +150,8 @@ mod tests {
         let mut b = SecretsBundle::default();
         b.vars.insert("DB_PASSWORD".into(), "hunter2-long".into());
         b.vars.insert("PORT".into(), "3000".into());
-        b.files.insert("certs/server.pem".into(), b"PEM-BODY".to_vec());
+        b.files
+            .insert("certs/server.pem".into(), b"PEM-BODY".to_vec());
         b
     }
 
@@ -234,7 +235,12 @@ mod tests {
         let mut m = mocks();
         m.secrets.expect_save().times(0);
         let err = build(m)
-            .execute("rateme", SecretsBundle::default(), false, CollectSink::new())
+            .execute(
+                "rateme",
+                SecretsBundle::default(),
+                false,
+                CollectSink::new(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Invalid(_)), "got: {err}");
@@ -349,7 +355,10 @@ mod tests {
             .execute("rateme")
             .await
             .unwrap();
-        assert_eq!(stored.keys, vec!["DB_PASSWORD".to_string(), "PORT".to_string()]);
+        assert_eq!(
+            stored.keys,
+            vec!["DB_PASSWORD".to_string(), "PORT".to_string()]
+        );
         assert_eq!(stored.files, vec!["certs/server.pem".to_string()]);
     }
 }

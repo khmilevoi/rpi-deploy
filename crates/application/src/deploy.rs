@@ -338,8 +338,8 @@ mod tests {
         MockSecretsWriter, MockSource,
     };
     use pi_domain::entities::{
-        DeployRef, DeploymentStatus, SecretsBundle, ExposeMode, FetchedSource, HealthcheckConfig,
-        Project, ProjectConfig, StageTimeoutOverrides, StageTimeouts,
+        DeployRef, DeploymentStatus, ExposeMode, FetchedSource, HealthcheckConfig, Project,
+        ProjectConfig, SecretsBundle, StageTimeoutOverrides, StageTimeouts,
     };
     use pi_domain::error::DomainError;
     use std::{
@@ -852,7 +852,8 @@ mod tests {
     fn secret_bundle() -> SecretsBundle {
         let mut b = SecretsBundle::default();
         b.vars.insert("DB_PASSWORD".into(), "hunter2-long".into());
-        b.files.insert("certs/server.pem".into(), b"PEM-BODY".to_vec());
+        b.files
+            .insert("certs/server.pem".into(), b"PEM-BODY".to_vec());
         b
     }
 
@@ -961,7 +962,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.status, DeploymentStatus::Success);
-        assert!(result.log_tail.contains("secrets injected (1 keys, 1 files)"));
+        assert!(result
+            .log_tail
+            .contains("secrets injected (1 keys, 1 files)"));
         assert!(
             result.log_tail.contains("***DB_PASSWORD***"),
             "tail: {}",

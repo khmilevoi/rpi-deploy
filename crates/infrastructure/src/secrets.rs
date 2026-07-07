@@ -96,7 +96,12 @@ impl SecretStore for EncryptedFileStore {
             files: bundle
                 .files
                 .iter()
-                .map(|(p, b)| (p.clone(), base64::engine::general_purpose::STANDARD.encode(b)))
+                .map(|(p, b)| {
+                    (
+                        p.clone(),
+                        base64::engine::general_purpose::STANDARD.encode(b),
+                    )
+                })
                 .collect(),
         };
         let plaintext = serde_json::to_vec(&stored).map_err(secrets_err)?;
@@ -129,7 +134,10 @@ impl SecretStore for EncryptedFileStore {
                         .map_err(secrets_err)?;
                     files.insert(path, bytes);
                 }
-                Ok(SecretsBundle { vars: stored.vars, files })
+                Ok(SecretsBundle {
+                    vars: stored.vars,
+                    files,
+                })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // pre-secrets agents stored dotenv text at <project>.env.age
@@ -264,7 +272,10 @@ mod tests {
         let store = EncryptedFileStore::open(dir.path()).unwrap();
         store.save("rateme", &bundle()).await.unwrap();
         let raw = std::fs::read(dir.path().join("secrets").join("rateme.secrets.age")).unwrap();
-        for needle in [b"super-secret-value".as_slice(), b"certs/server.pem".as_slice()] {
+        for needle in [
+            b"super-secret-value".as_slice(),
+            b"certs/server.pem".as_slice(),
+        ] {
             assert!(!raw.windows(needle.len()).any(|w| w == needle));
         }
     }

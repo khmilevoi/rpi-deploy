@@ -89,7 +89,10 @@ fn stat_dir_component(dir: &Path) -> std::io::Result<DirStep> {
     }
 }
 
-fn write_files_blocking(workdir: PathBuf, files: Vec<(String, Vec<u8>)>) -> Result<(), DomainError> {
+fn write_files_blocking(
+    workdir: PathBuf,
+    files: Vec<(String, Vec<u8>)>,
+) -> Result<(), DomainError> {
     let root = std::fs::canonicalize(&workdir)
         .map_err(|e| storage_err("canonicalize workdir".into(), e))?;
     for (rel, bytes) in files {
@@ -297,8 +300,11 @@ impl SecretsWriter for FsSecretsWriter {
             .map_err(|e| storage_err("write .env".into(), e))?;
         }
         let root = workdir.to_path_buf();
-        let files: Vec<(String, Vec<u8>)> =
-            bundle.files.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let files: Vec<(String, Vec<u8>)> = bundle
+            .files
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let current: BTreeSet<String> = bundle.files.keys().cloned().collect();
         tokio::task::spawn_blocking(move || sync_files_blocking(root, files, current))
             .await
@@ -401,7 +407,10 @@ mod tests {
         let mut b = SecretsBundle::default();
         b.files.insert("secret.txt".into(), b"x".to_vec());
         FsSecretsWriter::new().write(dir.path(), &b).await.unwrap();
-        assert!(!dir.path().join(".env").exists(), "stale .env must not survive");
+        assert!(
+            !dir.path().join(".env").exists(),
+            "stale .env must not survive"
+        );
         assert_eq!(std::fs::read(dir.path().join("secret.txt")).unwrap(), b"x");
     }
 
@@ -410,7 +419,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut b = SecretsBundle::default();
         b.files.insert("../escape.txt".into(), b"x".to_vec());
-        let err = FsSecretsWriter::new().write(dir.path(), &b).await.unwrap_err();
+        let err = FsSecretsWriter::new()
+            .write(dir.path(), &b)
+            .await
+            .unwrap_err();
         assert!(matches!(err, DomainError::Invalid(_)), "got: {err}");
         assert!(!dir.path().parent().unwrap().join("escape.txt").exists());
     }
@@ -427,10 +439,16 @@ mod tests {
 
         let mut b = SecretsBundle::default();
         b.files.insert("link/leak.txt".into(), b"secret".to_vec());
-        let err = FsSecretsWriter::new().write(&workdir, &b).await.unwrap_err();
+        let err = FsSecretsWriter::new()
+            .write(&workdir, &b)
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, DomainError::Invalid(_)), "got: {err}");
-        assert!(!outside.join("leak.txt").exists(), "write escaped the workdir");
+        assert!(
+            !outside.join("leak.txt").exists(),
+            "write escaped the workdir"
+        );
     }
 
     #[cfg(unix)]
@@ -452,7 +470,10 @@ mod tests {
         let mut b = SecretsBundle::default();
         b.files
             .insert("certs/nested/leak.txt".into(), b"secret".to_vec());
-        let err = FsSecretsWriter::new().write(&workdir, &b).await.unwrap_err();
+        let err = FsSecretsWriter::new()
+            .write(&workdir, &b)
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, DomainError::Invalid(_)), "got: {err}");
         assert!(
@@ -469,7 +490,9 @@ mod tests {
 
         let mut first = SecretsBundle::default();
         first.files.insert("keep.txt".into(), b"keep-me".to_vec());
-        first.files.insert("drop/me.txt".into(), b"drop-me".to_vec());
+        first
+            .files
+            .insert("drop/me.txt".into(), b"drop-me".to_vec());
         writer.write(dir.path(), &first).await.unwrap();
         assert!(dir.path().join("keep.txt").exists());
         assert!(dir.path().join("drop/me.txt").exists());
@@ -515,7 +538,9 @@ mod tests {
 
         let mut with_files = SecretsBundle::default();
         with_files.files.insert("a.txt".into(), b"a".to_vec());
-        with_files.files.insert("nested/b.txt".into(), b"b".to_vec());
+        with_files
+            .files
+            .insert("nested/b.txt".into(), b"b".to_vec());
         writer.write(dir.path(), &with_files).await.unwrap();
         assert!(dir.path().join(MANIFEST_FILE_NAME).exists());
 

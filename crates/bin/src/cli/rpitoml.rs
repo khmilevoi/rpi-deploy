@@ -353,9 +353,10 @@ files = ["certs/server.pem"]
 
     #[test]
     fn missing_env_and_healthcheck_sections_fall_back_to_defaults() {
-        let toml = SAMPLE
-            .replace("[healthcheck]\npath = \"/\"\n", "")
-            .replace("[secrets]\nenv = \".env\"\nfiles = [\"certs/server.pem\"]\n", "");
+        let toml = SAMPLE.replace("[healthcheck]\npath = \"/\"\n", "").replace(
+            "[secrets]\nenv = \".env\"\nfiles = [\"certs/server.pem\"]\n",
+            "",
+        );
         let parsed = RpiToml::parse(&toml).unwrap();
         assert!(parsed.secrets.env.is_none());
         assert!(parsed.secrets.files.is_empty());
@@ -371,7 +372,10 @@ files = ["certs/server.pem"]
             "[env]\nfile = \".env\"\n",
         );
         let err = RpiToml::parse(&toml).unwrap_err().to_string();
-        assert!(err.contains("[env] was replaced by [secrets]"), "got: {err}");
+        assert!(
+            err.contains("[env] was replaced by [secrets]"),
+            "got: {err}"
+        );
     }
 
     #[test]
