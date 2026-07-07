@@ -17,9 +17,9 @@ use tokio::sync::mpsc;
 use crate::agent::logfile;
 use crate::agent::state::AppState;
 use crate::proto::{
-    AgentOverviewDto, DeployAccepted, DeployRequest, DeploymentDto, DiagnosticReportDto,
-    EnvKeysResponse, EnvSendRequest, EnvSendResponse, GcResponse, LifecycleResponse,
-    ProjectViewDto, RemoveResponse, StatsReportDto, VersionInfo,
+    AgentOverviewDto, CommandRunRequest, CommandsResponse, DeployAccepted, DeployRequest,
+    DeploymentDto, DiagnosticReportDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
+    GcResponse, LifecycleResponse, ProjectViewDto, RemoveResponse, StatsReportDto, VersionInfo,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -40,6 +40,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/projects/{name}", delete(remove_project))
         .route("/v1/projects/{name}/logs", get(project_logs))
         .route("/v1/projects/{name}/lifecycle/{action}", post(lifecycle))
+        .route("/v1/projects/{name}/commands", get(list_commands))
+        .route(
+            "/v1/projects/{name}/commands/{command}",
+            post(run_command),
+        )
         .route(
             "/v1/projects/{name}/deployments/active",
             get(active_deployments),
@@ -101,6 +106,18 @@ async fn create_deployment(
         return Err(ApiError(DomainError::Invalid(
             "project.port must be > 0".into(),
         )));
+    }
+    for (cmd_name, argv) in &config.commands {
+        if !is_valid_name(cmd_name) {
+            return Err(ApiError(DomainError::Invalid(format!(
+                "command name '{cmd_name}' must match ^[a-z0-9][a-z0-9_-]*$"
+            ))));
+        }
+        if argv.is_empty() || argv.iter().any(|a| a.is_empty()) {
+            return Err(ApiError(DomainError::Invalid(format!(
+                "command '{cmd_name}' must have a non-empty argv"
+            ))));
+        }
     }
     let git_ref = DeployRef::parse(req.git_ref.as_deref().unwrap_or(&config.branch));
 
@@ -195,6 +212,72 @@ async fn lifecycle(
         project: name,
         action: action.as_str().to_string(),
     }))
+}
+
+async fn list_commands(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<CommandsResponse>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    let commands = state.commands.list(&name).await.map_err(ApiError)?;
+    Ok(Json(CommandsResponse { commands }))
+}
+
+async fn run_command(
+    State(state): State<AppState>,
+    Path((name, command)): Path<(String, String)>,
+    Json(req): Json<CommandRunRequest>,
+) -> Result<Response, ApiError> {
+    if !is_valid_name(&name) || !is_valid_name(&command) {
+        return Err(ApiError(DomainError::Invalid(
+            "project and command names must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    // 404 with a JSON error before the SSE stream opens.
+    state
+        .commands
+        .resolve(&name, &command)
+        .await
+        .map_err(ApiError)?;
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let run = state.commands.clone();
+    let args = req.args;
+    let (task_name, task_cmd, task_args) = (name.clone(), command.clone(), args.clone());
+    let started = std::time::Instant::now();
+    let handle = tokio::spawn(async move {
+        run.execute(&task_name, &task_cmd, &task_args, Arc::new(ChannelSink(tx)))
+            .await
+    });
+    let stream = async_stream::stream! {
+        // Client disconnect drops this stream -> guard aborts the task ->
+        // the exec future is dropped -> kill_on_drop kills `docker compose
+        // exec` (best effort; the in-container process may survive).
+        let mut guard = AbortOnDrop(handle);
+        while let Some(line) = rx.recv().await {
+            yield sse_log(line);
+        }
+        let code = match (&mut guard.0).await {
+            Ok(Ok(code)) => code,
+            Ok(Err(e)) => {
+                yield sse_log(format!("error: {e}"));
+                1
+            }
+            Err(_) => 1,
+        };
+        tracing::info!(
+            "command run: project={name} command={command} args={args:?} exit={code} duration={}s",
+            started.elapsed().as_secs()
+        );
+        yield sse_exit(code);
+    };
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -393,6 +476,11 @@ fn sse_finished(status: &str) -> Result<Event, Infallible> {
     Ok(Event::default().event("finished").data(status))
 }
 
+/// Terminal event of a command run: the in-container exit code.
+fn sse_exit(code: i32) -> Result<Event, Infallible> {
+    Ok(Event::default().event("exit").data(code.to_string()))
+}
+
 async fn deployment_logs(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -532,6 +620,9 @@ mod tests {
             })
         });
         source
+            .expect_workdir()
+            .returning(|name| std::env::temp_dir().join(name));
+        source
     }
 
     fn ok_runtime() -> MockContainerRuntime {
@@ -609,6 +700,12 @@ mod tests {
             source.clone(),
             overrides.clone(),
         );
+        let commands = pi_application::command::RunCommand::new(
+            projects.clone(),
+            Arc::clone(&runtime),
+            source.clone(),
+            overrides.clone(),
+        );
         let remove = RemoveProject::new(
             projects.clone(),
             Arc::clone(&history),
@@ -650,6 +747,7 @@ mod tests {
             stream_logs,
             stats,
             lifecycle,
+            commands,
             remove,
             diagnostics,
             agent_status,
@@ -1078,5 +1176,137 @@ mod tests {
         let (status, json) = request(app, get_req("/v1/projects/ghost/env")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["keys"], serde_json::json!([]));
+    }
+
+    fn deploy_body_with_commands(name: &str) -> serde_json::Value {
+        let mut body = deploy_body(name);
+        body["project"]["commands"] = serde_json::json!({
+            "create-invite": ["node", "scripts/create-invite.js"]
+        });
+        body
+    }
+
+    /// Deploys and polls until the deployment reaches `success`.
+    async fn deploy_and_wait(app: &Router, body: &serde_json::Value) {
+        let (status, json) = request(app.clone(), post_json("/v1/deployments", body)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = json["deployment_id"].as_str().unwrap().to_string();
+        for _ in 0..100 {
+            let (_, d) = request(app.clone(), get_req(&format!("/v1/deployments/{id}"))).await;
+            if d["status"] == "success" {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("deployment did not reach success");
+    }
+
+    async fn request_text(
+        app: Router,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> (StatusCode, String) {
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn list_commands_returns_deployed_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        deploy_and_wait(&app, &deploy_body_with_commands("rateme")).await;
+
+        let (status, json) = request(app.clone(), get_req("/v1/projects/rateme/commands")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["commands"]["create-invite"],
+            serde_json::json!(["node", "scripts/create-invite.js"])
+        );
+
+        let (status, _) = request(app, get_req("/v1/projects/ghost/commands")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn run_command_streams_output_and_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = ok_runtime();
+        runtime
+            .expect_exec()
+            .withf(|_, service, argv, _| {
+                service == "web"
+                    && argv == ["node", "scripts/create-invite.js", "--email", "x@y.com"]
+            })
+            .returning(|_, _, _, log| {
+                log.line("invite created");
+                Ok(0)
+            });
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(runtime),
+        ));
+        deploy_and_wait(&app, &deploy_body_with_commands("rateme")).await;
+
+        let (status, body) = request_text(
+            app,
+            post_json(
+                "/v1/projects/rateme/commands/create-invite",
+                &serde_json::json!({ "args": ["--email", "x@y.com"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("event: log"), "got: {body}");
+        assert!(body.contains("invite created"), "got: {body}");
+        assert!(body.contains("event: exit"), "got: {body}");
+        assert!(body.contains("data: 0"), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn run_unknown_command_is_404_with_available_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        deploy_and_wait(&app, &deploy_body_with_commands("rateme")).await;
+
+        let (status, json) = request(
+            app,
+            post_json(
+                "/v1/projects/rateme/commands/nope",
+                &serde_json::json!({ "args": [] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("create-invite"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn deploy_rejects_invalid_command_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let mut body = deploy_body("rateme");
+        body["project"]["commands"] = serde_json::json!({ "Bad Name": ["run"] });
+        let (status, _) = request(app.clone(), post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let mut body = deploy_body("rateme");
+        body["project"]["commands"] = serde_json::json!({ "x": [] });
+        let (status, _) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
