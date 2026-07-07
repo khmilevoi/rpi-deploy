@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use pi_application::command::RunCommand;
 use pi_application::deploy::DeployProject;
 use pi_application::diagnostics::{AgentStatus, RunDiagnostics};
 use pi_application::env::{ListEnvKeys, SendEnv};
@@ -46,6 +47,7 @@ pub struct AppState {
     pub stream_logs: Arc<StreamLogs>,
     pub stats: Arc<GetStats>,
     pub lifecycle: Arc<ControlLifecycle>,
+    pub commands: Arc<RunCommand>,
     pub remove: Arc<RemoveProject>,
     pub diagnostics: Arc<RunDiagnostics>,
     pub agent_status: Arc<AgentStatus>,
@@ -112,6 +114,12 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         source.clone(),
         overrides.clone(),
     );
+    let commands = RunCommand::new(
+        projects.clone(),
+        runtime.clone(),
+        source.clone(),
+        overrides.clone(),
+    );
     let remove = RemoveProject::new(
         projects.clone(),
         Arc::clone(&history),
@@ -158,6 +166,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         stream_logs,
         stats,
         lifecycle,
+        commands,
         remove,
         diagnostics,
         agent_status,

@@ -46,9 +46,7 @@ impl ListProjects {
         // (UDP-connect syscall offloaded to a blocking thread like deploy.rs).
         // Avoids the syscall for empty lists, private-only stacks, and — by
         // returning early above on a repo error — repository failures.
-        let needs_lan_ip = projects
-            .iter()
-            .any(|p| p.config.expose == ExposeMode::Lan);
+        let needs_lan_ip = projects.iter().any(|p| p.config.expose == ExposeMode::Lan);
         let lan_ip = if needs_lan_ip {
             let hn = Arc::clone(&self.host_network);
             tokio::task::spawn_blocking(move || hn.primary_ipv4())
@@ -76,7 +74,11 @@ impl ListProjects {
                 hostname: project.config.hostname,
                 host_port: project.host_port,
                 expose,
-                lan_ip: if expose == ExposeMode::Lan { lan_ip } else { None },
+                lan_ip: if expose == ExposeMode::Lan {
+                    lan_ip
+                } else {
+                    None
+                },
                 services,
             });
         }
@@ -106,6 +108,8 @@ mod tests {
                 expose: ExposeMode::default(),
                 healthcheck: HealthcheckConfig::default(),
                 timeouts: StageTimeoutOverrides::default(),
+                commands: Default::default(),
+                command_timeout_secs: None,
             },
             host_port,
             created_at: 1,
@@ -179,11 +183,7 @@ mod tests {
         let mut net = MockHostNetwork::new();
         net.expect_primary_ipv4().times(0);
 
-        let list = ListProjects::new(
-            Arc::new(projects),
-            Arc::new(runtime),
-            Arc::new(net),
-        );
+        let list = ListProjects::new(Arc::new(projects), Arc::new(runtime), Arc::new(net));
         let err = list.execute().await.unwrap_err();
 
         assert!(matches!(err, DomainError::Storage(message) if message == "db unavailable"));

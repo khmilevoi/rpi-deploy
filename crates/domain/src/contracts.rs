@@ -74,6 +74,17 @@ pub trait ContainerRuntime: Send + Sync {
         remove_volumes: bool,
         log: Arc<dyn LogSink>,
     ) -> Result<(), DomainError>;
+    /// `docker compose exec -T <service> <argv...>` inside the running
+    /// service container ([commands], §spec). Returns the process exit code;
+    /// nonzero is data, not an error. Dropping the future kills the compose
+    /// exec client (best effort — the in-container process may survive).
+    async fn exec(
+        &self,
+        stack: &ComposeStack,
+        service: &str,
+        argv: &[String],
+        log: Arc<dyn LogSink>,
+    ) -> Result<i32, DomainError>;
 }
 
 /// Disk fill probe for the GC threshold decision (§8.1). v1 — sysinfo.

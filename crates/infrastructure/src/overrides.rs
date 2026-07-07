@@ -44,9 +44,12 @@ impl OverrideStore for FsOverrideStore {
         let io_err = |e: std::io::Error| DomainError::Storage(format!("override write: {e}"));
         tokio::fs::create_dir_all(&self.dir).await.map_err(io_err)?;
         let path = self.dir.join(format!("{project}.yml"));
-        tokio::fs::write(&path, override_yaml(service, bind, host_port, container_port))
-            .await
-            .map_err(io_err)?;
+        tokio::fs::write(
+            &path,
+            override_yaml(service, bind, host_port, container_port),
+        )
+        .await
+        .map_err(io_err)?;
         Ok(path)
     }
 

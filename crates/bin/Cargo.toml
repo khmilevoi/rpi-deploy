@@ -27,6 +27,7 @@ async-stream = { workspace = true }
 dirs = { workspace = true }
 anyhow = { workspace = true }
 inquire = { workspace = true }
+shlex = { workspace = true }
 
 [dev-dependencies]
 pi-domain = { workspace = true, features = ["mocks"] }

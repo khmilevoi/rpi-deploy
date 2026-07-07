@@ -113,9 +113,10 @@ impl ClientConfig {
         let path = ClientConfig::path()?;
         let mut cfg = match std::fs::read_to_string(&path) {
             Ok(text) => ClientConfig::parse(&text)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                ClientConfig { default: None, servers: HashMap::new() }
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ClientConfig {
+                default: None,
+                servers: HashMap::new(),
+            },
             Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
         };
         cfg.upsert(name, profile, make_default);
@@ -184,12 +185,20 @@ key = "~/.ssh/pi"
         let mut cfg = ClientConfig::parse(existing).unwrap();
         cfg.upsert(
             "work",
-            ServerProfile { host: "10.0.0.2".into(), user: "deploy".into(), key: None },
+            ServerProfile {
+                host: "10.0.0.2".into(),
+                user: "deploy".into(),
+                key: None,
+            },
             false,
         );
         let rendered = toml::to_string(&cfg).unwrap();
         let reparsed = ClientConfig::parse(&rendered).unwrap();
-        assert_eq!(reparsed.default.as_deref(), Some("home"), "default preserved");
+        assert_eq!(
+            reparsed.default.as_deref(),
+            Some("home"),
+            "default preserved"
+        );
         assert_eq!(reparsed.servers.len(), 2);
         assert_eq!(reparsed.servers["home"].host, "pihost.local");
         assert_eq!(reparsed.servers["work"].host, "10.0.0.2");
@@ -198,10 +207,33 @@ key = "~/.ssh/pi"
 
     #[test]
     fn upsert_sets_default_only_when_requested_and_absent() {
-        let mut cfg = ClientConfig { default: None, servers: Default::default() };
-        cfg.upsert("home", ServerProfile { host: "h".into(), user: "u".into(), key: None }, true);
+        let mut cfg = ClientConfig {
+            default: None,
+            servers: Default::default(),
+        };
+        cfg.upsert(
+            "home",
+            ServerProfile {
+                host: "h".into(),
+                user: "u".into(),
+                key: None,
+            },
+            true,
+        );
         assert_eq!(cfg.default.as_deref(), Some("home"));
-        cfg.upsert("work", ServerProfile { host: "h2".into(), user: "u".into(), key: None }, true);
-        assert_eq!(cfg.default.as_deref(), Some("home"), "existing default not overwritten");
+        cfg.upsert(
+            "work",
+            ServerProfile {
+                host: "h2".into(),
+                user: "u".into(),
+                key: None,
+            },
+            true,
+        );
+        assert_eq!(
+            cfg.default.as_deref(),
+            Some("home"),
+            "existing default not overwritten"
+        );
     }
 }
