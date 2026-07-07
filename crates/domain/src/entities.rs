@@ -1,31 +1,42 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Project secrets: key -> value (§4). Values never leave the agent unmasked.
+/// Project secrets: env vars + secret files (secrets spec 2026-07-07).
+/// Values and file contents never leave the agent unmasked.
 #[derive(Clone, PartialEq, Eq, Default)]
-pub struct EnvBundle {
+pub struct SecretsBundle {
     pub vars: BTreeMap<String, String>,
+    /// Relative path (forward slashes) -> raw file bytes.
+    pub files: BTreeMap<String, Vec<u8>>,
 }
 
-impl EnvBundle {
+impl SecretsBundle {
     pub fn is_empty(&self) -> bool {
-        self.vars.is_empty()
+        self.vars.is_empty() && self.files.is_empty()
     }
 
-    /// Key names only (sorted, BTreeMap order) — what `rpi env ls` shows (§10).
+    /// Env key names only (sorted, BTreeMap order) — `rpi secrets ls`.
     pub fn keys(&self) -> Vec<String> {
         self.vars.keys().cloned().collect()
     }
+
+    /// Secret file paths only (sorted) — `rpi secrets ls`.
+    pub fn file_paths(&self) -> Vec<String> {
+        self.files.keys().cloned().collect()
+    }
 }
 
-impl std::fmt::Debug for EnvBundle {
+impl std::fmt::Debug for SecretsBundle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EnvBundle")
-            .field("len", &self.vars.len())
+        f.debug_struct("SecretsBundle")
             .field("keys", &self.keys())
+            .field("files", &self.file_paths())
             .finish()
     }
 }
+
+/// Temporary alias while call sites migrate; removed in the cleanup task.
+pub type EnvBundle = SecretsBundle;
 
 /// Deploy gate settings from [healthcheck] in rpi.toml (§8, §12).
 /// Per-deploy input: travels with ProjectConfig, not persisted in the registry.
@@ -375,36 +386,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_bundle_default_is_empty_and_keys_are_sorted() {
-        let mut bundle = EnvBundle::default();
+    fn secrets_bundle_default_is_empty_and_keys_are_sorted() {
+        let mut bundle = SecretsBundle::default();
         assert!(bundle.is_empty());
         bundle.vars.insert("Z_KEY".into(), "1".into());
         bundle.vars.insert("A_KEY".into(), "2".into());
         assert!(!bundle.is_empty());
-        assert_eq!(
-            bundle.keys(),
-            vec!["A_KEY".to_string(), "Z_KEY".to_string()]
-        );
+        assert_eq!(bundle.keys(), vec!["A_KEY".to_string(), "Z_KEY".to_string()]);
     }
 
     #[test]
-    fn env_bundle_debug_shows_keys_and_count_without_values() {
-        let mut bundle = EnvBundle::default();
+    fn secrets_bundle_with_only_files_is_not_empty() {
+        let mut bundle = SecretsBundle::default();
+        bundle.files.insert("certs/server.pem".into(), b"PEM".to_vec());
+        assert!(!bundle.is_empty());
+        assert_eq!(bundle.file_paths(), vec!["certs/server.pem".to_string()]);
+        assert!(bundle.keys().is_empty());
+    }
+
+    #[test]
+    fn secrets_bundle_debug_shows_names_without_values_or_contents() {
+        let mut bundle = SecretsBundle::default();
+        bundle.vars.insert("API_TOKEN".into(), "raw-token-value".into());
         bundle
-            .vars
-            .insert("API_TOKEN".into(), "raw-token-value".into());
-        bundle
-            .vars
-            .insert("DATABASE_URL".into(), "postgres://secret".into());
+            .files
+            .insert("certs/server.pem".into(), b"secret-file-body".to_vec());
 
         let debug = format!("{bundle:?}");
 
-        assert!(debug.contains("EnvBundle"));
-        assert!(debug.contains("len: 2"));
+        assert!(debug.contains("SecretsBundle"));
         assert!(debug.contains("API_TOKEN"));
-        assert!(debug.contains("DATABASE_URL"));
+        assert!(debug.contains("certs/server.pem"));
         assert!(!debug.contains("raw-token-value"));
-        assert!(!debug.contains("postgres://secret"));
+        assert!(!debug.contains("secret-file-body"));
     }
 
     #[test]
