@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,10 +11,11 @@ use crate::fsutil;
 use crate::secretpath;
 
 /// Writes the decrypted bundle into `<workdir>`: `.env` (0600, atomic) plus
-/// every secret file at its relative path (dirs 0700, files 0600). The parent
-/// of each target is canonicalized and must stay inside the canonicalized
-/// workdir, so a symlink committed to the repo cannot redirect writes outside
-/// (secrets spec §7). Files stay in place: compose re-reads them on `up`.
+/// every secret file at its relative path (dirs 0700, files 0600). Each
+/// directory level between the workdir root and the target is checked for a
+/// symlink *before* being created or descended into, so a symlink committed
+/// to the repo cannot redirect writes outside the workdir (secrets spec §7).
+/// Files stay in place: compose re-reads them on `up`.
 pub struct FsSecretsWriter;
 
 impl FsSecretsWriter {
@@ -27,9 +28,9 @@ fn storage_err(context: String, e: impl std::fmt::Display) -> DomainError {
     DomainError::Storage(format!("{context}: {e}"))
 }
 
-fn create_private_dirs(path: &Path) -> std::io::Result<()> {
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    #[allow(unused_mut)]
     let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -44,23 +45,39 @@ fn write_files_blocking(workdir: PathBuf, files: Vec<(String, Vec<u8>)>) -> Resu
     for (rel, bytes) in files {
         secretpath::validate_rel_path(&rel)
             .map_err(|e| DomainError::Invalid(format!("secret file '{rel}': {e}")))?;
-        let target = root.join(&rel);
-        let parent = target
-            .parent()
-            .ok_or_else(|| DomainError::Invalid(format!("secret file '{rel}': no parent")))?;
-        create_private_dirs(parent)
-            .map_err(|e| storage_err(format!("create dirs for '{rel}'"), e))?;
-        let canon_parent = std::fs::canonicalize(parent)
-            .map_err(|e| storage_err(format!("canonicalize parent of '{rel}'"), e))?;
-        if !canon_parent.starts_with(&root) {
-            return Err(DomainError::Invalid(format!(
-                "secret file '{rel}' escapes the workdir (symlinked directory?)"
-            )));
-        }
-        let name = target
-            .file_name()
+        let mut components: Vec<Component<'_>> = Path::new(&rel).components().collect();
+        let file_component = components
+            .pop()
             .ok_or_else(|| DomainError::Invalid(format!("secret file '{rel}': empty name")))?;
-        fsutil::write_private_atomic(&canon_parent.join(name), &bytes)
+
+        // Walk each intermediate directory level from the (already
+        // canonical) workdir root down to the target's parent, refusing to
+        // create or step through a symlink at any level. Unlike `mkdir -p`
+        // (the previous approach), which follows symlinks for every
+        // intermediate path component, this checks each level *before*
+        // creating or descending into it, so a symlink committed into the
+        // repo can never be followed to create anything outside the root —
+        // not even transiently, for a multi-level path under the symlink.
+        let mut dir = root.clone();
+        for component in &components {
+            dir.push(component);
+            match std::fs::symlink_metadata(&dir) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(DomainError::Invalid(format!(
+                        "secret file '{rel}' escapes the workdir (symlinked directory?)"
+                    )));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    create_private_dir(&dir)
+                        .map_err(|e| storage_err(format!("create dir for '{rel}'"), e))?;
+                }
+                Err(e) => return Err(storage_err(format!("stat dir for '{rel}'"), e)),
+            }
+        }
+
+        let target = dir.join(file_component);
+        fsutil::write_private_atomic(&target, &bytes)
             .map_err(|e| storage_err(format!("write secret file '{rel}'"), e))?;
     }
     Ok(())
@@ -229,6 +246,35 @@ mod tests {
 
         assert!(matches!(err, DomainError::Invalid(_)), "got: {err}");
         assert!(!outside.join("leak.txt").exists(), "write escaped the workdir");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_symlinked_directory_cannot_redirect_writes_outside_workdir() {
+        // Regression test: a multi-level relative path under a symlinked
+        // intermediate directory must not cause any directory to be
+        // created outside the workdir, even transiently. The previous
+        // `mkdir -p` + canonicalize-after-the-fact approach followed the
+        // symlink while creating "nested", planting a real directory in
+        // `outside` before the escape check ever ran.
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("wd");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, workdir.join("certs")).unwrap();
+
+        let mut b = SecretsBundle::default();
+        b.files
+            .insert("certs/nested/leak.txt".into(), b"secret".to_vec());
+        let err = FsSecretsWriter::new().write(&workdir, &b).await.unwrap_err();
+
+        assert!(matches!(err, DomainError::Invalid(_)), "got: {err}");
+        assert!(
+            !outside.join("nested").exists(),
+            "directory must not be created outside the workdir"
+        );
+        assert!(!outside.join("nested").join("leak.txt").exists());
     }
 
     #[cfg(unix)]
