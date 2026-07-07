@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::agent::setup::{user_exists, HostSys, Sys, UNIT_PATH};
+use std::path::Path;
 
 pub struct UninstallOpts {
     pub purge: bool,
@@ -17,11 +17,20 @@ pub struct UninstallReport {
 pub async fn uninstall(sys: &dyn Sys, opts: &UninstallOpts) -> UninstallReport {
     let mut rep = UninstallReport::default();
 
-    if sys.run("systemctl", &["disable", "--now", "rpi-agent"]).await.is_err() {
-        rep.warnings.push("systemctl disable --now rpi-agent failed (may already be stopped)".into());
+    if sys
+        .run("systemctl", &["disable", "--now", "rpi-agent"])
+        .await
+        .is_err()
+    {
+        rep.warnings
+            .push("systemctl disable --now rpi-agent failed (may already be stopped)".into());
     }
     if sys.exists(Path::new(UNIT_PATH)) {
-        if sys.run("rm", &["-f", UNIT_PATH, &format!("{UNIT_PATH}.bak")]).await.is_ok() {
+        if sys
+            .run("rm", &["-f", UNIT_PATH, &format!("{UNIT_PATH}.bak")])
+            .await
+            .is_ok()
+        {
             rep.removed.push(UNIT_PATH.into());
         } else {
             rep.warnings.push(format!("failed to remove {UNIT_PATH}"));
@@ -34,7 +43,8 @@ pub async fn uninstall(sys: &dyn Sys, opts: &UninstallOpts) -> UninstallReport {
         if sys.run("userdel", &["rpi-agent"]).await.is_ok() {
             rep.removed.push("user rpi-agent".into());
         } else {
-            rep.warnings.push("userdel rpi-agent failed (user may be in use)".into());
+            rep.warnings
+                .push("userdel rpi-agent failed (user may be in use)".into());
         }
     }
 
@@ -44,7 +54,8 @@ pub async fn uninstall(sys: &dyn Sys, opts: &UninstallOpts) -> UninstallReport {
                 if sys.run("rm", &["-rf", dir]).await.is_ok() {
                     rep.removed.push(dir.into());
                 } else {
-                    rep.errors.push(format!("failed to purge {dir} (data remains on disk)"));
+                    rep.errors
+                        .push(format!("failed to purge {dir} (data remains on disk)"));
                 }
             }
         }
@@ -67,15 +78,26 @@ pub async fn run_cmd(purge: bool, yes: bool) -> anyhow::Result<()> {
         );
     }
     let report = uninstall(&HostSys, &UninstallOpts { purge }).await;
-    for r in &report.removed { println!("removed: {r}"); }
-    for k in &report.kept { println!("kept: {k}"); }
-    for w in &report.warnings { println!("warning: {w}"); }
-    for e in &report.errors { println!("error: {e}"); }
+    for r in &report.removed {
+        println!("removed: {r}");
+    }
+    for k in &report.kept {
+        println!("kept: {k}");
+    }
+    for w in &report.warnings {
+        println!("warning: {w}");
+    }
+    for e in &report.errors {
+        println!("error: {e}");
+    }
     if !report.kept.is_empty() {
         println!("note: data kept; re-run with `--purge` to delete it");
     }
     if !report.errors.is_empty() {
-        anyhow::bail!("uninstall completed with {} error(s); see above", report.errors.len());
+        anyhow::bail!(
+            "uninstall completed with {} error(s); see above",
+            report.errors.len()
+        );
     }
     Ok(())
 }
@@ -87,8 +109,15 @@ mod tests {
 
     fn installed_sys() -> FakeSys {
         let mut sys = FakeSys::default();
-        sys.ok.insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
-        for p in ["/var/lib/rpi", "/etc/rpi", "/var/log/rpi", UNIT_PATH, AGENT_TOML_PATH] {
+        sys.ok
+            .insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+        for p in [
+            "/var/lib/rpi",
+            "/etc/rpi",
+            "/var/log/rpi",
+            UNIT_PATH,
+            AGENT_TOML_PATH,
+        ] {
             sys.paths.insert(p.into());
         }
         sys
@@ -99,9 +128,14 @@ mod tests {
         let sys = installed_sys();
         let report = uninstall(&sys, &UninstallOpts { purge: false }).await;
         let calls = sys.calls();
-        assert!(calls.iter().any(|c| c == "systemctl disable --now rpi-agent"));
+        assert!(calls
+            .iter()
+            .any(|c| c == "systemctl disable --now rpi-agent"));
         assert!(calls.iter().any(|c| c == "userdel rpi-agent"));
-        assert!(!calls.iter().any(|c| c.contains("rm -rf /var/lib/rpi")), "data preserved");
+        assert!(
+            !calls.iter().any(|c| c.contains("rm -rf /var/lib/rpi")),
+            "data preserved"
+        );
         assert!(report.kept.iter().any(|k| k.contains("/var/lib/rpi")));
     }
 
@@ -119,7 +153,13 @@ mod tests {
         let mut sys = installed_sys();
         sys.err.insert(FakeSys::key("rm", &["-rf", "/var/lib/rpi"]));
         let report = uninstall(&sys, &UninstallOpts { purge: true }).await;
-        assert!(!report.removed.iter().any(|r| r.contains("/var/lib/rpi")), "must not claim removed on failure");
-        assert!(report.errors.iter().any(|e| e.contains("/var/lib/rpi")), "failure recorded in errors");
+        assert!(
+            !report.removed.iter().any(|r| r.contains("/var/lib/rpi")),
+            "must not claim removed on failure"
+        );
+        assert!(
+            report.errors.iter().any(|e| e.contains("/var/lib/rpi")),
+            "failure recorded in errors"
+        );
     }
 }

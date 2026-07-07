@@ -242,11 +242,7 @@ mod tests {
         m.overrides
             .expect_write()
             .withf(|p, s, bind, hp, cp| {
-                p == "rateme"
-                    && s == "web"
-                    && bind == "127.0.0.1"
-                    && *hp == 8000
-                    && *cp == 3000
+                p == "rateme" && s == "web" && bind == "127.0.0.1" && *hp == 8000 && *cp == 3000
             })
             .times(1)
             .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov/rateme.yml")));

@@ -41,10 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/projects/{name}/logs", get(project_logs))
         .route("/v1/projects/{name}/lifecycle/{action}", post(lifecycle))
         .route("/v1/projects/{name}/commands", get(list_commands))
-        .route(
-            "/v1/projects/{name}/commands/{command}",
-            post(run_command),
-        )
+        .route("/v1/projects/{name}/commands/{command}", post(run_command))
         .route(
             "/v1/projects/{name}/deployments/active",
             get(active_deployments),
@@ -441,7 +438,11 @@ async fn agent_logs(
             "agent file logging is disabled/unavailable".into(),
         )));
     }
-    let tail = if q.since.is_some() { None } else { Some(q.tail) };
+    let tail = if q.since.is_some() {
+        None
+    } else {
+        Some(q.tail)
+    };
     let initial = logfile::read(&state.log_dir, tail, q.since)
         .map_err(|e| ApiError(DomainError::Storage(format!("agent logs: {e}"))))?;
     if !q.follow {

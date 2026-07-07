@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use pi_domain::contracts::{
-    ContainerRuntime, LogSink, OverrideStore, ProjectRepository, Source,
-};
+use pi_domain::contracts::{ContainerRuntime, LogSink, OverrideStore, ProjectRepository, Source};
 use pi_domain::entities::{ComposeStack, LifecycleAction};
 use pi_domain::error::DomainError;
 

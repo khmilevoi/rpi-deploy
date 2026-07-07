@@ -126,27 +126,33 @@ impl SystemProbe for HostSystemProbe {
             },
         });
 
-        checks.push(match self.runner.run("loginctl", &["show-user", "-P", "Linger", "rpi-agent"]).await {
-            Ok(out) => {
-                let linger_enabled = out == "yes";
-                DiagnosticCheck {
-                    name: "systemd linger".into(),
-                    passed: linger_enabled,
-                    detail: format!("Linger={out}"),
-                    hint: if !linger_enabled {
-                        Some("enable linger: loginctl enable-linger rpi-agent".into())
-                    } else {
-                        None
-                    },
+        checks.push(
+            match self
+                .runner
+                .run("loginctl", &["show-user", "-P", "Linger", "rpi-agent"])
+                .await
+            {
+                Ok(out) => {
+                    let linger_enabled = out == "yes";
+                    DiagnosticCheck {
+                        name: "systemd linger".into(),
+                        passed: linger_enabled,
+                        detail: format!("Linger={out}"),
+                        hint: if !linger_enabled {
+                            Some("enable linger: loginctl enable-linger rpi-agent".into())
+                        } else {
+                            None
+                        },
+                    }
                 }
-            }
-            Err(err) => DiagnosticCheck {
-                name: "systemd linger".into(),
-                passed: false,
-                detail: err,
-                hint: Some("enable linger: loginctl enable-linger rpi-agent".into()),
+                Err(err) => DiagnosticCheck {
+                    name: "systemd linger".into(),
+                    passed: false,
+                    detail: err,
+                    hint: Some("enable linger: loginctl enable-linger rpi-agent".into()),
+                },
             },
-        });
+        );
 
         if self.cloudflared_enabled {
             checks.push(

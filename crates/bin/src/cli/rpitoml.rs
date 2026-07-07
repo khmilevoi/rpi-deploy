@@ -130,9 +130,8 @@ fn is_valid_command_name(s: &str) -> bool {
 fn command_argv(name: &str, value: &CommandValue) -> anyhow::Result<Vec<String>> {
     let argv = match value {
         CommandValue::Argv(items) => items.clone(),
-        CommandValue::Line(line) => shlex::split(line).ok_or_else(|| {
-            anyhow::anyhow!("rpi.toml [commands].{name}: unbalanced quote")
-        })?,
+        CommandValue::Line(line) => shlex::split(line)
+            .ok_or_else(|| anyhow::anyhow!("rpi.toml [commands].{name}: unbalanced quote"))?,
     };
     if argv.is_empty() || argv.iter().any(|a| a.is_empty()) {
         anyhow::bail!("rpi.toml [commands].{name}: command must not be empty");
@@ -188,7 +187,9 @@ impl RpiToml {
         }
         if let Some(commands) = &parsed.commands {
             if commands.is_empty() {
-                anyhow::bail!("rpi.toml [commands] is empty - declare a command or remove the section");
+                anyhow::bail!(
+                    "rpi.toml [commands] is empty - declare a command or remove the section"
+                );
             }
             for (name, value) in commands {
                 if !is_valid_command_name(name) {
@@ -390,10 +391,7 @@ file = ".env"
     #[test]
     fn expose_defaults_private_and_parses_lan() {
         let default_cfg = RpiToml::parse(SAMPLE).unwrap().to_project_config();
-        assert_eq!(
-            default_cfg.expose,
-            pi_domain::entities::ExposeMode::Private
-        );
+        assert_eq!(default_cfg.expose, pi_domain::entities::ExposeMode::Private);
 
         let lan = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"lan\"");
         let lan_cfg = RpiToml::parse(&lan).unwrap().to_project_config();
@@ -416,15 +414,28 @@ file = ".env"
         let config = RpiToml::parse(&toml).unwrap().to_project_config();
         assert_eq!(
             config.commands.get("create-invite").unwrap(),
-            &vec!["node".to_string(), "scripts/create-invite.js".into(), "--admin".into()]
+            &vec![
+                "node".to_string(),
+                "scripts/create-invite.js".into(),
+                "--admin".into()
+            ]
         );
         assert_eq!(
             config.commands.get("migrate").unwrap(),
-            &vec!["npx".to_string(), "prisma".into(), "migrate".into(), "deploy".into()]
+            &vec![
+                "npx".to_string(),
+                "prisma".into(),
+                "migrate".into(),
+                "deploy".into()
+            ]
         );
         assert_eq!(
             config.commands.get("backup").unwrap(),
-            &vec!["sh".to_string(), "-c".into(), "pg_dump mydb | gzip > /b.gz".into()],
+            &vec![
+                "sh".to_string(),
+                "-c".into(),
+                "pg_dump mydb | gzip > /b.gz".into()
+            ],
             "quoted segment must stay one argv item"
         );
     }
@@ -445,8 +456,15 @@ file = ".env"
 
     #[test]
     fn invalid_command_name_is_rejected() {
-        for bad in ["\"Bad Name\" = \"run\"", "\"-x\" = \"run\"", "\"UP\" = \"run\""] {
-            let toml = SAMPLE.replace("[healthcheck]", &format!("[commands]\n{bad}\n\n[healthcheck]"));
+        for bad in [
+            "\"Bad Name\" = \"run\"",
+            "\"-x\" = \"run\"",
+            "\"UP\" = \"run\"",
+        ] {
+            let toml = SAMPLE.replace(
+                "[healthcheck]",
+                &format!("[commands]\n{bad}\n\n[healthcheck]"),
+            );
             let err = RpiToml::parse(&toml).unwrap_err().to_string();
             assert!(err.contains("command name"), "{bad}: got: {err}");
         }
@@ -455,7 +473,10 @@ file = ".env"
     #[test]
     fn empty_command_values_are_rejected() {
         for bad in ["x = \"\"", "x = []", "x = [\"\"]"] {
-            let toml = SAMPLE.replace("[healthcheck]", &format!("[commands]\n{bad}\n\n[healthcheck]"));
+            let toml = SAMPLE.replace(
+                "[healthcheck]",
+                &format!("[commands]\n{bad}\n\n[healthcheck]"),
+            );
             assert!(RpiToml::parse(&toml).is_err(), "{bad} must be rejected");
         }
     }

@@ -265,9 +265,9 @@ impl ApiClient {
             .and_then(|v| v["error"].as_str().map(str::to_string))
         {
             Some(msg) => anyhow::anyhow!("{msg}"),
-            None => anyhow::anyhow!(
-                "agent does not support [commands]; update rpi-agent on the Pi"
-            ),
+            None => {
+                anyhow::anyhow!("agent does not support [commands]; update rpi-agent on the Pi")
+            }
         }
     }
 

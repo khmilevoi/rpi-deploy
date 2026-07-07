@@ -155,10 +155,7 @@ mod tests {
         }
     }
 
-    fn deps_with(
-        runtime: MockContainerRuntime,
-        proj: Project,
-    ) -> Arc<RunCommand> {
+    fn deps_with(runtime: MockContainerRuntime, proj: Project) -> Arc<RunCommand> {
         let mut projects = MockProjectRepository::new();
         projects
             .expect_get()
@@ -187,13 +184,7 @@ mod tests {
             .withf(|stack, service, argv, _| {
                 stack.project_name == "rateme"
                     && service == "web"
-                    && argv
-                        == [
-                            "node",
-                            "scripts/create-invite.js",
-                            "--email",
-                            "x@y.com",
-                        ]
+                    && argv == ["node", "scripts/create-invite.js", "--email", "x@y.com"]
             })
             .returning(|_, _, _, _| Ok(42));
 
@@ -251,16 +242,66 @@ mod tests {
         struct HangingRuntime;
         #[async_trait::async_trait]
         impl ContainerRuntime for HangingRuntime {
-            async fn build(&self, _: &ComposeStack, _: Arc<dyn LogSink>) -> Result<(), DomainError> { unimplemented!() }
-            async fn up(&self, _: &ComposeStack, _: Arc<dyn LogSink>) -> Result<(), DomainError> { unimplemented!() }
-            async fn ps(&self, _: &str) -> Result<Vec<pi_domain::entities::ServiceState>, DomainError> { unimplemented!() }
-            async fn prune_images(&self, _: Arc<dyn LogSink>) -> Result<(), DomainError> { unimplemented!() }
-            async fn prune_builder(&self, _: Arc<dyn LogSink>) -> Result<(), DomainError> { unimplemented!() }
-            async fn logs(&self, _: &str, _: usize, _: bool, _: Arc<dyn LogSink>) -> Result<(), DomainError> { unimplemented!() }
-            async fn stats(&self, _: &str) -> Result<Vec<pi_domain::entities::ServiceStats>, DomainError> { unimplemented!() }
-            async fn lifecycle(&self, _: &ComposeStack, _: pi_domain::entities::LifecycleAction, _: Arc<dyn LogSink>) -> Result<(), DomainError> { unimplemented!() }
-            async fn down(&self, _: &ComposeStack, _: bool, _: Arc<dyn LogSink>) -> Result<(), DomainError> { unimplemented!() }
-            async fn exec(&self, _: &ComposeStack, _: &str, _: &[String], _: Arc<dyn LogSink>) -> Result<i32, DomainError> {
+            async fn build(
+                &self,
+                _: &ComposeStack,
+                _: Arc<dyn LogSink>,
+            ) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn up(&self, _: &ComposeStack, _: Arc<dyn LogSink>) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn ps(
+                &self,
+                _: &str,
+            ) -> Result<Vec<pi_domain::entities::ServiceState>, DomainError> {
+                unimplemented!()
+            }
+            async fn prune_images(&self, _: Arc<dyn LogSink>) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn prune_builder(&self, _: Arc<dyn LogSink>) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn logs(
+                &self,
+                _: &str,
+                _: usize,
+                _: bool,
+                _: Arc<dyn LogSink>,
+            ) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn stats(
+                &self,
+                _: &str,
+            ) -> Result<Vec<pi_domain::entities::ServiceStats>, DomainError> {
+                unimplemented!()
+            }
+            async fn lifecycle(
+                &self,
+                _: &ComposeStack,
+                _: pi_domain::entities::LifecycleAction,
+                _: Arc<dyn LogSink>,
+            ) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn down(
+                &self,
+                _: &ComposeStack,
+                _: bool,
+                _: Arc<dyn LogSink>,
+            ) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn exec(
+                &self,
+                _: &ComposeStack,
+                _: &str,
+                _: &[String],
+                _: Arc<dyn LogSink>,
+            ) -> Result<i32, DomainError> {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 Ok(0)
             }

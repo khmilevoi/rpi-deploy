@@ -73,6 +73,8 @@ port = 3000
 | `healthcheck.expect` | no | none | `"2xx"`, `"3xx"`, or exact 3-digit code. |
 | `healthcheck.timeout` | no | `"60s"` | Duration string or bare seconds. |
 | `env.file` | no | `".env"` | Local file read by `rpi env send`. |
+| `commands.<name>` | no | none | String (shell-word split, quotes only) or argv array. Name: `[a-z0-9][a-z0-9_-]*`. Registered at deploy, run via `rpi command`. |
+| `timeouts.command` | no | `"600s"` | Budget for one `rpi command` run. |
 
 Optional per-project stage timeouts:
 
@@ -84,6 +86,15 @@ up = "2m"
 ```
 
 Valid duration examples are `"60s"`, `"2m"`, and bare seconds such as `"120"`.
+
+Optional one-off admin commands, run inside the service container with `rpi command`:
+
+```toml
+[commands]
+create-invite = "node scripts/create-invite.js"
+migrate = ["npx", "prisma", "migrate", "deploy"]
+backup = "sh -c 'pg_dump mydb | gzip > /data/backup.gz'"
+```
 
 ## Authoring Workflow
 
@@ -144,10 +155,11 @@ services:
 `rpi.toml` is parsed by `crates/bin/src/cli/rpitoml.rs`:
 
 - Unknown schema versions are rejected.
-- Missing `[build]`, `[healthcheck]`, `[env]`, and `[timeouts]` sections can fall back to defaults.
+- Missing `[build]`, `[healthcheck]`, `[env]`, `[timeouts]`, and `[commands]` sections can fall back to defaults.
 - `[ingress]`, `[project]`, and `[source]` are required.
 - Invalid healthcheck expectation values are rejected.
 - Invalid duration strings in `[healthcheck].timeout` and `[timeouts]` are rejected.
+- An empty `[commands]` section, an empty argv, bad command names, and unbalanced quotes in a string command are all rejected by `crates/bin/src/cli/rpitoml.rs`.
 
 When editing the parser or adding fields, update:
 
