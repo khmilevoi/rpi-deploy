@@ -66,6 +66,29 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
     builder.create(path)
 }
 
+/// Result of checking one intermediate directory-path component while
+/// walking from the (already canonicalized) workdir root toward a target
+/// path, via `symlink_metadata` — which, unlike `metadata`, never follows
+/// the component being checked itself.
+enum DirStep {
+    /// The path exists and is not a symlink.
+    Existing,
+    /// Nothing exists at this path yet.
+    Missing,
+    /// The path exists and is a symlink: never safe to create inside or
+    /// descend into, since it can point anywhere on the filesystem.
+    Symlink,
+}
+
+fn stat_dir_component(dir: &Path) -> std::io::Result<DirStep> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => Ok(DirStep::Symlink),
+        Ok(_) => Ok(DirStep::Existing),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DirStep::Missing),
+        Err(e) => Err(e),
+    }
+}
+
 fn write_files_blocking(workdir: PathBuf, files: Vec<(String, Vec<u8>)>) -> Result<(), DomainError> {
     let root = std::fs::canonicalize(&workdir)
         .map_err(|e| storage_err("canonicalize workdir".into(), e))?;
@@ -88,18 +111,19 @@ fn write_files_blocking(workdir: PathBuf, files: Vec<(String, Vec<u8>)>) -> Resu
         let mut dir = root.clone();
         for component in &components {
             dir.push(component);
-            match std::fs::symlink_metadata(&dir) {
-                Ok(meta) if meta.file_type().is_symlink() => {
+            match stat_dir_component(&dir)
+                .map_err(|e| storage_err(format!("stat dir for '{rel}'"), e))?
+            {
+                DirStep::Symlink => {
                     return Err(DomainError::Invalid(format!(
                         "secret file '{rel}' escapes the workdir (symlinked directory?)"
                     )));
                 }
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                DirStep::Existing => {}
+                DirStep::Missing => {
                     create_private_dir(&dir)
                         .map_err(|e| storage_err(format!("create dir for '{rel}'"), e))?;
                 }
-                Err(e) => return Err(storage_err(format!("stat dir for '{rel}'"), e)),
             }
         }
 
@@ -108,6 +132,42 @@ fn write_files_blocking(workdir: PathBuf, files: Vec<(String, Vec<u8>)>) -> Resu
             .map_err(|e| storage_err(format!("write secret file '{rel}'"), e))?;
     }
     Ok(())
+}
+
+/// Walks the intermediate directory components of a stale (previous-bundle)
+/// relative path, from the canonicalized workdir `root`, *without* creating
+/// or modifying anything. Returns the confirmed-safe target path — the same
+/// path `write_files_blocking` would itself have written to — only if every
+/// intermediate component already exists as a real, non-symlink entry.
+/// Returns `None` if any component is missing, is a symlink, or can't be
+/// stat'd: the caller must then leave that file alone rather than delete it.
+///
+/// This is the delete-path counterpart to `write_files_blocking`'s symlink
+/// guard above. `remove_file` follows symlinks for every intermediate
+/// directory component (though not the leaf itself — standard POSIX unlink
+/// semantics), so without this check a project commit that (a) drops every
+/// file under some directory from `[secrets].files` in the same commit that
+/// (b) replaces that directory with a symlink could redirect a "stale file"
+/// deletion outside the workdir: the write path's guard never runs for that
+/// directory in that case, since nothing under it is being written this
+/// time, only removed.
+fn safe_stale_target(root: &Path, rel: &str) -> Option<PathBuf> {
+    let mut components: Vec<Component<'_>> = Path::new(rel).components().collect();
+    let file_component = components.pop()?;
+
+    let mut dir = root.to_path_buf();
+    for component in &components {
+        dir.push(component);
+        match stat_dir_component(&dir) {
+            Ok(DirStep::Existing) => {}
+            // Missing, symlinked, or unstat-able: can't confirm this is the
+            // same real directory `write_files_blocking` created, so don't
+            // touch it. Best-effort cleanup only ever narrows, never risks
+            // an escape.
+            _ => return None,
+        }
+    }
+    Some(dir.join(file_component))
 }
 
 /// Reads the previous-write manifest, returning the empty set if it's
@@ -136,21 +196,46 @@ fn read_manifest(path: &Path) -> BTreeSet<String> {
 /// committed to the repo smuggle a `..`-escaping "stale" path through the
 /// deletion step. An entry that fails validation is simply skipped, same as
 /// a corrupt manifest.
+///
+/// Each stale path also runs through [`safe_stale_target`] before deletion:
+/// a directory a previous `write()` created can be replaced with a symlink
+/// by a later commit (see that function's doc comment for the exact
+/// scenario), and `remove_file` — like almost every filesystem call —
+/// follows symlinks for intermediate path components. A path that fails
+/// this check is skipped, not treated as an error: cleanup here is
+/// best-effort tidying of a leftover file, not the primary write path, so
+/// leaving something suspicious alone for a future cycle is strictly safer
+/// than either following a symlink outside the workdir or failing the whole
+/// `secrets` deploy stage over it.
 fn sync_manifest_blocking(
     workdir: &Path,
     manifest_path: &Path,
     previous: BTreeSet<String>,
     current: &BTreeSet<String>,
 ) -> Result<(), DomainError> {
-    for stale in previous.difference(current) {
-        if secretpath::validate_rel_path(stale).is_err() {
-            continue;
-        }
-        let target = workdir.join(stale);
-        match std::fs::remove_file(&target) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(storage_err(format!("remove stale secret file '{stale}'"), e)),
+    let stale: Vec<&String> = previous.difference(current).collect();
+    if !stale.is_empty() {
+        // Best-effort: if the workdir itself can't be canonicalized here
+        // (it was already confirmed to exist by `write`, and
+        // `write_files_blocking` just canonicalized it successfully moments
+        // ago), skip cleanup rather than fail the whole deploy over
+        // stale-file tidying.
+        if let Ok(root) = std::fs::canonicalize(workdir) {
+            for rel in stale {
+                if secretpath::validate_rel_path(rel).is_err() {
+                    continue;
+                }
+                let Some(target) = safe_stale_target(&root, rel) else {
+                    continue;
+                };
+                match std::fs::remove_file(&target) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(storage_err(format!("remove stale secret file '{rel}'"), e));
+                    }
+                }
+            }
         }
     }
 
@@ -496,5 +581,64 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(dir_mode & 0o777, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_deletion_does_not_follow_a_symlink_planted_over_a_dropped_directory() {
+        // Exploit scenario (the delete-path counterpart to the two
+        // symlinked-directory write tests above): a directory holding only
+        // files that get dropped from `[secrets].files` in the very same
+        // commit that replaces that directory with a symlink. Because
+        // nothing under `certs/` is written on the second call,
+        // `write_files_blocking`'s symlink guard never runs for `certs/` at
+        // all — it only walks paths it is actually about to write. Without
+        // a matching guard on the delete side, `sync_manifest_blocking`
+        // would call `remove_file(workdir.join("certs/a.pem"))` directly,
+        // which follows the symlinked `certs` component and deletes a file
+        // entirely outside the workdir.
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("wd");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let writer = FsSecretsWriter::new();
+
+        let mut first = SecretsBundle::default();
+        first
+            .files
+            .insert("certs/a.pem".into(), b"first-pem".to_vec());
+        writer.write(&workdir, &first).await.unwrap();
+        assert!(workdir.join("certs").join("a.pem").exists());
+
+        // The next "commit": certs/a.pem is dropped from the bundle
+        // entirely, and (attacker-controlled or compromised) the real
+        // certs/ directory is replaced with a symlink pointing outside the
+        // workdir, containing an innocent file at the very same relative
+        // name the manifest still remembers as stale.
+        std::fs::remove_dir_all(workdir.join("certs")).unwrap();
+        std::os::unix::fs::symlink(&outside, workdir.join("certs")).unwrap();
+        std::fs::write(outside.join("a.pem"), b"innocent-outside-file").unwrap();
+
+        let second = SecretsBundle::default();
+        let result = writer.write(&workdir, &second).await;
+
+        assert!(
+            result.is_ok(),
+            "best-effort stale-file cleanup must not fail the whole deploy: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("a.pem")).unwrap(),
+            b"innocent-outside-file",
+            "stale-file deletion must not follow the symlink and delete outside the workdir"
+        );
+        assert!(
+            std::fs::symlink_metadata(workdir.join("certs"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink itself must be left untouched"
+        );
     }
 }
