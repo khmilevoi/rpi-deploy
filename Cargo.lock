@@ -1588,11 +1588,13 @@ version = "0.6.0"
 dependencies = [
  "age",
  "async-trait",
+ "base64 0.22.1",
  "mockall",
  "pi-domain",
  "reqwest",
  "rusqlite",
  "rusqlite_migration",
+ "serde",
  "serde_json",
  "serde_yaml",
  "sysinfo",
