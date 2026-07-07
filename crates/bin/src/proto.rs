@@ -76,6 +76,8 @@ impl From<ProjectDto> for ProjectConfig {
                     up_secs: t.up_secs,
                 })
                 .unwrap_or_default(),
+            commands: BTreeMap::new(),
+            command_timeout_secs: None,
         }
     }
 }

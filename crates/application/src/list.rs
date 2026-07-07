@@ -106,6 +106,8 @@ mod tests {
                 expose: ExposeMode::default(),
                 healthcheck: HealthcheckConfig::default(),
                 timeouts: StageTimeoutOverrides::default(),
+                commands: Default::default(),
+                command_timeout_secs: None,
             },
             host_port,
             created_at: 1,

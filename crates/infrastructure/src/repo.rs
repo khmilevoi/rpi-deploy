@@ -41,6 +41,8 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> Result<Project, rusqlite::Error> {
             expose: ExposeMode::parse(&row.get::<_, String>(9)?).unwrap_or_default(),
             healthcheck: HealthcheckConfig::default(), // per-deploy input, not stored
             timeouts: StageTimeoutOverrides::default(), // per-deploy input, not stored
+            commands: Default::default(),              // TODO(task 2/3): persist in registry
+            command_timeout_secs: None,                // TODO(task 2/3): persist in registry
         },
         host_port: row.get(7)?,
         created_at: row.get(8)?,
@@ -204,6 +206,8 @@ mod tests {
             expose: ExposeMode::default(),
             healthcheck: HealthcheckConfig::default(),
             timeouts: StageTimeoutOverrides::default(),
+            commands: Default::default(),
+            command_timeout_secs: None,
         }
     }
 

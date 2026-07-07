@@ -205,6 +205,8 @@ impl RpiToml {
                     .as_deref()
                     .and_then(|t| parse_duration_secs(t).ok()),
             },
+            commands: Default::default(),
+            command_timeout_secs: None,
         }
     }
 }
