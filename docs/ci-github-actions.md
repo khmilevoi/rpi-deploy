@@ -38,10 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pi CLI
-        # Binary releases + install.sh arrive in v0.5; for now, install from source.
-        # Speed-up: use actions/cache for ~/.cargo/bin keyed by the tool revision hash.
-        run: cargo install --git https://github.com/khmilevoi/pi --locked pi
+      - name: Install rpi CLI
+        # postinstall downloads the prebuilt x86_64 binary from GitHub Releases.
+        run: npm install -g rpi-deploy
 
       - name: Prepare SSH
         run: |
