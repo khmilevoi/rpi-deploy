@@ -1225,6 +1225,16 @@ mod tests {
         ) -> Result<(), DomainError> {
             Ok(())
         }
+
+        async fn exec(
+            &self,
+            _stack: &pi_domain::entities::ComposeStack,
+            _service: &str,
+            _argv: &[String],
+            _log: Arc<dyn LogSink>,
+        ) -> Result<i32, DomainError> {
+            Ok(0)
+        }
     }
 
     #[tokio::test]

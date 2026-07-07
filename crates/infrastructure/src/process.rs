@@ -5,7 +5,10 @@ use pi_domain::contracts::LogSink;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 
-pub async fn run_streamed(mut cmd: Command, log: Arc<dyn LogSink>) -> Result<(), String> {
+/// Like `run_streamed`, but a nonzero exit is data, not an error: returns the
+/// exit code. `Err` is reserved for spawn/wait failures. Killed-by-signal
+/// (no code) logs a line and maps to 1. Dropping the future kills the child.
+pub async fn run_streamed_code(mut cmd: Command, log: Arc<dyn LogSink>) -> Result<i32, String> {
     let label = format!("{:?}", cmd.as_std());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -24,10 +27,20 @@ pub async fn run_streamed(mut cmd: Command, log: Arc<dyn LogSink>) -> Result<(),
         .wait()
         .await
         .map_err(|e| format!("wait {label}: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{label} exited with {status}"))
+    match status.code() {
+        Some(code) => Ok(code),
+        None => {
+            log.line("process terminated by signal");
+            Ok(1)
+        }
+    }
+}
+
+pub async fn run_streamed(cmd: Command, log: Arc<dyn LogSink>) -> Result<(), String> {
+    let label = format!("{:?}", cmd.as_std());
+    match run_streamed_code(cmd, log).await? {
+        0 => Ok(()),
+        code => Err(format!("{label} exited with code {code}")),
     }
 }
 
@@ -106,6 +119,23 @@ mod tests {
         cmd.arg("definitely-not-a-git-command");
         let err = run_streamed(cmd, sink).await.unwrap_err();
         assert!(err.contains("exited with"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn run_streamed_code_returns_zero_on_success() {
+        let sink = Arc::new(VecSink(Mutex::new(vec![])));
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("--version");
+        assert_eq!(run_streamed_code(cmd, sink).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_streamed_code_returns_nonzero_code_as_ok() {
+        let sink = Arc::new(VecSink(Mutex::new(vec![])));
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("definitely-not-a-git-command");
+        let code = run_streamed_code(cmd, sink).await.unwrap();
+        assert_ne!(code, 0, "nonzero exit is data, not an error");
     }
 
     #[tokio::test]

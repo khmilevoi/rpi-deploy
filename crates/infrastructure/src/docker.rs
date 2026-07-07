@@ -9,7 +9,7 @@ use pi_domain::entities::{ComposeStack, LifecycleAction, ServiceState, ServiceSt
 use pi_domain::error::DomainError;
 use tokio::process::Command;
 
-use crate::process::{run_capture, run_streamed};
+use crate::process::{run_capture, run_streamed, run_streamed_code};
 
 /// Age filter for `docker builder prune` (§8.1): recent cache survives so
 /// rebuilds stay fast; only the disk threshold is configurable (§22).
@@ -42,6 +42,12 @@ pub(crate) fn logs_args(project_name: &str, tail: usize, follow: bool) -> Vec<St
         args.push("-f".to_string());
     }
     args
+}
+
+pub(crate) fn exec_tail<'a>(service: &'a str, argv: &'a [String]) -> Vec<&'a str> {
+    let mut tail = vec!["exec", "-T", service];
+    tail.extend(argv.iter().map(String::as_str));
+    tail
 }
 
 pub(crate) fn file_chain(stack: &ComposeStack) -> Vec<PathBuf> {
@@ -287,6 +293,19 @@ impl ContainerRuntime for DockerComposeRuntime {
             .await
             .map_err(DomainError::Runtime)
     }
+
+    async fn exec(
+        &self,
+        stack: &ComposeStack,
+        service: &str,
+        argv: &[String],
+        log: Arc<dyn LogSink>,
+    ) -> Result<i32, DomainError> {
+        log.line(&format!("docker compose exec -T {service} ..."));
+        run_streamed_code(self.compose(stack, &exec_tail(service, argv)), log)
+            .await
+            .map_err(DomainError::Runtime)
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +387,15 @@ mod tests {
                 "--filter".to_string(),
                 format!("until={BUILDER_PRUNE_MAX_AGE}"),
             ]
+        );
+    }
+
+    #[test]
+    fn exec_tail_shape() {
+        let argv = strings(&["node", "scripts/create-invite.js", "--email", "x@y.com"]);
+        assert_eq!(
+            exec_tail("web", &argv),
+            vec!["exec", "-T", "web", "node", "scripts/create-invite.js", "--email", "x@y.com"]
         );
     }
 
