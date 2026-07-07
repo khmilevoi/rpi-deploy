@@ -34,6 +34,12 @@ fn migrations() -> Migrations<'static> {
         "#,
         ),
         M::up("ALTER TABLE projects ADD COLUMN expose TEXT NOT NULL DEFAULT 'private';"),
+        M::up(
+            r#"
+        ALTER TABLE projects ADD COLUMN commands TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE projects ADD COLUMN command_timeout_secs INTEGER;
+        "#,
+        ),
     ])
 }
 
@@ -194,5 +200,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(expose, "private");
+    }
+
+    #[tokio::test]
+    async fn migration_adds_commands_columns_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        db.call(|c| {
+            c.execute(
+                "INSERT INTO projects
+                 (name, repo, branch, compose_path, service, container_port, host_port, created_at)
+                 VALUES ('a', 'repo-a', 'main', 'docker-compose.yml', 'web', 3000, 8000, 1)",
+                [],
+            )
+            .map_err(storage_err)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (commands, timeout): (String, Option<i64>) = db
+            .call(|c| {
+                c.query_row(
+                    "SELECT commands, command_timeout_secs FROM projects WHERE name = 'a'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(storage_err)
+            })
+            .await
+            .unwrap();
+        assert_eq!(commands, "{}");
+        assert_eq!(timeout, None);
     }
 }
