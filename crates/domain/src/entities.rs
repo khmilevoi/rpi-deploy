@@ -35,9 +35,6 @@ impl std::fmt::Debug for SecretsBundle {
     }
 }
 
-/// Temporary alias while call sites migrate; removed in the cleanup task.
-pub type EnvBundle = SecretsBundle;
-
 /// Deploy gate settings from [healthcheck] in rpi.toml (§8, §12).
 /// Per-deploy input: travels with ProjectConfig, not persisted in the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]

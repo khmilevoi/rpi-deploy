@@ -1,12 +1,12 @@
 //! Dotenv parse/serialize shared by the CLI (`rpi env send` reads a local
 //! file) and the agent (bundle payload <-> workdir `.env`) (§10, §12).
 
-use pi_domain::entities::EnvBundle;
+use pi_domain::entities::SecretsBundle;
 
 /// `KEY=VALUE` lines; skips blanks and `#` comments; strips an optional
 /// `export ` prefix and one pair of matching single/double quotes.
-pub fn parse(text: &str) -> Result<EnvBundle, String> {
-    let mut bundle = EnvBundle::default();
+pub fn parse(text: &str) -> Result<SecretsBundle, String> {
+    let mut bundle = SecretsBundle::default();
     for (i, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -35,7 +35,7 @@ pub fn is_valid_key(key: &str) -> bool {
 }
 
 /// Deterministic KEY=VALUE serialization (BTreeMap order, trailing newline).
-pub fn serialize(bundle: &EnvBundle) -> String {
+pub fn serialize(bundle: &SecretsBundle) -> String {
     let mut out = String::new();
     for (key, value) in &bundle.vars {
         out.push_str(key);
@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn serialize_then_parse_roundtrips() {
-        let mut bundle = EnvBundle::default();
+        let mut bundle = SecretsBundle::default();
         bundle.vars.insert("B".into(), "2".into());
         bundle.vars.insert("A".into(), "1".into());
         let text = serialize(&bundle);

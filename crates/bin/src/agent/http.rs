@@ -10,7 +10,7 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use pi_application::logs::DEFAULT_LOG_TAIL;
 use pi_domain::entities::{
-    DeployRef, DeploymentStatus, EnvBundle, LifecycleAction, ProjectConfig, SecretsBundle,
+    DeployRef, DeploymentStatus, LifecycleAction, ProjectConfig, SecretsBundle,
 };
 use pi_domain::error::DomainError;
 use pi_infrastructure::events::DeployEvent;
@@ -478,7 +478,7 @@ async fn send_env_handler(
             ))));
         }
     }
-    let bundle = EnvBundle {
+    let bundle = SecretsBundle {
         vars: req.vars,
         files: std::collections::BTreeMap::new(),
     };

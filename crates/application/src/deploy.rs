@@ -341,7 +341,7 @@ mod tests {
         MockSecretsWriter, MockSource,
     };
     use pi_domain::entities::{
-        DeployRef, DeploymentStatus, EnvBundle, ExposeMode, FetchedSource, HealthcheckConfig,
+        DeployRef, DeploymentStatus, SecretsBundle, ExposeMode, FetchedSource, HealthcheckConfig,
         Project, ProjectConfig, StageTimeoutOverrides, StageTimeouts,
     };
     use pi_domain::error::DomainError;
@@ -453,7 +453,7 @@ mod tests {
         let stage_order = Arc::clone(&order);
         m.secrets.expect_load().times(1).returning(move |_| {
             stage_order.lock().unwrap().push("secrets");
-            Ok(EnvBundle::default())
+            Ok(SecretsBundle::default())
         });
         // empty bundle -> .env must NOT be written
         m.secrets_writer.expect_write().times(0);
@@ -604,7 +604,7 @@ mod tests {
         });
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
+            .returning(|_| Ok(SecretsBundle::default()));
         m.secrets_writer.expect_write().times(0);
         m.overrides
             .expect_write()
@@ -647,7 +647,7 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
+            .returning(|_| Ok(SecretsBundle::default()));
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
@@ -688,7 +688,7 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
+            .returning(|_| Ok(SecretsBundle::default()));
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
@@ -727,7 +727,7 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
+            .returning(|_| Ok(SecretsBundle::default()));
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
@@ -819,7 +819,7 @@ mod tests {
         });
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
+            .returning(|_| Ok(SecretsBundle::default()));
         m.secrets_writer.expect_write().times(0);
         m.overrides
             .expect_write()
@@ -862,8 +862,8 @@ mod tests {
         );
     }
 
-    fn secret_bundle() -> EnvBundle {
-        let mut b = EnvBundle::default();
+    fn secret_bundle() -> SecretsBundle {
+        let mut b = SecretsBundle::default();
         b.vars.insert("DB_PASSWORD".into(), "hunter2-long".into());
         b.files.insert("certs/server.pem".into(), b"PEM-BODY".to_vec());
         b
@@ -998,7 +998,7 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
+            .returning(|_| Ok(SecretsBundle::default()));
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
@@ -1033,7 +1033,7 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
+            .returning(|_| Ok(SecretsBundle::default()));
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
@@ -1252,7 +1252,7 @@ mod tests {
         });
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
+            .returning(|_| Ok(SecretsBundle::default()));
         m.secrets_writer.expect_write().times(0);
         m.overrides
             .expect_write()
@@ -1324,7 +1324,7 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
+            .returning(|_| Ok(SecretsBundle::default()));
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
