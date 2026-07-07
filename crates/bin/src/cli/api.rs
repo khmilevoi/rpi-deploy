@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use crate::cli::sse::SseParser;
 use crate::proto::{
-    AgentOverviewDto, DeployAccepted, DeployRequest, DeploymentDto, DiagnosticReportDto,
-    EnvKeysResponse, EnvSendRequest, EnvSendResponse, GcResponse, LifecycleResponse,
-    ProjectViewDto, RemoveResponse, StatsReportDto, VersionInfo,
+    AgentOverviewDto, CommandRunRequest, CommandsResponse, DeployAccepted, DeployRequest,
+    DeploymentDto, DiagnosticReportDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
+    GcResponse, LifecycleResponse, ProjectViewDto, RemoveResponse, StatsReportDto, VersionInfo,
 };
 
 async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
@@ -252,5 +252,87 @@ impl ApiClient {
             .send()
             .await?;
         Ok(extract_error(resp).await?.json().await?)
+    }
+
+    /// 404 on this route can mean two very different things: an old agent
+    /// without the feature (bare 404, no JSON body) or a domain "not found"
+    /// (JSON error). Distinguish them for a usable message.
+    async fn commands_not_found(resp: reqwest::Response) -> anyhow::Error {
+        match resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string))
+        {
+            Some(msg) => anyhow::anyhow!("{msg}"),
+            None => anyhow::anyhow!(
+                "agent does not support [commands]; update rpi-agent on the Pi"
+            ),
+        }
+    }
+
+    pub async fn list_commands(&self, project: &str) -> anyhow::Result<CommandsResponse> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/projects/{project}/commands", self.base))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Self::commands_not_found(resp).await);
+        }
+        Ok(extract_error(resp).await?.json().await?)
+    }
+
+    /// Streams command output; returns the in-container exit code.
+    pub async fn run_command(
+        &self,
+        project: &str,
+        command: &str,
+        args: &[String],
+        mut on_line: impl FnMut(&str),
+    ) -> anyhow::Result<i32> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/v1/projects/{project}/commands/{command}",
+                self.base
+            ))
+            .json(&CommandRunRequest {
+                args: args.to_vec(),
+            })
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Self::commands_not_found(resp).await);
+        }
+        let resp = extract_error(resp).await?;
+        let mut stream = resp.bytes_stream();
+        let mut parser = SseParser::default();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            buf.extend_from_slice(&chunk?);
+            let valid_up_to = match std::str::from_utf8(&buf) {
+                Ok(_) => buf.len(),
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => buf.len(),
+            };
+            if valid_up_to == 0 {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&buf[..valid_up_to]).into_owned();
+            buf.drain(..valid_up_to);
+            for ev in parser.push(&text) {
+                match ev.event.as_str() {
+                    "log" => on_line(&ev.data),
+                    "exit" => {
+                        return ev.data.trim().parse::<i32>().map_err(|_| {
+                            anyhow::anyhow!("agent sent invalid exit code '{}'", ev.data)
+                        })
+                    }
+                    _ => {}
+                }
+            }
+        }
+        anyhow::bail!("command stream ended without an exit status (agent restarted?)")
     }
 }
