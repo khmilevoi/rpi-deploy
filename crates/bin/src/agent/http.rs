@@ -473,7 +473,7 @@ async fn send_env_handler(
         files: std::collections::BTreeMap::new(),
     };
     let saved = state
-        .send_env
+        .send_secrets
         .execute(&name, bundle, req.apply, Arc::new(TracingSink))
         .await
         .map_err(ApiError)?;
@@ -492,8 +492,8 @@ async fn env_keys_handler(
             "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
         )));
     }
-    let keys = state.env_keys.execute(&name).await.map_err(ApiError)?;
-    Ok(Json(EnvKeysResponse { keys }))
+    let stored = state.list_secrets.execute(&name).await.map_err(ApiError)?;
+    Ok(Json(EnvKeysResponse { keys: stored.keys }))
 }
 
 #[cfg(test)]
@@ -503,12 +503,12 @@ mod tests {
     use http_body_util::BodyExt;
     use pi_application::deploy::DeployProject;
     use pi_application::diagnostics::{AgentStatus, RunDiagnostics};
-    use pi_application::env::{ListEnvKeys, SendEnv};
     use pi_application::gc::RunGc;
     use pi_application::lifecycle::ControlLifecycle;
     use pi_application::list::ListProjects;
     use pi_application::logs::StreamLogs;
     use pi_application::remove::RemoveProject;
+    use pi_application::secrets::{ListSecrets, SendSecrets};
     use pi_application::stats::GetStats;
     use pi_domain::contracts::{
         ContainerRuntime, LogSink, MockContainerRuntime, MockDiskProbe, MockSource, Source,
@@ -632,7 +632,7 @@ mod tests {
         );
         let diagnostics = RunDiagnostics::new(probe.clone());
         let agent_status = AgentStatus::new(probe, projects.clone(), Arc::clone(&history));
-        let send_env = SendEnv::new(
+        let send_secrets = SendSecrets::new(
             secrets.clone(),
             projects,
             source,
@@ -640,15 +640,15 @@ mod tests {
             overrides,
             runtime,
         );
-        let env_keys = ListEnvKeys::new(secrets);
+        let list_secrets = ListSecrets::new(secrets);
         AppState {
             scheduler,
             list,
             history,
             hub: DeployEventsHub::new(),
             ids: UuidGen::new(),
-            send_env,
-            env_keys,
+            send_secrets,
+            list_secrets,
             gc,
             stream_logs,
             stats,
