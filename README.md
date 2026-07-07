@@ -6,14 +6,17 @@ machine or in CI. The CLI connects to the agent through an SSH tunnel; the
 agent clones the Git repository, builds the Compose stack, and starts the
 containers.
 
-Status: v0.7 (prebuilt binaries) — everything from v0.1–v0.6 (deploy/env/
+Status: v0.9 (secret files) — everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
-`npm install -g rpi-deploy` for both roles) plus prebuilt binaries:
-GitHub Actions builds `rpi` for Windows x64, Linux x64, and Linux aarch64 on
+`npm install -g rpi-deploy` for both roles), v0.7 prebuilt binaries
+(GitHub Actions builds `rpi` for Windows x64, Linux x64, and Linux aarch64 on
 every release tag, and `npm install` downloads the matching binary in seconds
-instead of compiling for ~10 minutes. Building from source remains the
-fallback everywhere else (see "Build And Install The Binary" below).
+instead of compiling for ~10 minutes; building from source remains the
+fallback everywhere else, see "Build And Install The Binary" below), `[commands]`
+/ `rpi command` for one-off admin commands in the service container, and
+`[secrets].files` for delivering arbitrary secret files (certs, keys)
+alongside the env file.
 
 Supported features:
 
@@ -23,6 +26,7 @@ Supported features:
 - `rpi secrets send`;
 - `rpi secrets ls`;
 - `rpi gc`;
+- `rpi command` (run `[commands]` entries in the service container);
 - `rpi logs <project> [-f]`;
 - `rpi stats [project]`;
 - `rpi start|stop|restart <project>`;

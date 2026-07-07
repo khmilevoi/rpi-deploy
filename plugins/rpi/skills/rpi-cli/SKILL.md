@@ -1,6 +1,6 @@
 ---
 name: rpi-cli
-description: Use when operating, installing, testing, or troubleshooting the rpi deploy CLI, including rpi deploy, rpi ls, rpi env send, rpi env ls, rpi gc, rpi agent run, SSH profiles, PI_SERVER, PI_AGENT_URL, local dev agents, and CLI-to-agent connection failures.
+description: Use when operating, installing, testing, or troubleshooting the rpi deploy CLI, including rpi deploy, rpi ls, rpi secrets send, rpi secrets ls, rpi command, rpi logs, rpi stats, rpi start/stop/restart/rm, rpi status, rpi doctor, rpi gc, rpi agent run, rpi setup, rpi init, rpi agent setup, SSH profiles, PI_SERVER, PI_AGENT_URL, local dev agents, and CLI-to-agent connection failures.
 ---
 
 # Rpi CLI
@@ -24,14 +24,26 @@ Primary references in this repo:
 | Deploy a ref | `rpi deploy --ref <branch-tag-or-sha>` |
 | Cancel active deploys for current `rpi.toml` project | `rpi deploy --cancel` |
 | List projects | `rpi ls` or `rpi ps` |
-| Send env bundle | `rpi env send` |
-| Send env bundle and restart running stack | `rpi env send --apply` |
-| List stored env keys | `rpi env ls` |
+| Send secrets bundle (env + files) | `rpi secrets send` |
+| Send secrets bundle and restart running stack | `rpi secrets send --apply` |
+| List stored secret keys | `rpi secrets ls` |
+| Stream container logs | `rpi logs <project> [-f] [--tail N]` |
+| Live CPU/memory/disk metrics | `rpi stats [project]` |
+| Start / stop / restart project containers | `rpi start\|stop\|restart <project>` |
+| Remove a project | `rpi rm <project> [--volumes]` |
+| Agent and host overview | `rpi status` |
+| Environment self-diagnosis | `rpi doctor` |
 | Prune agent Docker images/build cache | `rpi gc` |
 | List commands deployed on the agent | `rpi command` |
 | Run a deployed `[commands]` entry | `rpi command <name>` |
 | Run a deployed entry with extra args | `rpi command <name> -- <extra-args>` |
 | Run foreground agent | `rpi agent run --config <agent.toml>` |
+| Agent status on the Pi | `rpi agent status` |
+| Agent logs on the Pi | `rpi agent logs [-f] [--since 2h]` |
+| One-command developer setup | `rpi setup` |
+| Scaffold a new `rpi.toml` | `rpi init` |
+| Install/configure the agent on the Pi | `rpi agent setup` |
+| Uninstall the agent (keeps data unless `--purge`) | `rpi agent uninstall` |
 
 Remote commands accept either a named profile or direct SSH flags:
 
@@ -110,7 +122,7 @@ Before `rpi deploy`:
 1. Run from the deployable project's root, not necessarily from this repository root.
 2. Confirm `./rpi.toml` exists and has the intended project name, repo, branch, service, and port.
 3. Confirm the Pi can read `source.repo`; private repos may require a deploy key on the Pi.
-4. If `[env] file = ".env"` is used and secrets are required, run `rpi env send` before the first deploy.
+4. If `[secrets]` is configured (env file and/or files) and secrets are required, run `rpi secrets send` before the first deploy.
 5. Prefer Compose `expose` for the managed service; avoid fixed host `ports` that conflict with rpi's allocator.
 
 ## Troubleshooting
@@ -127,7 +139,7 @@ For deploy failures:
 
 - `Permission denied (publickey)`: the Pi cannot fetch `source.repo`; add the printed deploy key to the repository.
 - Docker `/home/rpi-agent` errors: ensure the systemd unit sets `HOME=/var/lib/rpi`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, and `WorkingDirectory=/var/lib/rpi`.
-- Compose does not see secrets: run `rpi env send`, or `rpi env send --apply` for an already running stack.
+- Compose does not see secrets: run `rpi secrets send`, or `rpi secrets send --apply` for an already running stack.
 - Health check fails: verify the app listens on `0.0.0.0`, `[ingress].port` is the container port, and `[healthcheck]` matches the endpoint.
 - Host port conflict: remove fixed host `ports:` from Compose and let rpi write the override.
 
