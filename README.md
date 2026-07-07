@@ -20,8 +20,8 @@ Supported features:
 - `rpi deploy`;
 - `rpi deploy --cancel`;
 - `rpi ls`;
-- `rpi env send`;
-- `rpi env ls`;
+- `rpi secrets send`;
+- `rpi secrets ls`;
 - `rpi gc`;
 - `rpi logs <project> [-f]`;
 - `rpi stats [project]`;
@@ -39,7 +39,7 @@ Supported features:
 - Docker Compose overrides;
 - health checks;
 - a latest-wins deployment queue;
-- encrypted env bundles;
+- encrypted secrets bundles (environment and files);
 - optional Cloudflare Tunnel ingress automation.
 
 ## Runtime Model
@@ -50,7 +50,7 @@ Supported features:
   It stores state in SQLite, selects a stable host port, writes a Compose
   override, runs `docker compose build`, and then runs
   `docker compose up -d --remove-orphans`.
-- `rpi deploy`, `rpi ls`, `rpi env ...`, and `rpi gc` are client commands that run
+- `rpi deploy`, `rpi ls`, `rpi secrets ...`, and `rpi gc` are client commands that run
   on a developer machine or CI runner. They open an SSH tunnel to the agent's
   Unix socket.
 
@@ -505,8 +505,11 @@ path = "/health"
 expect = "200"
 timeout = "60s"
 
-[env]
-file = ".env"
+[secrets]
+env = ".env"                     # optional, default ".env"
+files = [                        # optional; recreated at the same paths on the Pi
+  "certs/server.pem",
+]
 ```
 
 ### Worker, Bot, Or Internal Service
@@ -535,8 +538,11 @@ path = "/health"
 expect = "200"
 timeout = "60s"
 
-[env]
-file = ".env"
+[secrets]
+env = ".env"                     # optional, default ".env"
+files = [                        # optional; recreated at the same paths on the Pi
+  "certs/server.pem",
+]
 ```
 
 Fields:
@@ -551,7 +557,11 @@ Fields:
 - `ingress.hostname` is optional; use it for public ingress.
 - `healthcheck.path` is the HTTP endpoint checked through the allocated host
   port. If the path is not set, the agent uses a TCP probe.
-- `env.file` is the local file read by `rpi env send`.
+- `secrets.env` is the optional local file read by `rpi secrets send` (default `.env`).
+- `secrets.files` are optional secret files (certs, keys) recreated at the same paths
+  on the Pi on every deploy. Secret files are sent encrypted, stored age-encrypted
+  on the agent, and written 0600 into the checkout; paths are relative, use forward
+  slashes, and `..` is rejected.
 
 Optional per-project timeouts:
 
@@ -634,45 +644,48 @@ services:
       - ./data:/data
 ```
 
-## Secrets And `.env`
+## Secrets (Environment And Files)
 
 If `rpi.toml` contains:
 
 ```toml
-[env]
-file = ".env"
+[secrets]
+env = ".env"                     # optional, default ".env"
+files = [                        # optional
+  "certs/server.pem",
+]
 ```
 
-send secrets from the root of the deployable project:
+send secrets (env bundle + files) from the root of the deployable project:
 
 ```bash
-rpi env send
+rpi secrets send
 ```
 
-The CLI reads the local `.env`, sends the values to the agent, and the agent
+The CLI reads the local `.env` and files, sends them to the agent, and the agent
 stores an encrypted bundle in `/var/lib/rpi/secrets`. During `rpi deploy`, the
-agent writes `.env` into the project workdir before running Docker Compose.
+agent writes them into the project workdir before running Docker Compose.
 
 Before the first deploy of a project that needs secrets:
 
 ```bash
-rpi env send
+rpi secrets send
 rpi deploy
 ```
 
 After changing secrets for an already running project:
 
 ```bash
-rpi env send --apply
+rpi secrets send --apply
 ```
 
-`--apply` restarts the Compose stack with the new `.env`. Without `--apply`, the
+`--apply` restarts the Compose stack with the new secrets. Without `--apply`, the
 values are only saved and will be applied by the next `rpi deploy`.
 
 List stored keys without values:
 
 ```bash
-rpi env ls
+rpi secrets ls
 ```
 
 ## Deploy
@@ -922,19 +935,19 @@ sudo usermod -aG docker rpi-agent
 sudo systemctl restart rpi-agent
 ```
 
-### Compose Does Not See `.env`
+### Compose Does Not See Secrets
 
-Send the env bundle before deploying:
+Send the secrets bundle before deploying:
 
 ```bash
-rpi env send
+rpi secrets send
 rpi deploy
 ```
 
 For an already running project:
 
 ```bash
-rpi env send --apply
+rpi secrets send --apply
 ```
 
 ### Health Check Fails
@@ -993,7 +1006,7 @@ cargo install --path crates/bin --locked
 9. `[ingress].port` matches the container port.
 10. Compose does not define a conflicting fixed host port.
 11. Mutable runtime files are stored in mounted directories.
-12. If the project needs secrets, `rpi env send` has been run.
+12. If the project needs secrets, `rpi secrets send` has been run.
 13. `rpi deploy` finishes with `deploy finished: success`.
 14. `rpi ls` shows the project, branch, host port, hostname if configured,
     expose mode (`-` for private, `lan http://<lan-ip>:<port>` for
