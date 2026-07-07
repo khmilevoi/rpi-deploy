@@ -267,7 +267,8 @@ async fn run_command(
             Err(_) => 1,
         };
         tracing::info!(
-            "command run: project={name} command={command} args={args:?} exit={code} duration={}s",
+            "command run: project={name} command={command} args_count={} exit={code} duration={}s",
+            args.len(),
             started.elapsed().as_secs()
         );
         yield sse_exit(code);

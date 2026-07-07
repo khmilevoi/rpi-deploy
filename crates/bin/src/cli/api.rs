@@ -336,3 +336,159 @@ impl ApiClient {
         anyhow::bail!("command stream ended without an exit status (agent restarted?)")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{get, post};
+    use axum::Router;
+
+    /// Binds an ephemeral port, serves `app` in the background, and returns
+    /// the base URL to point an `ApiClient` at.
+    async fn spawn_app(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    async fn sse_log_and_exit() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "event: log\ndata: hello\n\nevent: exit\ndata: 7\n\n",
+        )
+    }
+
+    async fn sse_no_exit() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "event: log\ndata: hello\n\n",
+        )
+    }
+
+    async fn sse_bad_exit() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "event: exit\ndata: not-a-number\n\n",
+        )
+    }
+
+    /// Splits the two-byte UTF-8 encoding of 'é' (0xC3 0xA9) across two
+    /// separately-flushed chunks, exercising the `error_len().is_none()`
+    /// (incomplete-sequence-at-end) branch in the client's chunk decoder.
+    async fn sse_multibyte_split() -> Response {
+        let stream = async_stream::stream! {
+            yield Ok::<Vec<u8>, std::convert::Infallible>(b"event: log\ndata: h\xC3".to_vec());
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            yield Ok::<Vec<u8>, std::convert::Infallible>(
+                b"\xA9llo\n\nevent: exit\ndata: 0\n\n".to_vec(),
+            );
+        };
+        Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap()
+    }
+
+    async fn not_found_plain() -> impl IntoResponse {
+        StatusCode::NOT_FOUND
+    }
+
+    async fn not_found_json() -> impl IntoResponse {
+        (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": "command 'nope' not found; available: create-invite"
+            })),
+        )
+    }
+
+    #[tokio::test]
+    async fn run_command_streams_log_and_returns_exit_code() {
+        let app = Router::new().route("/v1/projects/demo/commands/build", post(sse_log_and_exit));
+        let client = ApiClient::new(spawn_app(app).await);
+
+        let mut lines = Vec::new();
+        let code = client
+            .run_command("demo", "build", &[], |l| lines.push(l.to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(code, 7);
+        assert_eq!(lines, vec!["hello".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn run_command_decodes_multibyte_utf8_split_across_chunks() {
+        let app = Router::new().route(
+            "/v1/projects/demo/commands/build",
+            post(sse_multibyte_split),
+        );
+        let client = ApiClient::new(spawn_app(app).await);
+
+        let mut lines = Vec::new();
+        let code = client
+            .run_command("demo", "build", &[], |l| lines.push(l.to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(lines, vec!["héllo".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn run_command_errors_if_stream_ends_without_exit() {
+        let app = Router::new().route("/v1/projects/demo/commands/build", post(sse_no_exit));
+        let client = ApiClient::new(spawn_app(app).await);
+
+        let err = client
+            .run_command("demo", "build", &[], |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("without an exit status"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_errors_on_unparseable_exit_code() {
+        let app = Router::new().route("/v1/projects/demo/commands/build", post(sse_bad_exit));
+        let client = ApiClient::new(spawn_app(app).await);
+
+        let err = client
+            .run_command("demo", "build", &[], |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("invalid exit code"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn list_commands_404_without_body_prompts_agent_update() {
+        let app = Router::new().route("/v1/projects/demo/commands", get(not_found_plain));
+        let client = ApiClient::new(spawn_app(app).await);
+
+        let err = client.list_commands("demo").await.unwrap_err();
+
+        assert!(err.to_string().contains("update rpi-agent"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn list_commands_404_with_json_error_uses_message_verbatim() {
+        let app = Router::new().route("/v1/projects/demo/commands", get(not_found_json));
+        let client = ApiClient::new(spawn_app(app).await);
+
+        let err = client.list_commands("demo").await.unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "command 'nope' not found; available: create-invite"
+        );
+    }
+}
