@@ -13,6 +13,7 @@ pub mod overrides;
 pub mod probe;
 pub mod process;
 pub mod repo;
+pub mod secretpath;
 pub mod secrets;
 pub mod sqlite;
 pub mod stats;
