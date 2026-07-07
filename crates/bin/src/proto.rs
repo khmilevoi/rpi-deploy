@@ -105,6 +105,10 @@ impl From<&ProjectConfig> for ProjectDto {
     }
 }
 
+/// Legacy `/env` route DTOs (agent/http.rs). The CLI no longer sends these
+/// (Task 8 replaced `rpi env send/ls` with `rpi secrets send/ls`), but the
+/// agent's `/env` route handlers still deserialize/serialize them to keep
+/// talking to not-yet-upgraded old CLIs; kept only for that.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvSendRequest {
     pub vars: BTreeMap<String, String>,

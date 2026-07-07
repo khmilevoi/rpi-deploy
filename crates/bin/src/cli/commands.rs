@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use base64::Engine as _;
+
 use crate::cli::api::ApiClient;
 use crate::cli::config::ConnectOpts;
-use crate::cli::rpitoml::RpiToml;
+use crate::cli::rpitoml::{RpiToml, SecretsSection};
 use crate::cli::ssh::SshExec;
 use crate::cli::tunnel::SshTunnel;
 use crate::duration::parse_duration_secs;
@@ -85,30 +87,82 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn env_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<()> {
+pub async fn secrets_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<()> {
     let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
     let project_name = rpitoml.project.name.clone();
-    let env_name = rpitoml.secrets.env.clone().unwrap_or_else(|| ".env".to_string());
-    let env_file = Path::new(&env_name).to_path_buf();
-
-    let raw = std::fs::read_to_string(&env_file)
-        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", env_file.display()))?;
-    let vars = parse_env_file(&raw)?;
-    if vars.is_empty() {
-        anyhow::bail!("no variables found in {}", env_file.display());
+    let (vars, files) = collect_secrets(Path::new("."), &rpitoml.secrets)?;
+    if vars.is_empty() && files.is_empty() {
+        anyhow::bail!(
+            "no secrets to send: env file has no variables and [secrets].files is empty"
+        );
     }
 
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
 
-    let n = vars.len();
-    let resp = api.send_env(&project_name, vars, apply).await?;
-    eprintln!("saved {n} key(s) for project '{project_name}'");
+    let (n, m) = (vars.len(), files.len());
+    let resp = api.send_secrets(&project_name, vars, files, apply).await?;
+    eprintln!("saved {n} key(s) and {m} file(s) for project '{project_name}'");
     if resp.applied {
-        eprintln!(".env applied to running containers");
+        eprintln!("secrets applied to running containers");
     }
     Ok(())
+}
+
+/// Assemble the outgoing bundle per secrets spec §3: an explicitly configured
+/// env file must exist, the default ".env" may be absent; all missing
+/// [secrets].files are reported in one error; limits match the agent's.
+fn collect_secrets(
+    root: &Path,
+    section: &SecretsSection,
+) -> anyhow::Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+    let vars = match &section.env {
+        Some(name) => {
+            let path = root.join(name);
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+            parse_env_file(&raw)?
+        }
+        None => match std::fs::read_to_string(root.join(".env")) {
+            Ok(raw) => parse_env_file(&raw)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => return Err(anyhow::anyhow!("cannot read .env: {e}")),
+        },
+    };
+
+    let mut files = BTreeMap::new();
+    let mut missing: Vec<&str> = Vec::new();
+    let mut total: usize = 0;
+    for rel in &section.files {
+        let path = root.join(rel);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(rel);
+                continue;
+            }
+            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
+        };
+        if bytes.len() > crate::proto::MAX_SECRET_FILE_BYTES {
+            anyhow::bail!("secret file '{rel}' is {} bytes; max is 1 MiB", bytes.len());
+        }
+        total += bytes.len();
+        if total > crate::proto::MAX_SECRETS_BUNDLE_BYTES {
+            anyhow::bail!("secret files exceed 8 MiB total");
+        }
+        files.insert(
+            rel.clone(),
+            base64::engine::general_purpose::STANDARD.encode(&bytes),
+        );
+    }
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "secret file(s) not found: {} (paths are relative to the project root)",
+            missing.join(", ")
+        );
+    }
+    Ok((vars, files))
 }
 
 pub async fn gc(connect: ConnectOpts) -> anyhow::Result<()> {
@@ -125,7 +179,7 @@ pub async fn gc(connect: ConnectOpts) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn env_ls(connect: ConnectOpts) -> anyhow::Result<()> {
+pub async fn secrets_ls(connect: ConnectOpts) -> anyhow::Result<()> {
     let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
     let project_name = rpitoml.project.name.clone();
 
@@ -133,12 +187,21 @@ pub async fn env_ls(connect: ConnectOpts) -> anyhow::Result<()> {
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
 
-    let resp = api.env_keys(&project_name).await?;
-    if resp.keys.is_empty() {
+    let resp = api.list_secrets(&project_name).await?;
+    if resp.keys.is_empty() && resp.files.is_empty() {
         println!("no secrets stored for project '{project_name}'");
-    } else {
+        return Ok(());
+    }
+    if !resp.keys.is_empty() {
+        println!("env keys:");
         for key in &resp.keys {
-            println!("{key}");
+            println!("  {key}");
+        }
+    }
+    if !resp.files.is_empty() {
+        println!("files:");
+        for file in &resp.files {
+            println!("  {file}");
         }
     }
     Ok(())
@@ -549,6 +612,60 @@ rebuild/update the agent on the Pi (`rpi agent update` ships in v0.5)"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::rpitoml::SecretsSection;
+
+    fn section(env: Option<&str>, files: &[&str]) -> SecretsSection {
+        SecretsSection {
+            env: env.map(str::to_string),
+            files: files.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn collect_reads_env_and_files_as_base64() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "A=1\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("certs")).unwrap();
+        std::fs::write(dir.path().join("certs/server.pem"), b"PEM").unwrap();
+
+        let (vars, files) =
+            collect_secrets(dir.path(), &section(None, &["certs/server.pem"])).unwrap();
+        assert_eq!(vars["A"], "1");
+        assert_eq!(files["certs/server.pem"], "UEVN"); // base64("PEM")
+    }
+
+    #[test]
+    fn explicit_env_file_must_exist_but_default_is_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+
+        let err = collect_secrets(dir.path(), &section(Some(".env.prod"), &[])).unwrap_err();
+        assert!(err.to_string().contains(".env.prod"), "got: {err}");
+
+        let (vars, files) = collect_secrets(dir.path(), &section(None, &["f.txt"])).unwrap();
+        assert!(vars.is_empty(), "missing default .env is fine");
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn all_missing_files_are_reported_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = collect_secrets(dir.path(), &section(None, &["a.pem", "b.pem"])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("a.pem") && msg.contains("b.pem"), "got: {msg}");
+    }
+
+    #[test]
+    fn oversized_file_is_rejected_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("big.bin"),
+            vec![0u8; crate::proto::MAX_SECRET_FILE_BYTES + 1],
+        )
+        .unwrap();
+        let err = collect_secrets(dir.path(), &section(None, &["big.bin"])).unwrap_err();
+        assert!(err.to_string().contains("1 MiB"), "got: {err}");
+    }
 
     #[test]
     fn env_file_parsing_matches_agent_rules() {
