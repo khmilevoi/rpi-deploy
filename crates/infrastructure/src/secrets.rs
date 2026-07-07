@@ -153,7 +153,11 @@ impl SecretStore for EncryptedFileStore {
     async fn remove(&self, project: &str) -> Result<(), DomainError> {
         let path = self.bundle_path(project)?;
         let legacy = self.legacy_path(project)?;
-        for target in [path, legacy] {
+        // Delete the legacy file first: if the primary deletion below then
+        // fails partway through, `load()` still finds the primary file and
+        // reports secrets as present, rather than silently falling back to
+        // an un-deleted legacy file after the primary is already gone.
+        for target in [legacy, path] {
             match tokio::fs::remove_file(&target).await {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
