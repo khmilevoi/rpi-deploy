@@ -1541,6 +1541,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "clap",
  "dirs",
  "futures",

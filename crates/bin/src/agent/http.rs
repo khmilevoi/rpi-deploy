@@ -1,14 +1,17 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use base64::Engine as _;
 use pi_application::logs::DEFAULT_LOG_TAIL;
-use pi_domain::entities::{DeployRef, DeploymentStatus, EnvBundle, LifecycleAction, ProjectConfig};
+use pi_domain::entities::{
+    DeployRef, DeploymentStatus, EnvBundle, LifecycleAction, ProjectConfig, SecretsBundle,
+};
 use pi_domain::error::DomainError;
 use pi_infrastructure::events::DeployEvent;
 use serde::Deserialize;
@@ -19,7 +22,8 @@ use crate::agent::state::AppState;
 use crate::proto::{
     AgentOverviewDto, DeployAccepted, DeployRequest, DeploymentDto, DiagnosticReportDto,
     EnvKeysResponse, EnvSendRequest, EnvSendResponse, GcResponse, LifecycleResponse,
-    ProjectViewDto, RemoveResponse, StatsReportDto, VersionInfo,
+    ProjectViewDto, RemoveResponse, SecretsListResponse, SecretsSendRequest, SecretsSendResponse,
+    StatsReportDto, VersionInfo,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -48,6 +52,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/projects/{name}/env",
             put(send_env_handler).get(env_keys_handler),
         )
+        .route(
+            "/v1/projects/{name}/secrets",
+            put(send_secrets_handler).get(list_secrets_handler),
+        )
+        // base64 inflates the 8 MiB bundle limit by ~4/3; leave headroom
+        .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
         .with_state(state)
 }
 
@@ -435,8 +445,8 @@ async fn deployment_logs(
     }
 }
 
-/// `rpi env send --apply` runs `up -d` synchronously; its output goes to the
-/// agent log (journald), the CLI gets a compact JSON summary.
+/// `rpi secrets send --apply` runs `up -d` synchronously; its output goes to
+/// the agent log (journald), the CLI gets a compact JSON summary.
 struct TracingSink;
 
 impl pi_domain::contracts::LogSink for TracingSink {
@@ -494,6 +504,86 @@ async fn env_keys_handler(
     }
     let stored = state.list_secrets.execute(&name).await.map_err(ApiError)?;
     Ok(Json(EnvKeysResponse { keys: stored.keys }))
+}
+
+async fn send_secrets_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<SecretsSendRequest>,
+) -> Result<Json<SecretsSendResponse>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    for (key, value) in &req.vars {
+        if !pi_infrastructure::dotenv::is_valid_key(key) {
+            return Err(ApiError(DomainError::Invalid(format!(
+                "invalid env key '{key}'"
+            ))));
+        }
+        if value.contains('\n') {
+            return Err(ApiError(DomainError::Invalid(format!(
+                "value of '{key}' contains a newline (multi-line values are unsupported)"
+            ))));
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    let mut total: usize = 0;
+    for (path, b64) in &req.files {
+        pi_infrastructure::secretpath::validate_rel_path(path)
+            .map_err(|e| ApiError(DomainError::Invalid(format!("secret file '{path}': {e}"))))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|_| {
+                ApiError(DomainError::Invalid(format!(
+                    "secret file '{path}': contents are not valid base64"
+                )))
+            })?;
+        if bytes.len() > crate::proto::MAX_SECRET_FILE_BYTES {
+            return Err(ApiError(DomainError::Invalid(format!(
+                "secret file '{path}' is {} bytes; max is 1 MiB",
+                bytes.len()
+            ))));
+        }
+        total += bytes.len();
+        if total > crate::proto::MAX_SECRETS_BUNDLE_BYTES {
+            return Err(ApiError(DomainError::Invalid(
+                "secret files exceed 8 MiB total".into(),
+            )));
+        }
+        files.insert(path.clone(), bytes);
+    }
+    let bundle = SecretsBundle {
+        vars: req.vars,
+        files,
+    };
+    let saved = state
+        .send_secrets
+        .execute(&name, bundle, req.apply, Arc::new(TracingSink))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(SecretsSendResponse {
+        saved_keys: saved.keys,
+        saved_files: saved.files,
+        applied: saved.applied,
+    }))
+}
+
+async fn list_secrets_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<SecretsListResponse>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    let stored = state.list_secrets.execute(&name).await.map_err(ApiError)?;
+    Ok(Json(SecretsListResponse {
+        keys: stored.keys,
+        files: stored.files,
+    }))
 }
 
 #[cfg(test)]
@@ -1019,67 +1109,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn env_send_then_ls_roundtrip() {
+    async fn secrets_send_then_ls_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_with(
-            dir.path(),
-            Arc::new(ok_source()),
-            Arc::new(ok_runtime()),
-        ));
+        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
 
-        let body = serde_json::json!({ "vars": { "DB_PASSWORD": "hunter2-long" }, "apply": false });
-        let (status, json) = request(app.clone(), put_json("/v1/projects/rateme/env", &body)).await;
+        // "PEM" -> base64 "UEVN"
+        let body = serde_json::json!({
+            "vars": { "DB_PASSWORD": "hunter2-long" },
+            "files": { "certs/server.pem": "UEVN" },
+            "apply": false
+        });
+        let (status, json) = request(app.clone(), put_json("/v1/projects/rateme/secrets", &body)).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["saved_keys"], 1);
+        assert_eq!(json["saved_files"], 1);
         assert_eq!(json["applied"], false);
 
-        let (status, json) = request(app.clone(), get_req("/v1/projects/rateme/env")).await;
+        let (status, json) = request(app.clone(), get_req("/v1/projects/rateme/secrets")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["keys"], serde_json::json!(["DB_PASSWORD"]));
+        assert_eq!(json["files"], serde_json::json!(["certs/server.pem"]));
     }
 
     #[tokio::test]
-    async fn env_send_rejects_bad_keys_and_multiline_values() {
+    async fn secrets_send_rejects_bad_paths_base64_and_oversize() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_with(
-            dir.path(),
-            Arc::new(ok_source()),
-            Arc::new(ok_runtime()),
-        ));
+        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
 
-        let bad_key = serde_json::json!({ "vars": { "BAD-DASH": "x" } });
-        let (status, _) = request(app.clone(), put_json("/v1/projects/rateme/env", &bad_key)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        for bad in [
+            serde_json::json!({ "vars": {}, "files": { "../escape": "UEVN" } }),
+            serde_json::json!({ "vars": {}, "files": { "/abs/path": "UEVN" } }),
+            serde_json::json!({ "vars": {}, "files": { "certs\\win.pem": "UEVN" } }),
+            serde_json::json!({ "vars": {}, "files": { "ok.pem": "not-base64!!!" } }),
+            serde_json::json!({ "vars": { "BAD-DASH": "x" }, "files": {} }),
+            serde_json::json!({ "vars": { "OK": "line1\nline2" }, "files": {} }),
+        ] {
+            let (status, json) =
+                request(app.clone(), put_json("/v1/projects/rateme/secrets", &bad)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad} -> {json}");
+        }
 
-        let bad_value = serde_json::json!({ "vars": { "OK": "line1\nline2" } });
-        let (status, _) =
-            request(app.clone(), put_json("/v1/projects/rateme/env", &bad_value)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        use base64::Engine as _;
+        let big = base64::engine::general_purpose::STANDARD
+            .encode(vec![0u8; crate::proto::MAX_SECRET_FILE_BYTES + 1]);
+        let body = serde_json::json!({ "vars": {}, "files": { "big.bin": big } });
+        let (status, json) = request(app.clone(), put_json("/v1/projects/rateme/secrets", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
     }
 
     #[tokio::test]
-    async fn env_apply_for_unknown_project_is_404() {
+    async fn secrets_apply_for_unknown_project_is_404() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_with(
-            dir.path(),
-            Arc::new(ok_source()),
-            Arc::new(ok_runtime()),
-        ));
-        let body = serde_json::json!({ "vars": { "A_KEY": "value-long-enough" }, "apply": true });
-        let (status, _) = request(app, put_json("/v1/projects/ghost/env", &body)).await;
+        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let body = serde_json::json!({ "vars": { "A_KEY": "value-long-enough" }, "files": {}, "apply": true });
+        let (status, _) = request(app, put_json("/v1/projects/ghost/secrets", &body)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn env_keys_for_project_without_env_is_empty_list() {
+    async fn secrets_ls_for_unknown_project_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_with(
-            dir.path(),
-            Arc::new(ok_source()),
-            Arc::new(ok_runtime()),
-        ));
-        let (status, json) = request(app, get_req("/v1/projects/ghost/env")).await;
+        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let (status, json) = request(app, get_req("/v1/projects/ghost/secrets")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["keys"], serde_json::json!([]));
+        assert_eq!(json["files"], serde_json::json!([]));
+    }
+
+    // The plan's brief text for this test asserts the OLD `/env` routes are
+    // gone (404) — but Task 6's own scope note is explicit that `/env` stays
+    // registered, unmodified, "exactly as before" until Task 8 removes it;
+    // `crates/bin/src/cli/api.rs` (the CLI client) still calls `/env` at
+    // runtime and is out of scope for this task. Removing `/env` here would
+    // both contradict that stated scope and break the CLI. So this test is
+    // adjusted to assert the opposite of its brief name for now: the legacy
+    // routes keep working unchanged, side by side with the new `/secrets`
+    // route. Task 8 (which does remove `/env`) should flip this back to a
+    // 404 check.
+    #[tokio::test]
+    async fn legacy_env_routes_still_work_pending_task_8_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime())));
+        let body = serde_json::json!({ "vars": { "A": "1" } });
+        let (status, json) = request(app.clone(), put_json("/v1/projects/rateme/env", &body)).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let (status, json) = request(app, get_req("/v1/projects/rateme/env")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
     }
 }
