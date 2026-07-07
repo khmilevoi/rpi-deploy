@@ -113,19 +113,34 @@ pub async fn secrets_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<(
 /// Assemble the outgoing bundle per secrets spec §3: an explicitly configured
 /// env file must exist, the default ".env" may be absent; all missing
 /// [secrets].files are reported in one error; limits match the agent's.
+///
+/// Every path is resolved with `secretpath::resolve_within_root` before it is
+/// opened: `rpi.toml` parsing already rejects `..`/absolute strings via
+/// `validate_rel_path`, but that is a string-only check and cannot see that a
+/// path component is, on disk, a symlink pointing outside the project root
+/// (e.g. a git-tracked symlink committed by a malicious contributor). Without
+/// this check `rpi secrets send` would follow such a symlink and upload
+/// whatever it points to — anywhere on the filesystem the invoking user can
+/// read — to the remote agent.
 fn collect_secrets(
     root: &Path,
     section: &SecretsSection,
 ) -> anyhow::Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
     let vars = match &section.env {
         Some(name) => {
-            let path = root.join(name);
-            let raw = std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+            let display = root.join(name);
+            let real = pi_infrastructure::secretpath::resolve_within_root(root, name)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", display.display()))?;
+            let raw = std::fs::read_to_string(&real)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", display.display()))?;
             parse_env_file(&raw)?
         }
-        None => match std::fs::read_to_string(root.join(".env")) {
-            Ok(raw) => parse_env_file(&raw)?,
+        None => match pi_infrastructure::secretpath::resolve_within_root(root, ".env") {
+            Ok(real) => {
+                let raw = std::fs::read_to_string(&real)
+                    .map_err(|e| anyhow::anyhow!("cannot read .env: {e}"))?;
+                parse_env_file(&raw)?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(e) => return Err(anyhow::anyhow!("cannot read .env: {e}")),
         },
@@ -135,14 +150,22 @@ fn collect_secrets(
     let mut missing: Vec<&str> = Vec::new();
     let mut total: usize = 0;
     for rel in &section.files {
-        let path = root.join(rel);
-        let bytes = match std::fs::read(&path) {
+        let display = root.join(rel);
+        let real = match pi_infrastructure::secretpath::resolve_within_root(root, rel) {
+            Ok(p) => p,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(rel);
+                continue;
+            }
+            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", display.display())),
+        };
+        let bytes = match std::fs::read(&real) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 missing.push(rel);
                 continue;
             }
-            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
+            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", display.display())),
         };
         if bytes.len() > crate::proto::MAX_SECRET_FILE_BYTES {
             anyhow::bail!("secret file '{rel}' is {} bytes; max is 1 MiB", bytes.len());
@@ -665,6 +688,90 @@ mod tests {
         .unwrap();
         let err = collect_secrets(dir.path(), &section(None, &["big.bin"])).unwrap_err();
         assert!(err.to_string().contains("1 MiB"), "got: {err}");
+    }
+
+    /// Defense-in-depth: `rpi.toml`'s own `validate_rel_path` should already
+    /// reject a literal `..` in `[secrets].files`, but `collect_secrets` must
+    /// not blindly trust that upstream check either (a `SecretsSection` can
+    /// be built directly, and this is also the last line of defense against
+    /// a symlink resolving outside the root, exercised by the `cfg(unix)`
+    /// tests below).
+    #[test]
+    fn collect_secrets_rejects_file_path_escaping_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::write(outer.path().join("escaped.txt"), b"outside-secret").unwrap();
+        let outer_name = outer.path().file_name().unwrap().to_str().unwrap();
+        let rel = format!("../{outer_name}/escaped.txt");
+
+        let result = collect_secrets(dir.path(), &section(None, &[&rel]));
+        assert!(
+            result.is_err(),
+            "must not read a file outside the project root"
+        );
+    }
+
+    #[test]
+    fn collect_secrets_rejects_env_path_escaping_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::write(outer.path().join("prod.env"), b"SECRET=leak\n").unwrap();
+        let outer_name = outer.path().file_name().unwrap().to_str().unwrap();
+        let rel = format!("../{outer_name}/prod.env");
+
+        let result = collect_secrets(dir.path(), &section(Some(&rel), &[]));
+        assert!(
+            result.is_err(),
+            "must not read an env file outside the project root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_secrets_rejects_symlinked_file_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("id_rsa"), b"PRIVATE-KEY").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("id_rsa"), dir.path().join("certs.pem"))
+            .unwrap();
+
+        let result = collect_secrets(dir.path(), &section(None, &["certs.pem"]));
+        assert!(
+            result.is_err(),
+            "must not follow a symlink out of the project root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_secrets_rejects_symlinked_default_env_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("real.env"), b"SECRET=leak\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("real.env"), dir.path().join(".env"))
+            .unwrap();
+
+        let result = collect_secrets(dir.path(), &section(None, &[]));
+        assert!(
+            result.is_err(),
+            "must not follow a symlink out of the project root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_secrets_rejects_symlinked_explicit_env_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("real.env"), b"SECRET=leak\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("real.env"), dir.path().join("prod.env"))
+            .unwrap();
+
+        let result = collect_secrets(dir.path(), &section(Some("prod.env"), &[]));
+        assert!(
+            result.is_err(),
+            "must not follow a symlink out of the project root"
+        );
     }
 
     #[test]

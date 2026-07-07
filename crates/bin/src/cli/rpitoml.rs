@@ -151,6 +151,10 @@ impl RpiToml {
                 "rpi.toml: [env] was replaced by [secrets]; move `file = \"...\"` to:\n[secrets]\nenv = \"...\""
             );
         }
+        if let Some(env) = &parsed.secrets.env {
+            pi_infrastructure::secretpath::validate_rel_path(env)
+                .map_err(|e| anyhow::anyhow!("rpi.toml [secrets].env: '{env}': {e}"))?;
+        }
         let mut seen = std::collections::BTreeSet::new();
         for path in &parsed.secrets.files {
             pi_infrastructure::secretpath::validate_rel_path(path)
@@ -311,6 +315,18 @@ files = ["certs/server.pem"]
             );
             let err = RpiToml::parse(&toml).unwrap_err().to_string();
             assert!(err.contains("[secrets].files"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn secrets_env_path_is_validated() {
+        for bad in ["../escape", "/abs", r"win\path"] {
+            let toml = SAMPLE.replace(
+                "env = \".env\"",
+                &format!("env = \"{}\"", bad.replace('\\', "\\\\")),
+            );
+            let err = RpiToml::parse(&toml).unwrap_err().to_string();
+            assert!(err.contains("[secrets].env"), "{bad}: {err}");
         }
     }
 
