@@ -468,7 +468,10 @@ async fn send_env_handler(
             ))));
         }
     }
-    let bundle = EnvBundle { vars: req.vars };
+    let bundle = EnvBundle {
+        vars: req.vars,
+        files: std::collections::BTreeMap::new(),
+    };
     let saved = state
         .send_env
         .execute(&name, bundle, req.apply, Arc::new(TracingSink))
