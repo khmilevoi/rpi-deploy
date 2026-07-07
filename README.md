@@ -651,7 +651,7 @@ If `rpi.toml` contains:
 ```toml
 [secrets]
 env = ".env"                     # optional, default ".env"
-files = [                        # optional
+files = [                        # optional; recreated at the same paths on the Pi
   "certs/server.pem",
 ]
 ```
@@ -682,7 +682,7 @@ rpi secrets send --apply
 `--apply` restarts the Compose stack with the new secrets. Without `--apply`, the
 values are only saved and will be applied by the next `rpi deploy`.
 
-List stored keys without values:
+List stored env keys and secret file paths (values are never transmitted):
 
 ```bash
 rpi secrets ls
