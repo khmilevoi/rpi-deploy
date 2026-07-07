@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::sqlite::{storage_err, Db};
 
-const SELECT: &str = "SELECT name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose FROM projects";
+const SELECT: &str = "SELECT name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose, commands, command_timeout_secs FROM projects";
 
 pub struct SqliteProjectRepo {
     db: Db,
@@ -41,6 +41,8 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> Result<Project, rusqlite::Error> {
             expose: ExposeMode::parse(&row.get::<_, String>(9)?).unwrap_or_default(),
             healthcheck: HealthcheckConfig::default(), // per-deploy input, not stored
             timeouts: StageTimeoutOverrides::default(), // per-deploy input, not stored
+            commands: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
+            command_timeout_secs: row.get(11)?,
         },
         host_port: row.get(7)?,
         created_at: row.get(8)?,
@@ -93,7 +95,7 @@ impl ProjectRepository for SqliteProjectRepo {
                     .map_err(storage_err)?;
                 if exists.is_some() {
                     tx.execute(
-                        "UPDATE projects SET repo=?2, branch=?3, compose_path=?4, service=?5, container_port=?6, hostname=?7, expose=?8 WHERE name=?1",
+                        "UPDATE projects SET repo=?2, branch=?3, compose_path=?4, service=?5, container_port=?6, hostname=?7, expose=?8, commands=?9, command_timeout_secs=?10 WHERE name=?1",
                         params![
                             &config.name,
                             &config.repo,
@@ -102,15 +104,18 @@ impl ProjectRepository for SqliteProjectRepo {
                             &config.service,
                             config.container_port,
                             &config.hostname,
-                            config.expose.as_str()
+                            config.expose.as_str(),
+                            serde_json::to_string(&config.commands)
+                                .unwrap_or_else(|_| "{}".into()),
+                            config.command_timeout_secs,
                         ],
                     )
                     .map_err(storage_err)?;
                 } else {
                     let port = allocate_port(&tx, min, max)?;
                     tx.execute(
-                        "INSERT INTO projects (name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch(), ?9)",
+                        "INSERT INTO projects (name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose, commands, command_timeout_secs)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch(), ?9, ?10, ?11)",
                         params![
                             &config.name,
                             &config.repo,
@@ -120,7 +125,10 @@ impl ProjectRepository for SqliteProjectRepo {
                             config.container_port,
                             &config.hostname,
                             port,
-                            config.expose.as_str()
+                            config.expose.as_str(),
+                            serde_json::to_string(&config.commands)
+                                .unwrap_or_else(|_| "{}".into()),
+                            config.command_timeout_secs,
                         ],
                     )
                     .map_err(storage_err)?;
@@ -204,6 +212,8 @@ mod tests {
             expose: ExposeMode::default(),
             healthcheck: HealthcheckConfig::default(),
             timeouts: StageTimeoutOverrides::default(),
+            commands: Default::default(),
+            command_timeout_secs: None,
         }
     }
 
@@ -295,6 +305,34 @@ mod tests {
 
         let repo = SqliteProjectRepo::new(db, 8000, 8999);
         assert_eq!(repo.upsert(&cfg("b")).await.unwrap().host_port, 8001);
+    }
+
+    #[tokio::test]
+    async fn persists_commands_and_command_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo(&dir, 8000, 8999);
+        let mut config = cfg("a");
+        config
+            .commands
+            .insert("migrate".into(), vec!["npx".into(), "prisma".into()]);
+        config.command_timeout_secs = Some(1800);
+
+        repo.upsert(&config).await.unwrap();
+        let loaded = repo.get("a").await.unwrap().unwrap();
+        assert_eq!(loaded.config.commands, config.commands);
+        assert_eq!(loaded.config.command_timeout_secs, Some(1800));
+
+        // update path: replacing commands persists the new set
+        config.commands.clear();
+        config
+            .commands
+            .insert("seed".into(), vec!["node".into(), "seed.js".into()]);
+        config.command_timeout_secs = None;
+        repo.upsert(&config).await.unwrap();
+        let loaded = repo.get("a").await.unwrap().unwrap();
+        assert_eq!(loaded.config.commands.len(), 1);
+        assert!(loaded.config.commands.contains_key("seed"));
+        assert_eq!(loaded.config.command_timeout_secs, None);
     }
 
     #[tokio::test]

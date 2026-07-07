@@ -28,6 +28,9 @@ Primary references in this repo:
 | Send env bundle and restart running stack | `rpi env send --apply` |
 | List stored env keys | `rpi env ls` |
 | Prune agent Docker images/build cache | `rpi gc` |
+| List commands deployed on the agent | `rpi command` |
+| Run a deployed `[commands]` entry | `rpi command <name>` |
+| Run a deployed entry with extra args | `rpi command <name> -- <extra-args>` |
 | Run foreground agent | `rpi agent run --config <agent.toml>` |
 
 Remote commands accept either a named profile or direct SSH flags:
@@ -39,6 +42,24 @@ rpi deploy --host pi-host.local --user pi-user --key ~/.ssh/id_ed25519_pi
 ```
 
 Do not combine `--server` with `--host`; direct `--host` mode requires `--user`.
+
+## Running Admin Commands
+
+`rpi command` runs entries declared in `[commands]` in `rpi.toml`, inside the
+`ingress.service` container on the agent:
+
+```bash
+rpi command                                   # list mode: commands deployed on the agent
+rpi command create-invite                     # run mode: execute a deployed command
+rpi command create-invite -- --email x@y.com  # `--` separates extra args, appended to the declared argv
+```
+
+- The remote exit code becomes the `rpi` exit code.
+- Ctrl+C detaches and best-effort kills the run on the agent; the in-container
+  process may still survive, per standard `docker exec` behavior.
+- A 404 from an old agent that predates `[commands]` support surfaces as
+  "agent does not support [commands]; update rpi-agent on the Pi" — update the
+  agent binary and redeploy.
 
 ## Client Profile
 

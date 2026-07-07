@@ -26,6 +26,7 @@ pub struct TimeoutsDto {
     pub fetch_secs: Option<u64>,
     pub build_secs: Option<u64>,
     pub up_secs: Option<u64>,
+    pub command_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,10 +44,13 @@ pub struct ProjectDto {
     pub healthcheck: Option<HealthcheckDto>,
     #[serde(default)]
     pub timeouts: Option<TimeoutsDto>,
+    #[serde(default)]
+    pub commands: BTreeMap<String, Vec<String>>,
 }
 
 impl From<ProjectDto> for ProjectConfig {
     fn from(dto: ProjectDto) -> ProjectConfig {
+        let command_timeout_secs = dto.timeouts.as_ref().and_then(|t| t.command_secs);
         ProjectConfig {
             name: dto.name,
             repo: dto.repo,
@@ -76,6 +80,8 @@ impl From<ProjectDto> for ProjectConfig {
                     up_secs: t.up_secs,
                 })
                 .unwrap_or_default(),
+            commands: dto.commands,
+            command_timeout_secs,
         }
     }
 }
@@ -100,7 +106,9 @@ impl From<&ProjectConfig> for ProjectDto {
                 fetch_secs: config.timeouts.fetch_secs,
                 build_secs: config.timeouts.build_secs,
                 up_secs: config.timeouts.up_secs,
+                command_secs: config.command_timeout_secs,
             }),
+            commands: config.commands.clone(),
         }
     }
 }
@@ -260,6 +268,20 @@ pub struct LifecycleResponse {
     pub action: String,
 }
 
+/// GET /v1/projects/{name}/commands — deployed [commands], name -> argv.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandsResponse {
+    pub commands: BTreeMap<String, Vec<String>>,
+}
+
+/// POST /v1/projects/{name}/commands/{command} body: extra argv items
+/// appended to the declared command (never replacing the program).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandRunRequest {
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveResponse {
     pub project: String,
@@ -389,6 +411,7 @@ mod tests {
             expose: None,
             healthcheck: None,
             timeouts: None,
+            commands: BTreeMap::new(),
         }
         .into();
         config.healthcheck.path = Some("/health".into());
@@ -465,5 +488,47 @@ mod tests {
         let dto = ProjectViewDto::from(view);
         assert_eq!(dto.expose, "lan");
         assert_eq!(dto.lan_ip.as_deref(), Some("192.168.1.50"));
+    }
+
+    #[test]
+    fn legacy_project_dto_without_commands_deserializes_empty() {
+        let json = serde_json::json!({
+            "name": "rateme", "repo": "r", "branch": "main",
+            "compose": "docker-compose.yml", "service": "web",
+            "port": 3000, "hostname": null
+        });
+        let dto: ProjectDto = serde_json::from_value(json).unwrap();
+        assert!(dto.commands.is_empty());
+        let config: pi_domain::entities::ProjectConfig = dto.into();
+        assert!(config.commands.is_empty());
+        assert_eq!(config.command_timeout_secs, None);
+    }
+
+    #[test]
+    fn commands_roundtrip_config_to_dto_and_back() {
+        let mut config = pi_domain::entities::ProjectConfig {
+            name: "rateme".into(),
+            repo: "r".into(),
+            branch: "main".into(),
+            compose_path: "docker-compose.yml".into(),
+            service: "web".into(),
+            container_port: 3000,
+            hostname: None,
+            expose: Default::default(),
+            healthcheck: Default::default(),
+            timeouts: Default::default(),
+            commands: Default::default(),
+            command_timeout_secs: Some(1800),
+        };
+        config
+            .commands
+            .insert("migrate".into(), vec!["npx".into(), "prisma".into()]);
+
+        let dto: ProjectDto = (&config).into();
+        let json = serde_json::to_value(&dto).unwrap();
+        let back: ProjectDto = serde_json::from_value(json).unwrap();
+        let roundtripped: pi_domain::entities::ProjectConfig = back.into();
+        assert_eq!(roundtripped.commands, config.commands);
+        assert_eq!(roundtripped.command_timeout_secs, Some(1800));
     }
 }

@@ -147,6 +147,8 @@ mod tests {
             expose: ExposeMode::default(),
             healthcheck,
             timeouts: StageTimeoutOverrides::default(),
+            commands: Default::default(),
+            command_timeout_secs: None,
         }
     }
 

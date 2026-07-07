@@ -92,6 +92,16 @@ enum Cmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
+    /// Run a command declared in [commands] of rpi.toml inside the project container
+    Command {
+        /// Command name; omit to list commands deployed on the agent
+        name: Option<String>,
+        /// Extra arguments appended to the declared command (write them after --)
+        #[arg(last = true)]
+        args: Vec<String>,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
     /// Live CPU/memory/disk metrics
     Stats {
         project: Option<String>,
@@ -263,6 +273,11 @@ async fn main() -> anyhow::Result<()> {
             tail,
             connect,
         } => cli::commands::logs(project, follow, tail, connect).await,
+        Cmd::Command {
+            name,
+            args,
+            connect,
+        } => cli::commands::command(name, args, connect).await,
         Cmd::Stats {
             project,
             json,
@@ -486,6 +501,32 @@ mod tests {
                 assert!(yes);
             }
             _ => panic!("expected agent uninstall"),
+        }
+    }
+
+    #[test]
+    fn command_parses_name_and_trailing_args() {
+        let cli =
+            Cli::try_parse_from(["pi", "command", "create-invite", "--", "--email", "x@y.com"])
+                .unwrap();
+        match cli.cmd {
+            Cmd::Command { name, args, .. } => {
+                assert_eq!(name.as_deref(), Some("create-invite"));
+                assert_eq!(args, vec!["--email".to_string(), "x@y.com".into()]);
+            }
+            _ => panic!("expected command"),
+        }
+    }
+
+    #[test]
+    fn bare_command_means_list_mode() {
+        let cli = Cli::try_parse_from(["pi", "command"]).unwrap();
+        match cli.cmd {
+            Cmd::Command { name, args, .. } => {
+                assert_eq!(name, None);
+                assert!(args.is_empty());
+            }
+            _ => panic!("expected command"),
         }
     }
 }

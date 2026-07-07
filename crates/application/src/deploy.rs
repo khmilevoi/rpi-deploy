@@ -355,6 +355,8 @@ mod tests {
             expose: ExposeMode::default(),
             healthcheck: HealthcheckConfig::default(),
             timeouts: StageTimeoutOverrides::default(),
+            commands: Default::default(),
+            command_timeout_secs: None,
         }
     }
 
@@ -1207,6 +1209,16 @@ mod tests {
             _log: Arc<dyn LogSink>,
         ) -> Result<(), DomainError> {
             Ok(())
+        }
+
+        async fn exec(
+            &self,
+            _stack: &pi_domain::entities::ComposeStack,
+            _service: &str,
+            _argv: &[String],
+            _log: Arc<dyn LogSink>,
+        ) -> Result<i32, DomainError> {
+            Ok(0)
         }
     }
 
