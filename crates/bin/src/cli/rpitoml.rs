@@ -18,7 +18,11 @@ pub struct RpiToml {
     #[serde(default)]
     pub healthcheck: HealthcheckSection,
     #[serde(default)]
-    pub env: EnvSection,
+    pub secrets: SecretsSection,
+    /// Legacy [env] table: rejected in parse() with a migration hint. Detected
+    /// via Option<toml::Value> because serde tolerates unknown sections.
+    #[serde(default, rename = "env")]
+    legacy_env: Option<toml::Value>,
     #[serde(default)]
     pub commands: Option<BTreeMap<String, CommandValue>>,
 }
@@ -91,23 +95,15 @@ pub struct HealthcheckSection {
     pub timeout: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct EnvSection {
-    /// Which local file `rpi env send` reads (§12).
-    #[serde(default = "default_env_file")]
-    pub file: String,
-}
-
-impl Default for EnvSection {
-    fn default() -> EnvSection {
-        EnvSection {
-            file: default_env_file(),
-        }
-    }
-}
-
-fn default_env_file() -> String {
-    ".env".into()
+/// [secrets] in rpi.toml (secrets spec §3): what `rpi secrets send` reads.
+#[derive(Debug, Default, Deserialize)]
+pub struct SecretsSection {
+    /// Local env file. None -> default ".env" (missing file is fine then);
+    /// Some(path) -> the file must exist.
+    pub env: Option<String>,
+    /// Secret files, relative forward-slash paths (recreated verbatim on the Pi).
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 /// [commands] value: a shell-word string or an explicit argv array (§spec).
@@ -183,6 +179,23 @@ impl RpiToml {
                 anyhow::bail!(
                     "invalid rpi.toml [ingress].expose '{expose}' (use \"private\" or \"lan\")"
                 );
+            }
+        }
+        if parsed.legacy_env.is_some() {
+            anyhow::bail!(
+                "rpi.toml: [env] was replaced by [secrets]; move `file = \"...\"` to:\n[secrets]\nenv = \"...\""
+            );
+        }
+        if let Some(env) = &parsed.secrets.env {
+            pi_infrastructure::secretpath::validate_rel_path(env)
+                .map_err(|e| anyhow::anyhow!("rpi.toml [secrets].env: '{env}': {e}"))?;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for path in &parsed.secrets.files {
+            pi_infrastructure::secretpath::validate_rel_path(path)
+                .map_err(|e| anyhow::anyhow!("rpi.toml [secrets].files: '{path}': {e}"))?;
+            if !seen.insert(path.as_str()) {
+                anyhow::bail!("rpi.toml [secrets].files: duplicate path '{path}'");
             }
         }
         if let Some(commands) = &parsed.commands {
@@ -302,8 +315,9 @@ port = 3000
 [healthcheck]
 path = "/"
 
-[env]
-file = ".env"
+[secrets]
+env = ".env"
+files = ["certs/server.pem"]
 "#;
 
     #[test]
@@ -329,7 +343,8 @@ file = ".env"
     #[test]
     fn env_and_healthcheck_sections_are_parsed_with_defaults() {
         let parsed = RpiToml::parse(SAMPLE).unwrap();
-        assert_eq!(parsed.env.file, ".env");
+        assert_eq!(parsed.secrets.env.as_deref(), Some(".env"));
+        assert_eq!(parsed.secrets.files, vec!["certs/server.pem".to_string()]);
         let config = parsed.to_project_config();
         assert_eq!(config.healthcheck.path.as_deref(), Some("/"));
         assert_eq!(config.healthcheck.expect, None);
@@ -338,14 +353,63 @@ file = ".env"
 
     #[test]
     fn missing_env_and_healthcheck_sections_fall_back_to_defaults() {
-        let toml = SAMPLE
-            .replace("[healthcheck]\npath = \"/\"\n", "")
-            .replace("[env]\nfile = \".env\"\n", "");
+        let toml = SAMPLE.replace("[healthcheck]\npath = \"/\"\n", "").replace(
+            "[secrets]\nenv = \".env\"\nfiles = [\"certs/server.pem\"]\n",
+            "",
+        );
         let parsed = RpiToml::parse(&toml).unwrap();
-        assert_eq!(parsed.env.file, ".env");
+        assert!(parsed.secrets.env.is_none());
+        assert!(parsed.secrets.files.is_empty());
         let config = parsed.to_project_config();
         assert_eq!(config.healthcheck.path, None, "no path -> TCP probe");
         assert_eq!(config.healthcheck.timeout_secs, 60);
+    }
+
+    #[test]
+    fn legacy_env_section_is_a_hard_error_with_migration_hint() {
+        let toml = SAMPLE.replace(
+            "[secrets]\nenv = \".env\"\nfiles = [\"certs/server.pem\"]\n",
+            "[env]\nfile = \".env\"\n",
+        );
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
+        assert!(
+            err.contains("[env] was replaced by [secrets]"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn secrets_files_paths_are_validated() {
+        for bad in ["../escape", "/abs", r"win\path", "a//b"] {
+            let toml = SAMPLE.replace(
+                "files = [\"certs/server.pem\"]",
+                &format!("files = [\"{}\"]", bad.replace('\\', "\\\\")),
+            );
+            let err = RpiToml::parse(&toml).unwrap_err().to_string();
+            assert!(err.contains("[secrets].files"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn secrets_env_path_is_validated() {
+        for bad in ["../escape", "/abs", r"win\path"] {
+            let toml = SAMPLE.replace(
+                "env = \".env\"",
+                &format!("env = \"{}\"", bad.replace('\\', "\\\\")),
+            );
+            let err = RpiToml::parse(&toml).unwrap_err().to_string();
+            assert!(err.contains("[secrets].env"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn duplicate_secrets_files_are_rejected() {
+        let toml = SAMPLE.replace(
+            "files = [\"certs/server.pem\"]",
+            "files = [\"a.pem\", \"a.pem\"]",
+        );
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
     }
 
     #[test]

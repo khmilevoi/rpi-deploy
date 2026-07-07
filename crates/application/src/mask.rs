@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use pi_domain::contracts::LogSink;
-use pi_domain::entities::{DeploymentStatus, EnvBundle};
+use pi_domain::entities::{DeploymentStatus, SecretsBundle};
 
 /// Secret values shorter than this are not masked — filters out false
 /// positives like `true`/`3000` (§8.1, §22).
@@ -24,7 +24,7 @@ impl MaskingSink {
         })
     }
 
-    pub fn arm(&self, bundle: &EnvBundle) {
+    pub fn arm(&self, bundle: &SecretsBundle) {
         let mut secrets: Vec<(String, String)> = bundle
             .vars
             .iter()
@@ -67,8 +67,8 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
 
-    fn bundle(pairs: &[(&str, &str)]) -> EnvBundle {
-        let mut b = EnvBundle::default();
+    fn bundle(pairs: &[(&str, &str)]) -> SecretsBundle {
+        let mut b = SecretsBundle::default();
         for (k, v) in pairs {
             b.vars.insert(k.to_string(), v.to_string());
         }

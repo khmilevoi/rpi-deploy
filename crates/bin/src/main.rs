@@ -154,10 +154,10 @@ enum Cmd {
     Init(InitArgs),
     /// Configure a server profile on this machine (wizard; flags for CI)
     Setup(SetupArgs),
-    /// Manage project secrets
-    Env {
+    /// Manage project secrets (env vars + secret files from [secrets] in rpi.toml)
+    Secrets {
         #[command(subcommand)]
-        cmd: EnvCmd,
+        cmd: SecretsCmd,
     },
     /// Agent management
     Agent {
@@ -167,8 +167,8 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
-enum EnvCmd {
-    /// Send secrets from local .env file to the agent
+enum SecretsCmd {
+    /// Send the env file and [secrets].files to the agent (encrypted at rest)
     Send {
         /// Also apply the new secrets to running containers
         #[arg(long)]
@@ -176,7 +176,7 @@ enum EnvCmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
-    /// List secret keys stored on the agent (values are never transmitted)
+    /// List stored env keys and file paths (values are never transmitted)
     Ls {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
@@ -324,12 +324,12 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
         }
-        Cmd::Env {
-            cmd: EnvCmd::Send { apply, connect },
-        } => cli::commands::env_send(apply, connect).await,
-        Cmd::Env {
-            cmd: EnvCmd::Ls { connect },
-        } => cli::commands::env_ls(connect).await,
+        Cmd::Secrets {
+            cmd: SecretsCmd::Send { apply, connect },
+        } => cli::commands::secrets_send(apply, connect).await,
+        Cmd::Secrets {
+            cmd: SecretsCmd::Ls { connect },
+        } => cli::commands::secrets_ls(connect).await,
         Cmd::Agent {
             cmd: AgentCmd::Run { .. },
         } => unreachable!(),
@@ -502,6 +502,22 @@ mod tests {
             }
             _ => panic!("expected agent uninstall"),
         }
+    }
+
+    #[test]
+    fn secrets_commands_parse_and_env_is_gone() {
+        let cli = Cli::try_parse_from(["pi", "secrets", "send", "--apply"]).unwrap();
+        match cli.cmd {
+            Cmd::Secrets {
+                cmd: SecretsCmd::Send { apply, .. },
+            } => assert!(apply),
+            _ => panic!("expected secrets send"),
+        }
+        assert!(Cli::try_parse_from(["pi", "secrets", "ls"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["pi", "env", "send"]).is_err(),
+            "env is removed"
+        );
     }
 
     #[test]

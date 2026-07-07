@@ -39,8 +39,8 @@ pub fn render_rpi_toml(f: &InitFields) -> String {
         let _ = writeln!(s, "expose = {}", toml_str(e));
     }
     if let Some(env) = &f.env_file {
-        let _ = writeln!(s, "\n[env]");
-        let _ = writeln!(s, "file = {}", toml_str(env));
+        let _ = writeln!(s, "\n[secrets]");
+        let _ = writeln!(s, "env = {}", toml_str(env));
     }
     s
 }
@@ -220,7 +220,7 @@ pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
     }
     std::fs::write(&path, &text)?;
     println!("wrote {}", path.display());
-    println!("next: `rpi env send` (if you use secrets), then `rpi deploy`");
+    println!("next: `rpi secrets send` (if you use secrets), then `rpi deploy`");
     Ok(())
 }
 
@@ -297,16 +297,19 @@ mod tests {
     #[test]
     fn render_escapes_backslashes_and_quotes_and_round_trips() {
         let mut f = sample();
-        f.name = "a\"b".into();
-        f.env_file = Some("C:\\app\\.env".into());
+        // `[secrets].env` is now validated as a project-relative path (same
+        // rule as `[secrets].files`, see secretpath::validate_rel_path), so
+        // the backslash/quote round-trip is exercised via `name` instead
+        // (unrestricted, and a literal `\` needs no escaping there either).
+        f.name = "a\"b\\c".into();
+        f.env_file = Some("config/.env".into());
         let text = render_rpi_toml(&f);
         // Сгенерированный файл должен быть валидным TOML и разбор возвращать исходные значения.
         let parsed = crate::cli::rpitoml::RpiToml::parse(&text).unwrap();
-        assert_eq!(parsed.project.name, "a\"b");
-        assert_eq!(parsed.env.file, "C:\\app\\.env");
+        assert_eq!(parsed.project.name, "a\"b\\c");
+        assert_eq!(parsed.secrets.env.as_deref(), Some("config/.env"));
         // И должно содержать эскейпированные литералы в тексте.
-        assert!(text.contains("name = 'a\"b'"));
-        assert!(text.contains("file = 'C:\\app\\.env'"));
+        assert!(text.contains("name = 'a\"b\\c'"));
     }
 
     fn detected() -> DetectedDefaults {

@@ -1,45 +1,47 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{
-    ContainerRuntime, EnvFileWriter, LogSink, OverrideStore, ProjectRepository, SecretStore, Source,
+    ContainerRuntime, LogSink, OverrideStore, ProjectRepository, SecretStore, SecretsWriter, Source,
 };
-use pi_domain::entities::{ComposeStack, EnvBundle};
+use pi_domain::entities::{ComposeStack, SecretsBundle};
 use pi_domain::error::DomainError;
 
 use crate::mask::MaskingSink;
 
-/// Result of `rpi env send` (§10).
+/// Result of `rpi secrets send` (§10).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnvSaved {
+pub struct SecretsSaved {
     pub keys: usize,
+    pub files: usize,
     pub applied: bool,
 }
 
-/// Accept and store an EnvBundle; with `apply` re-injects `.env` and runs
-/// `up -d` so compose recreates only the affected services (§7, §10).
-pub struct SendEnv {
+/// Accept and store a SecretsBundle; with `apply` re-injects `.env` + secret
+/// files and runs `up -d` so compose recreates only the affected services
+/// (§7, §10).
+pub struct SendSecrets {
     secrets: Arc<dyn SecretStore>,
     projects: Arc<dyn ProjectRepository>,
     source: Arc<dyn Source>,
-    env_files: Arc<dyn EnvFileWriter>,
+    writer: Arc<dyn SecretsWriter>,
     overrides: Arc<dyn OverrideStore>,
     runtime: Arc<dyn ContainerRuntime>,
 }
 
-impl SendEnv {
+impl SendSecrets {
     pub fn new(
         secrets: Arc<dyn SecretStore>,
         projects: Arc<dyn ProjectRepository>,
         source: Arc<dyn Source>,
-        env_files: Arc<dyn EnvFileWriter>,
+        writer: Arc<dyn SecretsWriter>,
         overrides: Arc<dyn OverrideStore>,
         runtime: Arc<dyn ContainerRuntime>,
-    ) -> Arc<SendEnv> {
-        Arc::new(SendEnv {
+    ) -> Arc<SendSecrets> {
+        Arc::new(SendSecrets {
             secrets,
             projects,
             source,
-            env_files,
+            writer,
             overrides,
             runtime,
         })
@@ -48,18 +50,20 @@ impl SendEnv {
     pub async fn execute(
         &self,
         project: &str,
-        bundle: EnvBundle,
+        bundle: SecretsBundle,
         apply: bool,
         log: Arc<dyn LogSink>,
-    ) -> Result<EnvSaved, DomainError> {
+    ) -> Result<SecretsSaved, DomainError> {
         if bundle.is_empty() {
-            return Err(DomainError::Invalid("env bundle is empty".into()));
+            return Err(DomainError::Invalid("secrets bundle is empty".into()));
         }
         self.secrets.save(project, &bundle).await?;
         let keys = bundle.vars.len();
+        let files = bundle.files.len();
         if !apply {
-            return Ok(EnvSaved {
+            return Ok(SecretsSaved {
                 keys,
+                files,
                 applied: false,
             });
         }
@@ -77,7 +81,7 @@ impl SendEnv {
         let log: Arc<dyn LogSink> = masker;
 
         let workdir = self.source.workdir(project);
-        self.env_files.write(&workdir, &bundle).await?;
+        self.writer.write(&workdir, &bundle).await?;
         let override_file = self
             .overrides
             .write(
@@ -95,25 +99,37 @@ impl SendEnv {
             override_file,
         };
         self.runtime.up(&stack, log).await?;
-        Ok(EnvSaved {
+        Ok(SecretsSaved {
             keys,
+            files,
             applied: true,
         })
     }
 }
 
-/// Key names only, never values (§10: `rpi env ls`).
-pub struct ListEnvKeys {
+/// Key names and file paths only, never values or file contents (§10:
+/// `rpi secrets ls`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StoredSecrets {
+    pub keys: Vec<String>,
+    pub files: Vec<String>,
+}
+
+pub struct ListSecrets {
     secrets: Arc<dyn SecretStore>,
 }
 
-impl ListEnvKeys {
-    pub fn new(secrets: Arc<dyn SecretStore>) -> Arc<ListEnvKeys> {
-        Arc::new(ListEnvKeys { secrets })
+impl ListSecrets {
+    pub fn new(secrets: Arc<dyn SecretStore>) -> Arc<ListSecrets> {
+        Arc::new(ListSecrets { secrets })
     }
 
-    pub async fn execute(&self, project: &str) -> Result<Vec<String>, DomainError> {
-        Ok(self.secrets.load(project).await?.keys())
+    pub async fn execute(&self, project: &str) -> Result<StoredSecrets, DomainError> {
+        let bundle = self.secrets.load(project).await?;
+        Ok(StoredSecrets {
+            keys: bundle.keys(),
+            files: bundle.file_paths(),
+        })
     }
 }
 
@@ -122,18 +138,20 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
-        MockContainerRuntime, MockEnvFileWriter, MockOverrideStore, MockProjectRepository,
-        MockSecretStore, MockSource,
+        MockContainerRuntime, MockOverrideStore, MockProjectRepository, MockSecretStore,
+        MockSecretsWriter, MockSource,
     };
     use pi_domain::entities::{
         ExposeMode, HealthcheckConfig, Project, ProjectConfig, StageTimeoutOverrides,
     };
     use std::path::{Path, PathBuf};
 
-    fn bundle() -> EnvBundle {
-        let mut b = EnvBundle::default();
+    fn bundle() -> SecretsBundle {
+        let mut b = SecretsBundle::default();
         b.vars.insert("DB_PASSWORD".into(), "hunter2-long".into());
         b.vars.insert("PORT".into(), "3000".into());
+        b.files
+            .insert("certs/server.pem".into(), b"PEM-BODY".to_vec());
         b
     }
 
@@ -162,7 +180,7 @@ mod tests {
         secrets: MockSecretStore,
         projects: MockProjectRepository,
         source: MockSource,
-        env_files: MockEnvFileWriter,
+        writer: MockSecretsWriter,
         overrides: MockOverrideStore,
         runtime: MockContainerRuntime,
     }
@@ -172,18 +190,18 @@ mod tests {
             secrets: MockSecretStore::new(),
             projects: MockProjectRepository::new(),
             source: MockSource::new(),
-            env_files: MockEnvFileWriter::new(),
+            writer: MockSecretsWriter::new(),
             overrides: MockOverrideStore::new(),
             runtime: MockContainerRuntime::new(),
         }
     }
 
-    fn build(m: Mocks) -> Arc<SendEnv> {
-        SendEnv::new(
+    fn build(m: Mocks) -> Arc<SendSecrets> {
+        SendSecrets::new(
             Arc::new(m.secrets),
             Arc::new(m.projects),
             Arc::new(m.source),
-            Arc::new(m.env_files),
+            Arc::new(m.writer),
             Arc::new(m.overrides),
             Arc::new(m.runtime),
         )
@@ -194,7 +212,7 @@ mod tests {
         let mut m = mocks();
         m.secrets
             .expect_save()
-            .withf(|p, b| p == "rateme" && b.vars.len() == 2)
+            .withf(|p, b| p == "rateme" && b.vars.len() == 2 && b.files.len() == 1)
             .times(1)
             .returning(|_, _| Ok(()));
 
@@ -204,8 +222,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             saved,
-            EnvSaved {
+            SecretsSaved {
                 keys: 2,
+                files: 1,
                 applied: false
             }
         );
@@ -216,10 +235,35 @@ mod tests {
         let mut m = mocks();
         m.secrets.expect_save().times(0);
         let err = build(m)
-            .execute("rateme", EnvBundle::default(), false, CollectSink::new())
+            .execute(
+                "rateme",
+                SecretsBundle::default(),
+                false,
+                CollectSink::new(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Invalid(_)), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn files_only_bundle_is_saved() {
+        let mut m = mocks();
+        m.secrets.expect_save().times(1).returning(|_, _| Ok(()));
+        let mut b = SecretsBundle::default();
+        b.files.insert("id_rsa".into(), b"key".to_vec());
+        let saved = build(m)
+            .execute("rateme", b, false, CollectSink::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            SecretsSaved {
+                keys: 0,
+                files: 1,
+                applied: false
+            }
+        );
     }
 
     #[tokio::test]
@@ -234,9 +278,9 @@ mod tests {
             .expect_workdir()
             .withf(|n| n == "rateme")
             .returning(|_| PathBuf::from("/wd/rateme"));
-        m.env_files
+        m.writer
             .expect_write()
-            .withf(|wd, b| wd == Path::new("/wd/rateme") && b.vars.len() == 2)
+            .withf(|wd, b| wd == Path::new("/wd/rateme") && b.vars.len() == 2 && b.files.len() == 1)
             .times(1)
             .returning(|_, _| Ok(()));
         m.overrides
@@ -268,8 +312,9 @@ mod tests {
 
         assert_eq!(
             saved,
-            EnvSaved {
+            SecretsSaved {
                 keys: 2,
+                files: 1,
                 applied: true
             }
         );
@@ -289,7 +334,7 @@ mod tests {
         let mut m = mocks();
         m.secrets.expect_save().times(1).returning(|_, _| Ok(()));
         m.projects.expect_get().returning(|_| Ok(None));
-        m.env_files.expect_write().times(0);
+        m.writer.expect_write().times(0);
         m.runtime.expect_up().times(0);
 
         let err = build(m)
@@ -300,16 +345,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_env_keys_returns_names_only() {
+    async fn list_secrets_returns_key_names_and_file_paths_only() {
         let mut secrets = MockSecretStore::new();
         secrets
             .expect_load()
             .withf(|p| p == "rateme")
             .returning(|_| Ok(bundle()));
-        let keys = ListEnvKeys::new(Arc::new(secrets))
+        let stored = ListSecrets::new(Arc::new(secrets))
             .execute("rateme")
             .await
             .unwrap();
-        assert_eq!(keys, vec!["DB_PASSWORD".to_string(), "PORT".to_string()]);
+        assert_eq!(
+            stored.keys,
+            vec!["DB_PASSWORD".to_string(), "PORT".to_string()]
+        );
+        assert_eq!(stored.files, vec!["certs/server.pem".to_string()]);
     }
 }

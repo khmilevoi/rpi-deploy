@@ -7,8 +7,8 @@ use mockall::automock;
 
 use crate::entities::{
     AgentOverview, ComposeStack, DeployRef, Deployment, DeploymentStatus, DiagnosticReport,
-    EnvBundle, FetchedSource, LifecycleAction, Project, ProjectConfig, ServiceState, ServiceStats,
-    StatsReport,
+    FetchedSource, LifecycleAction, Project, ProjectConfig, SecretsBundle, ServiceState,
+    ServiceStats, StatsReport,
 };
 use crate::error::DomainError;
 
@@ -158,22 +158,23 @@ pub trait OverrideStore: Send + Sync {
     async fn remove(&self, project: &str) -> Result<(), DomainError>;
 }
 
-/// Store/retrieve the project EnvBundle, encrypted at rest (§6, §10).
+/// Store/retrieve the project SecretsBundle, encrypted at rest (§6, §10).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait SecretStore: Send + Sync {
-    async fn save(&self, project: &str, bundle: &EnvBundle) -> Result<(), DomainError>;
+    async fn save(&self, project: &str, bundle: &SecretsBundle) -> Result<(), DomainError>;
     /// Empty bundle when nothing is stored for the project.
-    async fn load(&self, project: &str) -> Result<EnvBundle, DomainError>;
+    async fn load(&self, project: &str) -> Result<SecretsBundle, DomainError>;
     async fn remove(&self, project: &str) -> Result<(), DomainError>;
 }
 
-/// Writes the decrypted bundle as `.env` into the project workdir (§10).
+/// Writes the decrypted bundle into the project workdir: `.env` from vars
+/// plus each secret file at its relative path (secrets spec §7).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
-pub trait EnvFileWriter: Send + Sync {
+pub trait SecretsWriter: Send + Sync {
     /// Fails with NotFound when the workdir does not exist (never deployed).
-    async fn write(&self, workdir: &Path, bundle: &EnvBundle) -> Result<(), DomainError>;
+    async fn write(&self, workdir: &Path, bundle: &SecretsBundle) -> Result<(), DomainError>;
 }
 
 /// Deploy gate (§8): hybrid docker healthcheck -> HTTP -> TCP.

@@ -113,6 +113,10 @@ impl From<&ProjectConfig> for ProjectDto {
     }
 }
 
+/// Legacy `/env` route DTOs (agent/http.rs). The CLI no longer sends these
+/// (Task 8 replaced `rpi env send/ls` with `rpi secrets send/ls`), but the
+/// agent's `/env` route handlers still deserialize/serialize them to keep
+/// talking to not-yet-upgraded old CLIs; kept only for that.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvSendRequest {
     pub vars: BTreeMap<String, String>,
@@ -129,6 +133,34 @@ pub struct EnvSendResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvKeysResponse {
     pub keys: Vec<String>,
+}
+
+/// Secrets bundle limits, enforced by the CLI before upload and re-checked
+/// by the agent (secrets spec §2.7). Decoded byte sizes.
+pub const MAX_SECRET_FILE_BYTES: usize = 1024 * 1024;
+pub const MAX_SECRETS_BUNDLE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretsSendRequest {
+    pub vars: BTreeMap<String, String>,
+    /// Relative path (forward slashes) -> base64-encoded contents.
+    #[serde(default)]
+    pub files: BTreeMap<String, String>,
+    #[serde(default)]
+    pub apply: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretsSendResponse {
+    pub saved_keys: usize,
+    pub saved_files: usize,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretsListResponse {
+    pub keys: Vec<String>,
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -27,6 +27,7 @@ async-stream = { workspace = true }
 dirs = { workspace = true }
 anyhow = { workspace = true }
 inquire = { workspace = true }
+base64 = { workspace = true }
 shlex = { workspace = true }
 
 [dev-dependencies]

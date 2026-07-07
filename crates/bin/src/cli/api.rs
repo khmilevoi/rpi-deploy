@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use crate::cli::sse::SseParser;
 use crate::proto::{
     AgentOverviewDto, CommandRunRequest, CommandsResponse, DeployAccepted, DeployRequest,
-    DeploymentDto, DiagnosticReportDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
-    GcResponse, LifecycleResponse, ProjectViewDto, RemoveResponse, StatsReportDto, VersionInfo,
+    DeploymentDto, DiagnosticReportDto, GcResponse, LifecycleResponse, ProjectViewDto,
+    RemoveResponse, SecretsListResponse, SecretsSendRequest, SecretsSendResponse, StatsReportDto,
+    VersionInfo,
 };
 
 async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
@@ -229,29 +230,30 @@ impl ApiClient {
         Ok(extract_error(resp).await?.json().await?)
     }
 
-    pub async fn send_env(
+    pub async fn send_secrets(
         &self,
         project: &str,
         vars: BTreeMap<String, String>,
+        files: BTreeMap<String, String>,
         apply: bool,
-    ) -> anyhow::Result<EnvSendResponse> {
-        let req = EnvSendRequest { vars, apply };
+    ) -> anyhow::Result<SecretsSendResponse> {
+        let req = SecretsSendRequest { vars, files, apply };
         let resp = self
             .http
-            .put(format!("{}/v1/projects/{project}/env", self.base))
+            .put(format!("{}/v1/projects/{project}/secrets", self.base))
             .json(&req)
             .send()
             .await?;
-        Ok(extract_error(resp).await?.json().await?)
+        Ok(extract_secrets_error(resp).await?.json().await?)
     }
 
-    pub async fn env_keys(&self, project: &str) -> anyhow::Result<EnvKeysResponse> {
+    pub async fn list_secrets(&self, project: &str) -> anyhow::Result<SecretsListResponse> {
         let resp = self
             .http
-            .get(format!("{}/v1/projects/{project}/env", self.base))
+            .get(format!("{}/v1/projects/{project}/secrets", self.base))
             .send()
             .await?;
-        Ok(extract_error(resp).await?.json().await?)
+        Ok(extract_secrets_error(resp).await?.json().await?)
     }
 
     /// 404 on this route can mean two very different things: an old agent
@@ -335,6 +337,22 @@ impl ApiClient {
         }
         anyhow::bail!("command stream ended without an exit status (agent restarted?)")
     }
+}
+
+/// Old agents have no /secrets route. axum's bare 404 carries no {"error"}
+/// JSON body (every rpi-agent error does), so an error-less 404 means
+/// "route not found" -> the agent predates the secrets API.
+async fn extract_secrets_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        let bytes = resp.bytes().await.unwrap_or_default();
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(msg) = v["error"].as_str() {
+                anyhow::bail!("{msg}");
+            }
+        }
+        anyhow::bail!("agent does not support the secrets API; update the agent on the Pi");
+    }
+    extract_error(resp).await
 }
 
 #[cfg(test)]

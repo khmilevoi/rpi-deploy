@@ -1535,12 +1535,13 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pi"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "clap",
  "dirs",
  "futures",
@@ -1565,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "pi-application"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "mockall",
@@ -1576,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "pi-domain"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "mockall",
@@ -1585,15 +1586,17 @@ dependencies = [
 
 [[package]]
 name = "pi-infrastructure"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "age",
  "async-trait",
+ "base64 0.22.1",
  "mockall",
  "pi-domain",
  "reqwest",
  "rusqlite",
  "rusqlite_migration",
+ "serde",
  "serde_json",
  "serde_yaml",
  "sysinfo",

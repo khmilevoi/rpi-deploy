@@ -6,19 +6,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use pi_application::command::RunCommand;
 use pi_application::deploy::DeployProject;
 use pi_application::diagnostics::{AgentStatus, RunDiagnostics};
-use pi_application::env::{ListEnvKeys, SendEnv};
 use pi_application::gc::RunGc;
 use pi_application::lifecycle::ControlLifecycle;
 use pi_application::list::ListProjects;
 use pi_application::logs::StreamLogs;
 use pi_application::remove::RemoveProject;
 use pi_application::scheduler::{DeployRunner, DeployScheduler};
+use pi_application::secrets::{ListSecrets, SendSecrets};
 use pi_application::stats::GetStats;
 use pi_domain::contracts::{DeploymentHistory, HostNetwork, IdGen, Ingress};
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
 use pi_infrastructure::disk::SysinfoDiskProbe;
 use pi_infrastructure::docker::DockerComposeRuntime;
-use pi_infrastructure::envfile::FsEnvFileWriter;
 use pi_infrastructure::events::DeployEventsHub;
 use pi_infrastructure::git::GitSource;
 use pi_infrastructure::health::HybridHealthGate;
@@ -28,6 +27,7 @@ use pi_infrastructure::overrides::FsOverrideStore;
 use pi_infrastructure::probe::{HostSystemProbe, SystemRunner};
 use pi_infrastructure::repo::SqliteProjectRepo;
 use pi_infrastructure::secrets::EncryptedFileStore;
+use pi_infrastructure::secretsfile::FsSecretsWriter;
 use pi_infrastructure::sqlite::Db;
 use pi_infrastructure::stats::CompositeStats;
 use pi_infrastructure::sys::{SystemClock, UuidGen};
@@ -41,8 +41,8 @@ pub struct AppState {
     pub history: Arc<dyn DeploymentHistory>,
     pub hub: Arc<DeployEventsHub>,
     pub ids: Arc<dyn IdGen>,
-    pub send_env: Arc<SendEnv>,
-    pub env_keys: Arc<ListEnvKeys>,
+    pub send_secrets: Arc<SendSecrets>,
+    pub list_secrets: Arc<ListSecrets>,
     pub gc: Arc<RunGc>,
     pub stream_logs: Arc<StreamLogs>,
     pub stats: Arc<GetStats>,
@@ -72,7 +72,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     );
     let overrides = FsOverrideStore::new(config.data_dir.join("overrides"));
     let secrets = EncryptedFileStore::open(&config.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let env_files: Arc<dyn pi_domain::contracts::EnvFileWriter> = FsEnvFileWriter::new();
+    let secrets_writer: Arc<dyn pi_domain::contracts::SecretsWriter> = FsSecretsWriter::new();
     let health = HybridHealthGate::new(runtime.clone());
     let ingress: Arc<dyn Ingress> = match &config.cloudflared {
         Some(cf) => {
@@ -90,7 +90,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         Arc::clone(&history),
         overrides.clone(),
         secrets.clone(),
-        Arc::clone(&env_files),
+        Arc::clone(&secrets_writer),
         health,
         ingress.clone(),
         Arc::clone(&host_network),
@@ -144,15 +144,15 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     );
     let diagnostics = RunDiagnostics::new(probe.clone());
     let agent_status = AgentStatus::new(probe, projects.clone(), Arc::clone(&history));
-    let send_env = SendEnv::new(
+    let send_secrets = SendSecrets::new(
         secrets.clone(),
         projects,
         source,
-        env_files,
+        secrets_writer,
         overrides,
         runtime,
     );
-    let env_keys = ListEnvKeys::new(secrets);
+    let list_secrets = ListSecrets::new(secrets);
 
     Ok(AppState {
         scheduler,
@@ -160,8 +160,8 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         history,
         hub: DeployEventsHub::new(),
         ids: UuidGen::new(),
-        send_env,
-        env_keys,
+        send_secrets,
+        list_secrets,
         gc,
         stream_logs,
         stats,

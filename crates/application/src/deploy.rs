@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{
-    Clock, ContainerRuntime, DeploymentHistory, EnvFileWriter, HealthGate, HostNetwork, Ingress,
-    LogSink, OverrideStore, ProjectRepository, SecretStore, Source,
+    Clock, ContainerRuntime, DeploymentHistory, HealthGate, HostNetwork, Ingress, LogSink,
+    OverrideStore, ProjectRepository, SecretStore, SecretsWriter, Source,
 };
 use pi_domain::entities::{
     ComposeStack, DeployRef, Deployment, DeploymentStatus, ExposeMode, ProjectConfig, StageTimeouts,
@@ -51,7 +51,7 @@ pub struct DeployProject {
     history: Arc<dyn DeploymentHistory>,
     overrides: Arc<dyn OverrideStore>,
     secrets: Arc<dyn SecretStore>,
-    env_files: Arc<dyn EnvFileWriter>,
+    secrets_writer: Arc<dyn SecretsWriter>,
     health: Arc<dyn HealthGate>,
     ingress: Arc<dyn Ingress>,
     host_network: Arc<dyn HostNetwork>,
@@ -88,7 +88,7 @@ impl DeployProject {
         history: Arc<dyn DeploymentHistory>,
         overrides: Arc<dyn OverrideStore>,
         secrets: Arc<dyn SecretStore>,
-        env_files: Arc<dyn EnvFileWriter>,
+        secrets_writer: Arc<dyn SecretsWriter>,
         health: Arc<dyn HealthGate>,
         ingress: Arc<dyn Ingress>,
         host_network: Arc<dyn HostNetwork>,
@@ -104,7 +104,7 @@ impl DeployProject {
             history,
             overrides,
             secrets,
-            env_files,
+            secrets_writer,
             health,
             ingress,
             host_network,
@@ -226,12 +226,16 @@ impl DeployProject {
         .await?;
         log.line(&format!("fetched {}", fetched.commit_sha));
 
-        // §10: decrypt -> arm masking -> inject .env (skip when nothing stored)
+        // secrets spec §7: decrypt -> arm masking -> inject .env + secret files
         let bundle = self.secrets.load(&config.name).await?;
         if !bundle.is_empty() {
             masker.arm(&bundle);
-            self.env_files.write(&fetched.workdir, &bundle).await?;
-            log.line(&format!(".env injected ({} keys)", bundle.vars.len()));
+            self.secrets_writer.write(&fetched.workdir, &bundle).await?;
+            log.line(&format!(
+                "secrets injected ({} keys, {} files)",
+                bundle.vars.len(),
+                bundle.files.len()
+            ));
         }
 
         let override_file = self
@@ -329,13 +333,13 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
-        MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe, MockEnvFileWriter,
-        MockHealthGate, MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository,
-        MockSecretStore, MockSource,
+        MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe, MockHealthGate,
+        MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository, MockSecretStore,
+        MockSecretsWriter, MockSource,
     };
     use pi_domain::entities::{
-        DeployRef, DeploymentStatus, EnvBundle, ExposeMode, FetchedSource, HealthcheckConfig,
-        Project, ProjectConfig, StageTimeoutOverrides, StageTimeouts,
+        DeployRef, DeploymentStatus, ExposeMode, FetchedSource, HealthcheckConfig, Project,
+        ProjectConfig, SecretsBundle, StageTimeoutOverrides, StageTimeouts,
     };
     use pi_domain::error::DomainError;
     use std::{
@@ -369,7 +373,7 @@ mod tests {
         pub history: MockDeploymentHistory,
         pub overrides: MockOverrideStore,
         pub secrets: MockSecretStore,
-        pub env_files: MockEnvFileWriter,
+        pub secrets_writer: MockSecretsWriter,
         pub health: MockHealthGate,
         pub ingress: MockIngress,
         pub host_network: MockHostNetwork,
@@ -392,7 +396,7 @@ mod tests {
             history: MockDeploymentHistory::new(),
             overrides: MockOverrideStore::new(),
             secrets: MockSecretStore::new(),
-            env_files: MockEnvFileWriter::new(),
+            secrets_writer: MockSecretsWriter::new(),
             health: MockHealthGate::new(),
             ingress: MockIngress::new(),
             host_network: MockHostNetwork::new(),
@@ -409,7 +413,7 @@ mod tests {
             Arc::new(m.history),
             Arc::new(m.overrides),
             Arc::new(m.secrets),
-            Arc::new(m.env_files),
+            Arc::new(m.secrets_writer),
             Arc::new(m.health),
             Arc::new(m.ingress),
             Arc::new(m.host_network),
@@ -448,10 +452,10 @@ mod tests {
         let stage_order = Arc::clone(&order);
         m.secrets.expect_load().times(1).returning(move |_| {
             stage_order.lock().unwrap().push("secrets");
-            Ok(EnvBundle::default())
+            Ok(SecretsBundle::default())
         });
         // empty bundle -> .env must NOT be written
-        m.env_files.expect_write().times(0);
+        m.secrets_writer.expect_write().times(0);
         let stage_order = Arc::clone(&order);
         m.overrides
             .expect_write()
@@ -595,8 +599,8 @@ mod tests {
         });
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
         m.overrides
             .expect_write()
             .withf(|p, s, bind, hp, cp| {
@@ -634,8 +638,8 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
@@ -674,8 +678,8 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
@@ -712,8 +716,8 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
@@ -802,8 +806,8 @@ mod tests {
         });
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
         m.overrides
             .expect_write()
             .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
@@ -845,9 +849,11 @@ mod tests {
         );
     }
 
-    fn secret_bundle() -> EnvBundle {
-        let mut b = EnvBundle::default();
+    fn secret_bundle() -> SecretsBundle {
+        let mut b = SecretsBundle::default();
         b.vars.insert("DB_PASSWORD".into(), "hunter2-long".into());
+        b.files
+            .insert("certs/server.pem".into(), b"PEM-BODY".to_vec());
         b
     }
 
@@ -909,7 +915,7 @@ mod tests {
             Arc::new(m.history),
             Arc::new(m.overrides),
             Arc::new(m.secrets),
-            Arc::new(m.env_files),
+            Arc::new(m.secrets_writer),
             Arc::new(m.health),
             Arc::new(m.ingress),
             Arc::new(m.host_network),
@@ -925,9 +931,13 @@ mod tests {
         let mut m = mocks();
         ok_pre_stages(&mut m);
         m.secrets.expect_load().returning(|_| Ok(secret_bundle()));
-        m.env_files
+        m.secrets_writer
             .expect_write()
-            .withf(|wd, b| wd == Path::new("/wd") && b.vars.contains_key("DB_PASSWORD"))
+            .withf(|wd, b| {
+                wd == Path::new("/wd")
+                    && b.vars.contains_key("DB_PASSWORD")
+                    && b.files.contains_key("certs/server.pem")
+            })
             .times(1)
             .returning(|_, _| Ok(()));
         m.runtime.expect_build().returning(|_, log| {
@@ -952,7 +962,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.status, DeploymentStatus::Success);
-        assert!(result.log_tail.contains(".env injected (1 keys)"));
+        assert!(result
+            .log_tail
+            .contains("secrets injected (1 keys, 1 files)"));
         assert!(
             result.log_tail.contains("***DB_PASSWORD***"),
             "tail: {}",
@@ -976,8 +988,8 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health
@@ -1011,8 +1023,8 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
@@ -1240,8 +1252,8 @@ mod tests {
         });
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
         m.overrides
             .expect_write()
             .returning(|p, _, _, _, _| Ok(PathBuf::from("/ov").join(p)));
@@ -1264,7 +1276,7 @@ mod tests {
             Arc::new(m.history),
             Arc::new(m.overrides),
             Arc::new(m.secrets),
-            Arc::new(m.env_files),
+            Arc::new(m.secrets_writer),
             Arc::new(m.health),
             Arc::new(m.ingress),
             Arc::new(m.host_network),
@@ -1312,8 +1324,8 @@ mod tests {
         ok_pre_stages(&mut m);
         m.secrets
             .expect_load()
-            .returning(|_| Ok(EnvBundle::default()));
-        m.env_files.expect_write().times(0);
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
