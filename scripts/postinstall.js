@@ -15,6 +15,40 @@ const pkgDir = path.resolve(__dirname, '..');
 const exe = process.platform === 'win32' ? '.exe' : '';
 const cargoBinDir = path.join(os.homedir(), '.cargo', 'bin');
 
+const REPO = 'khmilevoi/rpi-deploy';
+
+// Rust target triples with prebuilt binaries on GitHub Releases, keyed by
+// `${process.platform}-${process.arch}`. Anything else builds from source.
+const TARGET_TRIPLES = {
+  'win32-x64': 'x86_64-pc-windows-msvc',
+  'linux-x64': 'x86_64-unknown-linux-musl',
+  'linux-arm64': 'aarch64-unknown-linux-musl',
+};
+
+function targetTriple(platform, arch) {
+  return TARGET_TRIPLES[`${platform}-${arch}`] || null;
+}
+
+function assetName(version, triple) {
+  const ext = triple.includes('windows') ? 'zip' : 'tar.gz';
+  return `rpi-v${version}-${triple}.${ext}`;
+}
+
+// Accepts `sha256sum` output: "<hash>  <name>" (text) or "<hash> *<name>" (binary).
+function parseSha256Sums(text) {
+  const sums = {};
+  for (const line of text.split('\n')) {
+    const m = /^([0-9a-f]{64})[ *]+(.+)$/.exec(line.trim());
+    if (m) sums[m[2]] = m[1];
+  }
+  return sums;
+}
+
+async function sha256File(file) {
+  const crypto = require('node:crypto');
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
 function log(msg) {
   console.log(`rpi-deploy: ${msg}`);
 }
@@ -120,4 +154,8 @@ async function main() {
   log('  Raspberry Pi agent: sudo rpi agent setup   (Docker must already be installed)');
 }
 
-main().catch((e) => fail(String(e && e.stack ? e.stack : e)));
+module.exports = { targetTriple, assetName, parseSha256Sums, sha256File };
+
+if (require.main === module) {
+  main().catch((e) => fail(String(e && e.stack ? e.stack : e)));
+}
