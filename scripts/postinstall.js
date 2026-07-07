@@ -67,8 +67,9 @@ async function downloadPrebuilt(version) {
   }
   const asset = assetName(version, triple);
   const base = `https://github.com/${REPO}/releases/download/v${version}`;
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rpi-deploy-'));
+  let tmp;
   try {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rpi-deploy-'));
     log(`downloading prebuilt binary ${asset}...`);
     const archive = path.join(tmp, asset);
     await fetchTo(`${base}/${asset}`, archive);
@@ -98,7 +99,7 @@ async function downloadPrebuilt(version) {
     log(`warning: prebuilt binary unavailable (${e && e.message ? e.message : e}); falling back to source build`);
     return false;
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
 
