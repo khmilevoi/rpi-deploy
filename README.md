@@ -6,14 +6,14 @@ machine or in CI. The CLI connects to the agent through an SSH tunnel; the
 agent clones the Git repository, builds the Compose stack, and starts the
 containers.
 
-Status: v0.6 (npm install) — everything from v0.1–v0.5 (deploy/env/ingress/CI,
-`rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`, `rpi status`,
-`rpi doctor`, `rpi agent status|logs`, one-command setup) plus
-`npm install -g rpi-deploy` for both roles: the CLI command is now `rpi`, the
-package builds it from source on install, and `sudo rpi agent setup` installs
-the running binary to `/usr/local/bin/rpi` and restarts the agent on updates.
-Manual install from source remains as a fallback (see "Build And Install The
-Binary" below).
+Status: v0.7 (prebuilt binaries) — everything from v0.1–v0.6 (deploy/env/
+ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
+`rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
+`npm install -g rpi-deploy` for both roles) plus prebuilt binaries:
+GitHub Actions builds `rpi` for Windows x64, Linux x64, and Linux aarch64 on
+every release tag, and `npm install` downloads the matching binary in seconds
+instead of compiling for ~10 minutes. Building from source remains the
+fallback everywhere else (see "Build And Install The Binary" below).
 
 Supported features:
 
@@ -184,7 +184,7 @@ builds without it, but `rpi agent setup` requires it
 (`curl -fsSL https://get.docker.com | sh`):
 
 ```bash
-sudo npm install -g rpi-deploy    # builds from source, ~10 minutes on a Pi
+sudo npm install -g rpi-deploy    # downloads a prebuilt arm64 binary, seconds
 sudo rpi agent setup              # installs /usr/local/bin/rpi, unit, start
 rpi doctor
 ```
@@ -231,13 +231,17 @@ config `pi.toml` → `rpi.toml` (hard cutover, no fallback). Follow the
 step-by-step guide for both roles in
 [docs/migration-v0.5-to-v0.6.md](docs/migration-v0.5-to-v0.6.md).
 
-The npm package ships the Rust sources and builds them on install
-(`cargo build --release --locked`); rustup is installed automatically when
-cargo is missing, and the build directory is removed afterwards to save disk
-space. Building on Windows needs the Visual Studio Build Tools C++ workload.
-Installing with `--ignore-scripts` leaves the CLI unusable (`rpi` will report
-that the binary was not built) — as does npm's `allow-scripts` gate on recent
-versions, see above.
+On install the package downloads a prebuilt binary from the matching GitHub
+Release (Windows x64, Linux x64, Linux aarch64) and verifies its SHA-256
+checksum. On other platforms (macOS, 32-bit ARM), or when the download fails
+(offline, proxy, checksum mismatch), it falls back to building the bundled
+Rust sources (`cargo build --release --locked`); rustup is installed
+automatically when cargo is missing, and the build directory is removed
+afterwards to save disk space. Building on Windows needs the Visual Studio
+Build Tools C++ workload. Set `RPI_DEPLOY_BUILD_FROM_SOURCE=1` to skip the
+download and force the source build. Installing with `--ignore-scripts`
+leaves the CLI unusable (`rpi` will report that the binary was not built) —
+as does npm's `allow-scripts` gate on recent versions, see above.
 
 ## Build And Install The Binary
 

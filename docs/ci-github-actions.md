@@ -38,10 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pi CLI
-        # Binary releases + install.sh arrive in v0.5; for now, install from source.
-        # Speed-up: use actions/cache for ~/.cargo/bin keyed by the tool revision hash.
-        run: cargo install --git https://github.com/khmilevoi/pi --locked pi
+      - name: Install rpi CLI
+        # postinstall downloads the prebuilt x86_64 binary from GitHub Releases.
+        run: npm install -g rpi-deploy
 
       - name: Prepare SSH
         run: |
@@ -52,7 +51,7 @@ jobs:
 
       - name: Deploy
         run: |
-          pi deploy \
+          rpi deploy \
             --ref "$GITHUB_SHA" \
             --host "${{ secrets.PI_HOST }}" \
             --user "${{ secrets.PI_USER }}" \
@@ -68,9 +67,9 @@ jobs:
   CLI exits with code 0 and the job stays green (latest wins, §8.1). Red
   statuses are `failed`, `canceled`, and `interrupted`.
 - **Project secrets** are not sent from CI on every deploy: the bundle is
-  already stored on the Pi (`pi env send` is run manually when values change, §10).
+  already stored on the Pi (`rpi env send` is run manually when values change, §10).
 - **A stuck build** is killed by the agent's staged timeout (`timeout: build`,
   default 30 minutes), so the job fails with a clear reason instead of the
   runner timeout.
 - **CI cancellation is unnecessary**: a new push supersedes the queued deploy by
-  itself; use `pi deploy --cancel` from a workstation for manual cancellation.
+  itself; use `rpi deploy --cancel` from a workstation for manual cancellation.

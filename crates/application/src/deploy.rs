@@ -469,8 +469,8 @@ mod tests {
             .withf(|stack, _| {
                 stack.project_name == "rateme"
                     && stack.compose_file
-                        == PathBuf::from("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
-                    && stack.override_file == PathBuf::from("/var/lib/rpi/overrides/rateme.yml")
+                        == Path::new("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
+                    && stack.override_file == Path::new("/var/lib/rpi/overrides/rateme.yml")
             })
             .times(1)
             .returning(move |_, _| {
@@ -483,8 +483,8 @@ mod tests {
             .withf(|stack, _| {
                 stack.project_name == "rateme"
                     && stack.compose_file
-                        == PathBuf::from("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
-                    && stack.override_file == PathBuf::from("/var/lib/rpi/overrides/rateme.yml")
+                        == Path::new("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
+                    && stack.override_file == Path::new("/var/lib/rpi/overrides/rateme.yml")
             })
             .times(1)
             .returning(move |_, _| {
