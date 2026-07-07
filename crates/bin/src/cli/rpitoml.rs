@@ -323,10 +323,7 @@ file = ".env"
     #[test]
     fn expose_defaults_private_and_parses_lan() {
         let default_cfg = RpiToml::parse(SAMPLE).unwrap().to_project_config();
-        assert_eq!(
-            default_cfg.expose,
-            pi_domain::entities::ExposeMode::Private
-        );
+        assert_eq!(default_cfg.expose, pi_domain::entities::ExposeMode::Private);
 
         let lan = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"lan\"");
         let lan_cfg = RpiToml::parse(&lan).unwrap().to_project_config();

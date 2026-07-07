@@ -45,8 +45,8 @@ pub fn render_rpi_toml(f: &InitFields) -> String {
     s
 }
 
-use std::path::{Path, PathBuf};
 use crate::cli::prompt::Prompter;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub struct InitFlags {
@@ -78,20 +78,44 @@ pub fn detect_defaults(cwd: &Path) -> DetectedDefaults {
         .unwrap_or("app")
         .to_string();
     let git = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git").args(args).current_dir(cwd).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
     let repo = git(&["remote", "get-url", "origin"]).filter(|s| !s.is_empty());
-    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|s| !s.is_empty() && s != "HEAD");
-    let compose = ["docker-compose.yml", "compose.yaml", "compose.yml", "docker-compose.yaml"]
-        .into_iter()
-        .find(|f| cwd.join(f).exists())
-        .map(String::from);
+    let branch =
+        git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|s| !s.is_empty() && s != "HEAD");
+    let compose = [
+        "docker-compose.yml",
+        "compose.yaml",
+        "compose.yml",
+        "docker-compose.yaml",
+    ]
+    .into_iter()
+    .find(|f| cwd.join(f).exists())
+    .map(String::from);
     let env_file = cwd.join(".env").exists().then(|| ".env".to_string());
-    DetectedDefaults { name, repo, branch, compose, env_file }
+    DetectedDefaults {
+        name,
+        repo,
+        branch,
+        compose,
+        env_file,
+    }
 }
 
-fn ask_text(flag: &Option<String>, det: Option<&str>, label: &str, yes: bool, p: &mut dyn Prompter) -> anyhow::Result<String> {
+fn ask_text(
+    flag: &Option<String>,
+    det: Option<&str>,
+    label: &str,
+    yes: bool,
+    p: &mut dyn Prompter,
+) -> anyhow::Result<String> {
     if let Some(v) = flag {
         return Ok(v.clone());
     }
@@ -110,10 +134,34 @@ pub fn resolve_init_fields(
     p: &mut dyn Prompter,
 ) -> anyhow::Result<InitFields> {
     let name = ask_text(&flags.name, Some(&det.name), "project name", flags.yes, p)?;
-    let repo = ask_text(&flags.repo, det.repo.as_deref(), "git repo url", flags.yes, p)?;
-    let branch = ask_text(&flags.branch, det.branch.as_deref().or(Some("main")), "branch", flags.yes, p)?;
-    let compose = ask_text(&flags.compose, det.compose.as_deref().or(Some("docker-compose.yml")), "compose file", flags.yes, p)?;
-    let service = ask_text(&flags.service, None, "ingress service (compose service name)", flags.yes, p)?;
+    let repo = ask_text(
+        &flags.repo,
+        det.repo.as_deref(),
+        "git repo url",
+        flags.yes,
+        p,
+    )?;
+    let branch = ask_text(
+        &flags.branch,
+        det.branch.as_deref().or(Some("main")),
+        "branch",
+        flags.yes,
+        p,
+    )?;
+    let compose = ask_text(
+        &flags.compose,
+        det.compose.as_deref().or(Some("docker-compose.yml")),
+        "compose file",
+        flags.yes,
+        p,
+    )?;
+    let service = ask_text(
+        &flags.service,
+        None,
+        "ingress service (compose service name)",
+        flags.yes,
+        p,
+    )?;
     let port = match flags.port {
         Some(p) => p,
         None if flags.yes => anyhow::bail!("--yes: missing --port"),
@@ -137,7 +185,17 @@ pub fn resolve_init_fields(
         }
     };
     let env_file = flags.env_file.clone().or_else(|| det.env_file.clone());
-    Ok(InitFields { name, repo, branch, compose, service, port, hostname, expose, env_file })
+    Ok(InitFields {
+        name,
+        repo,
+        branch,
+        compose,
+        service,
+        port,
+        hostname,
+        expose,
+        env_file,
+    })
 }
 
 use crate::cli::prompt::InquirePrompter;
@@ -152,7 +210,8 @@ pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
 
     let path = cwd.join("rpi.toml");
     if path.exists() {
-        let overwrite = flags.yes || prompter.confirm("rpi.toml exists — overwrite? (a .bak is kept)", false)?;
+        let overwrite = flags.yes
+            || prompter.confirm("rpi.toml exists — overwrite? (a .bak is kept)", false)?;
         if !overwrite {
             println!("aborted: rpi.toml left unchanged");
             return Ok(());
@@ -229,7 +288,9 @@ mod tests {
         let text = render_rpi_toml(&f);
         assert!(!text.contains("hostname"));
         assert!(text.contains("expose = \"lan\""));
-        let cfg = crate::cli::rpitoml::RpiToml::parse(&text).unwrap().to_project_config();
+        let cfg = crate::cli::rpitoml::RpiToml::parse(&text)
+            .unwrap()
+            .to_project_config();
         assert_eq!(cfg.expose, pi_domain::entities::ExposeMode::Lan);
     }
 
@@ -260,14 +321,21 @@ mod tests {
 
     #[test]
     fn yes_mode_uses_detected_without_prompting() {
-        let flags = InitFlags { yes: true, ..InitFlags::default() };
+        let flags = InitFlags {
+            yes: true,
+            ..InitFlags::default()
+        };
         let mut p = ScriptedPrompter {
             texts: Default::default(),
             confirms: Default::default(),
             selects: Default::default(),
         };
         // service/port/hostname have no detected default -> in --yes they come from flags or fall back.
-        let flags = InitFlags { service: Some("web".into()), port: Some(3000), ..flags };
+        let flags = InitFlags {
+            service: Some("web".into()),
+            port: Some(3000),
+            ..flags
+        };
         let f = resolve_init_fields(&flags, &detected(), &mut p).unwrap();
         assert_eq!(f.name, "rateme");
         assert_eq!(f.repo, "git@github.com:isskelo/rateme.git");
@@ -299,7 +367,11 @@ mod tests {
     #[test]
     fn interactive_selects_expose_mode() {
         // yes = false -> expose is chosen via select (no --expose flag)
-        let flags = InitFlags { service: Some("web".into()), port: Some(3000), ..InitFlags::default() };
+        let flags = InitFlags {
+            service: Some("web".into()),
+            port: Some(3000),
+            ..InitFlags::default()
+        };
         let mut p = ScriptedPrompter {
             texts: Default::default(),
             confirms: Default::default(),
@@ -320,8 +392,16 @@ mod tests {
 
         let dest = super::backup_existing_rpi_toml(&cur).unwrap();
         assert_eq!(dest, bak, "returns the .bak path");
-        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "current", "current moved to .bak");
-        assert_eq!(std::fs::read_to_string(&bak1).unwrap(), "previous", "previous .bak rotated to .bak.1");
+        assert_eq!(
+            std::fs::read_to_string(&bak).unwrap(),
+            "current",
+            "current moved to .bak"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&bak1).unwrap(),
+            "previous",
+            "previous .bak rotated to .bak.1"
+        );
         assert!(!cur.exists(), "current rpi.toml moved away");
     }
 
@@ -338,11 +418,29 @@ mod tests {
         std::fs::write(dir.path().join("rpi.toml.bak.4"), "b4-oldest").unwrap();
 
         super::backup_existing_rpi_toml(&cur).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak")).unwrap(), "cur");
-        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak.1")).unwrap(), "b0");
-        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak.2")).unwrap(), "b1");
-        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak.3")).unwrap(), "b2");
-        assert_eq!(std::fs::read_to_string(dir.path().join("rpi.toml.bak.4")).unwrap(), "b3");
-        assert!(!dir.path().join("rpi.toml.bak.5").exists(), "cap at 4 history files");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("rpi.toml.bak")).unwrap(),
+            "cur"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("rpi.toml.bak.1")).unwrap(),
+            "b0"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("rpi.toml.bak.2")).unwrap(),
+            "b1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("rpi.toml.bak.3")).unwrap(),
+            "b2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("rpi.toml.bak.4")).unwrap(),
+            "b3"
+        );
+        assert!(
+            !dir.path().join("rpi.toml.bak.5").exists(),
+            "cap at 4 history files"
+        );
     }
 }

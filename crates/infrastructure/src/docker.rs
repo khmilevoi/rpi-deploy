@@ -311,10 +311,7 @@ mod tests {
     fn file_chain_without_repo_override() {
         let dir = tempfile::tempdir().unwrap();
         let s = stack(dir.path());
-        assert_eq!(
-            file_chain(&s),
-            vec![s.compose_file.clone()]
-        );
+        assert_eq!(file_chain(&s), vec![s.compose_file.clone()]);
     }
 
     #[test]
@@ -332,11 +329,7 @@ mod tests {
         };
         assert_eq!(
             file_chain(&s),
-            vec![
-                s.compose_file.clone(),
-                repo_override,
-                pi_override,
-            ]
+            vec![s.compose_file.clone(), repo_override, pi_override,]
         );
     }
 

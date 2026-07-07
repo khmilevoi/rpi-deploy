@@ -23,7 +23,11 @@ pub fn resolve_profile(
         None if flags.yes => "home".to_string(),
         None => {
             let v = p.text("server alias", Some("home"))?;
-            if v.trim().is_empty() { "home".to_string() } else { v.trim().to_string() }
+            if v.trim().is_empty() {
+                "home".to_string()
+            } else {
+                v.trim().to_string()
+            }
         }
     };
     let host = match &flags.host {
@@ -74,12 +78,18 @@ pub async fn run(flags: SetupFlags) -> anyhow::Result<()> {
             let key_path = std::path::PathBuf::from(crate::cli::tunnel::expand_home(key));
             let pubkey = crate::cli::keys::pubkey_path(&key_path);
             if !key_path.exists()
-                && prompter.confirm(&format!("no key at {} — generate one?", key_path.display()), true)?
+                && prompter.confirm(
+                    &format!("no key at {} — generate one?", key_path.display()),
+                    true,
+                )?
             {
                 crate::cli::keys::generate_key(&key_path).await?;
             }
             if pubkey.exists()
-                && prompter.confirm("copy public key to the Pi now? (asks Pi password once)", true)?
+                && prompter.confirm(
+                    "copy public key to the Pi now? (asks Pi password once)",
+                    true,
+                )?
             {
                 crate::cli::keys::push_pubkey(&profile, &pubkey).await?;
             }
@@ -96,7 +106,12 @@ pub async fn run(flags: SetupFlags) -> anyhow::Result<()> {
         println!("fix SSH access, then run `rpi doctor --server {name}`");
         return Ok(());
     }
-    let connect = ConnectOpts { server: Some(name.clone()), host: None, user: None, key: None };
+    let connect = ConnectOpts {
+        server: Some(name.clone()),
+        host: None,
+        user: None,
+        key: None,
+    };
     crate::cli::commands::doctor(connect).await
 }
 
@@ -116,7 +131,9 @@ mod tests {
             yes: true,
         };
         let mut p = ScriptedPrompter {
-            texts: Default::default(), confirms: Default::default(), selects: Default::default(),
+            texts: Default::default(),
+            confirms: Default::default(),
+            selects: Default::default(),
         };
         let (name, profile, make_default) = resolve_profile(&flags, &[], &mut p).unwrap();
         assert_eq!(name, "home");
@@ -127,9 +144,15 @@ mod tests {
 
     #[test]
     fn yes_without_host_errors() {
-        let flags = SetupFlags { user: Some("u".into()), yes: true, ..SetupFlags::default() };
+        let flags = SetupFlags {
+            user: Some("u".into()),
+            yes: true,
+            ..SetupFlags::default()
+        };
         let mut p = ScriptedPrompter {
-            texts: Default::default(), confirms: Default::default(), selects: Default::default(),
+            texts: Default::default(),
+            confirms: Default::default(),
+            selects: Default::default(),
         };
         assert!(resolve_profile(&flags, &[], &mut p).is_err());
     }
@@ -142,7 +165,10 @@ mod tests {
             user: Some("piuser".into()),
             ..SetupFlags::default()
         };
-        let keys = vec![PathBuf::from("/home/u/.ssh/pi"), PathBuf::from("/home/u/.ssh/id_ed25519")];
+        let keys = vec![
+            PathBuf::from("/home/u/.ssh/pi"),
+            PathBuf::from("/home/u/.ssh/id_ed25519"),
+        ];
         let mut p = ScriptedPrompter {
             texts: Default::default(),
             confirms: Default::default(),

@@ -358,7 +358,11 @@ async fn agent_logs(
             "agent file logging is disabled/unavailable".into(),
         )));
     }
-    let tail = if q.since.is_some() { None } else { Some(q.tail) };
+    let tail = if q.since.is_some() {
+        None
+    } else {
+        Some(q.tail)
+    };
     let initial = logfile::read(&state.log_dir, tail, q.since)
         .map_err(|e| ApiError(DomainError::Storage(format!("agent logs: {e}"))))?;
     if !q.follow {

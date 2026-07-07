@@ -5,7 +5,7 @@ pub mod init;
 pub mod keys;
 pub mod prompt;
 pub mod rpitoml;
-pub mod sse;
 pub mod setup;
+pub mod sse;
 pub mod ssh;
 pub mod tunnel;

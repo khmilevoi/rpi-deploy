@@ -188,8 +188,10 @@ mod tests {
         .unwrap();
         let expose: String = db
             .call(|c| {
-                c.query_row("SELECT expose FROM projects WHERE name='a'", [], |r| r.get(0))
-                    .map_err(storage_err)
+                c.query_row("SELECT expose FROM projects WHERE name='a'", [], |r| {
+                    r.get(0)
+                })
+                .map_err(storage_err)
             })
             .await
             .unwrap();

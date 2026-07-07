@@ -331,7 +331,12 @@ async fn main() -> anyhow::Result<()> {
                 },
         } => cli::commands::agent_logs(follow, since, tail, connect).await,
         Cmd::Agent {
-            cmd: AgentCmd::Setup { user, with_cloudflared, dry_run },
+            cmd:
+                AgentCmd::Setup {
+                    user,
+                    with_cloudflared,
+                    dry_run,
+                },
         } => agent::setup::run_cmd(user, with_cloudflared, dry_run).await,
         Cmd::Agent {
             cmd: AgentCmd::Uninstall { purge, yes },
@@ -428,7 +433,15 @@ mod tests {
     #[test]
     fn setup_flags_parse() {
         let cli = Cli::try_parse_from([
-            "pi", "setup", "--host", "pihost.local", "--user", "piuser", "--key", "~/.ssh/pi", "--yes",
+            "pi",
+            "setup",
+            "--host",
+            "pihost.local",
+            "--user",
+            "piuser",
+            "--key",
+            "~/.ssh/pi",
+            "--yes",
         ])
         .unwrap();
         match cli.cmd {
@@ -443,9 +456,17 @@ mod tests {
 
     #[test]
     fn agent_setup_flags_parse() {
-        let cli = Cli::try_parse_from(["pi", "agent", "setup", "--user", "piuser", "--dry-run"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["pi", "agent", "setup", "--user", "piuser", "--dry-run"]).unwrap();
         match cli.cmd {
-            Cmd::Agent { cmd: AgentCmd::Setup { user, with_cloudflared, dry_run } } => {
+            Cmd::Agent {
+                cmd:
+                    AgentCmd::Setup {
+                        user,
+                        with_cloudflared,
+                        dry_run,
+                    },
+            } => {
                 assert_eq!(user.as_deref(), Some("piuser"));
                 assert!(!with_cloudflared);
                 assert!(dry_run);
@@ -458,7 +479,9 @@ mod tests {
     fn agent_uninstall_flags_parse() {
         let cli = Cli::try_parse_from(["pi", "agent", "uninstall", "--purge", "--yes"]).unwrap();
         match cli.cmd {
-            Cmd::Agent { cmd: AgentCmd::Uninstall { purge, yes } } => {
+            Cmd::Agent {
+                cmd: AgentCmd::Uninstall { purge, yes },
+            } => {
                 assert!(purge);
                 assert!(yes);
             }
