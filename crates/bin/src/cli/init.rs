@@ -39,8 +39,8 @@ pub fn render_rpi_toml(f: &InitFields) -> String {
         let _ = writeln!(s, "expose = {}", toml_str(e));
     }
     if let Some(env) = &f.env_file {
-        let _ = writeln!(s, "\n[env]");
-        let _ = writeln!(s, "file = {}", toml_str(env));
+        let _ = writeln!(s, "\n[secrets]");
+        let _ = writeln!(s, "env = {}", toml_str(env));
     }
     s
 }
@@ -161,7 +161,7 @@ pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
     }
     std::fs::write(&path, &text)?;
     println!("wrote {}", path.display());
-    println!("next: `rpi env send` (if you use secrets), then `rpi deploy`");
+    println!("next: `rpi secrets send` (if you use secrets), then `rpi deploy`");
     Ok(())
 }
 
@@ -242,10 +242,10 @@ mod tests {
         // Сгенерированный файл должен быть валидным TOML и разбор возвращать исходные значения.
         let parsed = crate::cli::rpitoml::RpiToml::parse(&text).unwrap();
         assert_eq!(parsed.project.name, "a\"b");
-        assert_eq!(parsed.env.file, "C:\\app\\.env");
+        assert_eq!(parsed.secrets.env.as_deref(), Some("C:\\app\\.env"));
         // И должно содержать эскейпированные литералы в тексте.
         assert!(text.contains("name = 'a\"b'"));
-        assert!(text.contains("file = 'C:\\app\\.env'"));
+        assert!(text.contains("env = 'C:\\app\\.env'"));
     }
 
     fn detected() -> DetectedDefaults {

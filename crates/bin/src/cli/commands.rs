@@ -88,7 +88,8 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
 pub async fn env_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<()> {
     let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
     let project_name = rpitoml.project.name.clone();
-    let env_file = Path::new(&rpitoml.env.file).to_path_buf();
+    let env_name = rpitoml.secrets.env.clone().unwrap_or_else(|| ".env".to_string());
+    let env_file = Path::new(&env_name).to_path_buf();
 
     let raw = std::fs::read_to_string(&env_file)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", env_file.display()))?;
