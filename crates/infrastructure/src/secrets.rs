@@ -1,12 +1,15 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use age::secrecy::ExposeSecret;
 use async_trait::async_trait;
+use base64::Engine as _;
 use pi_domain::contracts::SecretStore;
-use pi_domain::entities::EnvBundle;
+use pi_domain::entities::SecretsBundle;
 use pi_domain::error::DomainError;
+use serde::{Deserialize, Serialize};
 
 use crate::dotenv;
 use crate::fsutil;
@@ -15,8 +18,18 @@ fn secrets_err(msg: impl std::fmt::Display) -> DomainError {
     DomainError::Secrets(msg.to_string())
 }
 
-/// age-encrypted bundles at <data_dir>/secrets/<project>.env.age; the agent
-/// key is generated on first start at <data_dir>/secret.key, 0600 (§10, §17).
+/// On-disk plaintext (before age encryption): JSON with base64 file bodies.
+#[derive(Serialize, Deserialize)]
+struct StoredBundle {
+    vars: BTreeMap<String, String>,
+    #[serde(default)]
+    files: BTreeMap<String, String>,
+}
+
+/// age-encrypted bundles at <data_dir>/secrets/<project>.secrets.age (legacy
+/// <project>.env.age is read as fallback and dropped on the next save); the
+/// agent key is generated on first start at <data_dir>/secret.key, 0600
+/// (§10, §17).
 pub struct EncryptedFileStore {
     dir: PathBuf,
     identity: age::x25519::Identity,
@@ -33,6 +46,11 @@ impl EncryptedFileStore {
     }
 
     fn bundle_path(&self, project: &str) -> Result<PathBuf, DomainError> {
+        let project = validated_project(project)?;
+        Ok(self.dir.join(format!("{project}.secrets.age")))
+    }
+
+    fn legacy_path(&self, project: &str) -> Result<PathBuf, DomainError> {
         let project = validated_project(project)?;
         Ok(self.dir.join(format!("{project}.env.age")))
     }
@@ -72,37 +90,77 @@ fn open_or_create_identity(path: &Path) -> Result<age::x25519::Identity, DomainE
 
 #[async_trait]
 impl SecretStore for EncryptedFileStore {
-    async fn save(&self, project: &str, bundle: &EnvBundle) -> Result<(), DomainError> {
-        let plaintext = dotenv::serialize(bundle);
+    async fn save(&self, project: &str, bundle: &SecretsBundle) -> Result<(), DomainError> {
+        let stored = StoredBundle {
+            vars: bundle.vars.clone(),
+            files: bundle
+                .files
+                .iter()
+                .map(|(p, b)| (p.clone(), base64::engine::general_purpose::STANDARD.encode(b)))
+                .collect(),
+        };
+        let plaintext = serde_json::to_vec(&stored).map_err(secrets_err)?;
         let ciphertext =
-            age::encrypt(&self.identity.to_public(), plaintext.as_bytes()).map_err(secrets_err)?;
+            age::encrypt(&self.identity.to_public(), &plaintext).map_err(secrets_err)?;
         let path = self.bundle_path(project)?;
+        let legacy = self.legacy_path(project)?;
         tokio::task::spawn_blocking(move || {
-            fsutil::write_private_atomic(&path, &ciphertext).map_err(secrets_err)
+            fsutil::write_private_atomic(&path, &ciphertext).map_err(secrets_err)?;
+            match fs::remove_file(&legacy) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(secrets_err(e)),
+            }
         })
         .await
         .map_err(|e| secrets_err(format!("join error: {e}")))?
     }
 
-    async fn load(&self, project: &str) -> Result<EnvBundle, DomainError> {
-        let ciphertext = match tokio::fs::read(self.bundle_path(project)?).await {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(EnvBundle::default());
+    async fn load(&self, project: &str) -> Result<SecretsBundle, DomainError> {
+        match tokio::fs::read(self.bundle_path(project)?).await {
+            Ok(ciphertext) => {
+                let plaintext = age::decrypt(&self.identity, &ciphertext).map_err(secrets_err)?;
+                let stored: StoredBundle =
+                    serde_json::from_slice(&plaintext).map_err(secrets_err)?;
+                let mut files = BTreeMap::new();
+                for (path, b64) in stored.files {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(&b64)
+                        .map_err(secrets_err)?;
+                    files.insert(path, bytes);
+                }
+                Ok(SecretsBundle { vars: stored.vars, files })
             }
-            Err(e) => return Err(secrets_err(e)),
-        };
-        let plaintext = age::decrypt(&self.identity, &ciphertext).map_err(secrets_err)?;
-        let text = String::from_utf8(plaintext).map_err(secrets_err)?;
-        dotenv::parse(&text).map_err(secrets_err)
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // pre-secrets agents stored dotenv text at <project>.env.age
+                match tokio::fs::read(self.legacy_path(project)?).await {
+                    Ok(ciphertext) => {
+                        let plaintext =
+                            age::decrypt(&self.identity, &ciphertext).map_err(secrets_err)?;
+                        let text = String::from_utf8(plaintext).map_err(secrets_err)?;
+                        dotenv::parse(&text).map_err(secrets_err)
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(SecretsBundle::default())
+                    }
+                    Err(e) => Err(secrets_err(e)),
+                }
+            }
+            Err(e) => Err(secrets_err(e)),
+        }
     }
 
     async fn remove(&self, project: &str) -> Result<(), DomainError> {
-        match tokio::fs::remove_file(self.bundle_path(project)?).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(secrets_err(e)),
+        let path = self.bundle_path(project)?;
+        let legacy = self.legacy_path(project)?;
+        for target in [path, legacy] {
+            match tokio::fs::remove_file(&target).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(secrets_err(e)),
+            }
         }
+        Ok(())
     }
 }
 
@@ -110,16 +168,18 @@ impl SecretStore for EncryptedFileStore {
 mod tests {
     use super::*;
 
-    fn bundle() -> EnvBundle {
-        let mut b = EnvBundle::default();
+    fn bundle() -> SecretsBundle {
+        let mut b = SecretsBundle::default();
         b.vars
             .insert("DB_PASSWORD".into(), "super-secret-value".into());
         b.vars.insert("PORT".into(), "3000".into());
+        b.files
+            .insert("certs/server.pem".into(), vec![0u8, 159, 146, 150]); // non-UTF8 binary
         b
     }
 
     #[tokio::test]
-    async fn save_load_roundtrip() {
+    async fn save_load_roundtrips_vars_and_binary_files() {
         let dir = tempfile::tempdir().unwrap();
         let store = EncryptedFileStore::open(dir.path()).unwrap();
         store.save("rateme", &bundle()).await.unwrap();
@@ -146,13 +206,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_falls_back_to_legacy_env_age_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::open(dir.path()).unwrap();
+        // simulate a pre-secrets agent: dotenv text encrypted at <p>.env.age
+        let legacy =
+            age::encrypt(&store.identity.to_public(), b"DB_PASSWORD=old-secret\n").unwrap();
+        std::fs::write(dir.path().join("secrets").join("rateme.env.age"), legacy).unwrap();
+
+        let loaded = store.load("rateme").await.unwrap();
+        assert_eq!(loaded.vars["DB_PASSWORD"], "old-secret");
+        assert!(loaded.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_removes_legacy_env_age_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::open(dir.path()).unwrap();
+        let legacy_path = dir.path().join("secrets").join("rateme.env.age");
+        let legacy = age::encrypt(&store.identity.to_public(), b"A=1\n").unwrap();
+        std::fs::write(&legacy_path, legacy).unwrap();
+
+        store.save("rateme", &bundle()).await.unwrap();
+
+        assert!(!legacy_path.exists(), "legacy bundle must be removed");
+        assert!(dir
+            .path()
+            .join("secrets")
+            .join("rateme.secrets.age")
+            .exists());
+        assert_eq!(store.load("rateme").await.unwrap(), bundle());
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_both_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::open(dir.path()).unwrap();
+        store.save("rateme", &bundle()).await.unwrap();
+        let legacy = age::encrypt(&store.identity.to_public(), b"A=1\n").unwrap();
+        std::fs::write(dir.path().join("secrets").join("rateme.env.age"), legacy).unwrap();
+
+        store.remove("rateme").await.unwrap();
+
+        assert!(std::fs::read_dir(dir.path().join("secrets"))
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn bundle_on_disk_is_not_plaintext() {
         let dir = tempfile::tempdir().unwrap();
         let store = EncryptedFileStore::open(dir.path()).unwrap();
         store.save("rateme", &bundle()).await.unwrap();
-        let raw = std::fs::read(dir.path().join("secrets").join("rateme.env.age")).unwrap();
-        let needle = b"super-secret-value";
-        assert!(!raw.windows(needle.len()).any(|w| w == needle));
+        let raw = std::fs::read(dir.path().join("secrets").join("rateme.secrets.age")).unwrap();
+        for needle in [b"super-secret-value".as_slice(), b"certs/server.pem".as_slice()] {
+            assert!(!raw.windows(needle.len()).any(|w| w == needle));
+        }
     }
 
     #[tokio::test]
@@ -187,7 +297,7 @@ mod tests {
         store.save("rateme", &updated).await.unwrap();
 
         assert_eq!(store.load("rateme").await.unwrap(), updated);
-        let raw = std::fs::read(dir.path().join("secrets").join("rateme.env.age")).unwrap();
+        let raw = std::fs::read(dir.path().join("secrets").join("rateme.secrets.age")).unwrap();
         for plaintext in [b"super-secret-value".as_slice(), b"rotated".as_slice()] {
             assert!(!raw.windows(plaintext.len()).any(|w| w == plaintext));
         }
@@ -219,7 +329,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = EncryptedFileStore::open(dir.path()).unwrap();
         store.save("rateme", &bundle()).await.unwrap();
-        for file in ["secret.key", "secrets/rateme.env.age"] {
+        for file in ["secret.key", "secrets/rateme.secrets.age"] {
             let mode = std::fs::metadata(dir.path().join(file))
                 .unwrap()
                 .permissions()
