@@ -392,13 +392,18 @@ mod tests {
         bundle.vars.insert("Z_KEY".into(), "1".into());
         bundle.vars.insert("A_KEY".into(), "2".into());
         assert!(!bundle.is_empty());
-        assert_eq!(bundle.keys(), vec!["A_KEY".to_string(), "Z_KEY".to_string()]);
+        assert_eq!(
+            bundle.keys(),
+            vec!["A_KEY".to_string(), "Z_KEY".to_string()]
+        );
     }
 
     #[test]
     fn secrets_bundle_with_only_files_is_not_empty() {
         let mut bundle = SecretsBundle::default();
-        bundle.files.insert("certs/server.pem".into(), b"PEM".to_vec());
+        bundle
+            .files
+            .insert("certs/server.pem".into(), b"PEM".to_vec());
         assert!(!bundle.is_empty());
         assert_eq!(bundle.file_paths(), vec!["certs/server.pem".to_string()]);
         assert!(bundle.keys().is_empty());
@@ -407,7 +412,9 @@ mod tests {
     #[test]
     fn secrets_bundle_debug_shows_names_without_values_or_contents() {
         let mut bundle = SecretsBundle::default();
-        bundle.vars.insert("API_TOKEN".into(), "raw-token-value".into());
+        bundle
+            .vars
+            .insert("API_TOKEN".into(), "raw-token-value".into());
         bundle
             .files
             .insert("certs/server.pem".into(), b"secret-file-body".to_vec());
