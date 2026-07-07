@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -5,10 +6,28 @@ use async_trait::async_trait;
 use pi_domain::contracts::SecretsWriter;
 use pi_domain::entities::SecretsBundle;
 use pi_domain::error::DomainError;
+use serde::{Deserialize, Serialize};
 
 use crate::dotenv;
 use crate::fsutil;
 use crate::secretpath;
+
+/// Name of the bookkeeping file dropped at the workdir root to remember
+/// which secret file paths *this writer* created on the previous `write()`
+/// call. Never validated as a secret path (it isn't one): it's an internal
+/// implementation detail, not something `[secrets].files` can ever target
+/// since it never goes through `secretpath::validate_rel_path`.
+const MANIFEST_FILE_NAME: &str = ".rpi-secrets-manifest.json";
+
+/// On-disk record of the previous `write()` call's `bundle.files` key set,
+/// used to compute which files must be deleted on the next call (whole-
+/// bundle replace, secrets spec §2.5). JSON, written via
+/// `fsutil::write_private_atomic` (0600, atomic) like everything else here.
+#[derive(Serialize, Deserialize, Default)]
+struct SecretsManifest {
+    #[serde(default)]
+    files: Vec<String>,
+}
 
 /// Writes the decrypted bundle into `<workdir>`: `.env` (0600, atomic) plus
 /// every secret file at its relative path (dirs 0700, files 0600). Each
@@ -16,6 +35,14 @@ use crate::secretpath;
 /// symlink *before* being created or descended into, so a symlink committed
 /// to the repo cannot redirect writes outside the workdir (secrets spec §7).
 /// Files stay in place: compose re-reads them on `up`.
+///
+/// Whole-bundle replace also applies to files (secrets spec §2.5): a small
+/// manifest (see [`MANIFEST_FILE_NAME`]) dropped at the workdir root records
+/// which paths this writer created, so a file dropped from `[secrets].files`
+/// is deleted from a persistent workdir on the next `write()` instead of
+/// lingering forever. A missing or corrupt manifest is treated as "nothing
+/// previously written" (best-effort: never deletes a file it has no record
+/// of writing itself).
 pub struct FsSecretsWriter;
 
 impl FsSecretsWriter {
@@ -83,6 +110,81 @@ fn write_files_blocking(workdir: PathBuf, files: Vec<(String, Vec<u8>)>) -> Resu
     Ok(())
 }
 
+/// Reads the previous-write manifest, returning the empty set if it's
+/// missing, unreadable, or fails to parse. Bookkeeping is best-effort: a
+/// corrupt manifest must never fail the deploy, it just means this write
+/// won't clean up anything (safe: it only widens what's left alone, never
+/// what gets deleted).
+fn read_manifest(path: &Path) -> BTreeSet<String> {
+    let Ok(contents) = std::fs::read(path) else {
+        return BTreeSet::new();
+    };
+    serde_json::from_slice::<SecretsManifest>(&contents)
+        .map(|m| m.files.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// Deletes files that were in the previous manifest but are absent from the
+/// current bundle, then writes (or, if the bundle has no files, removes) the
+/// manifest reflecting the current set. Runs after new/changed files have
+/// already been written successfully, so a failure while writing new files
+/// never leaves old files deleted without their replacements in place.
+///
+/// Manifest entries are re-validated with `secretpath::validate_rel_path`
+/// before use: the manifest lives inside the project's own git checkout, so
+/// treating it as fully trusted would let a crafted `.rpi-secrets-manifest.json`
+/// committed to the repo smuggle a `..`-escaping "stale" path through the
+/// deletion step. An entry that fails validation is simply skipped, same as
+/// a corrupt manifest.
+fn sync_manifest_blocking(
+    workdir: &Path,
+    manifest_path: &Path,
+    previous: BTreeSet<String>,
+    current: &BTreeSet<String>,
+) -> Result<(), DomainError> {
+    for stale in previous.difference(current) {
+        if secretpath::validate_rel_path(stale).is_err() {
+            continue;
+        }
+        let target = workdir.join(stale);
+        match std::fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(storage_err(format!("remove stale secret file '{stale}'"), e)),
+        }
+    }
+
+    if current.is_empty() {
+        match std::fs::remove_file(manifest_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(storage_err("remove stale secrets manifest".into(), e)),
+        }
+    } else {
+        let manifest = SecretsManifest {
+            files: current.iter().cloned().collect(),
+        };
+        let contents = serde_json::to_vec(&manifest)
+            .map_err(|e| storage_err("serialize secrets manifest".into(), e))?;
+        fsutil::write_private_atomic(manifest_path, &contents)
+            .map_err(|e| storage_err("write secrets manifest".into(), e))?;
+    }
+    Ok(())
+}
+
+fn sync_files_blocking(
+    workdir: PathBuf,
+    files: Vec<(String, Vec<u8>)>,
+    current: BTreeSet<String>,
+) -> Result<(), DomainError> {
+    let manifest_path = workdir.join(MANIFEST_FILE_NAME);
+    let previous = read_manifest(&manifest_path);
+
+    write_files_blocking(workdir.clone(), files)?;
+
+    sync_manifest_blocking(&workdir, &manifest_path, previous, &current)
+}
+
 #[async_trait]
 impl SecretsWriter for FsSecretsWriter {
     async fn write(&self, workdir: &Path, bundle: &SecretsBundle) -> Result<(), DomainError> {
@@ -109,13 +211,11 @@ impl SecretsWriter for FsSecretsWriter {
             .map_err(|e| storage_err("write .env".into(), format!("join error: {e}")))?
             .map_err(|e| storage_err("write .env".into(), e))?;
         }
-        if bundle.files.is_empty() {
-            return Ok(());
-        }
         let root = workdir.to_path_buf();
         let files: Vec<(String, Vec<u8>)> =
             bundle.files.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        tokio::task::spawn_blocking(move || write_files_blocking(root, files))
+        let current: BTreeSet<String> = bundle.files.keys().cloned().collect();
+        tokio::task::spawn_blocking(move || sync_files_blocking(root, files, current))
             .await
             .map_err(|e| storage_err("write secret files".into(), format!("join error: {e}")))?
     }
@@ -275,6 +375,106 @@ mod tests {
             "directory must not be created outside the workdir"
         );
         assert!(!outside.join("nested").join("leak.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn dropped_file_is_removed_while_surviving_file_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = FsSecretsWriter::new();
+
+        let mut first = SecretsBundle::default();
+        first.files.insert("keep.txt".into(), b"keep-me".to_vec());
+        first.files.insert("drop/me.txt".into(), b"drop-me".to_vec());
+        writer.write(dir.path(), &first).await.unwrap();
+        assert!(dir.path().join("keep.txt").exists());
+        assert!(dir.path().join("drop/me.txt").exists());
+
+        let mut second = SecretsBundle::default();
+        second.files.insert("keep.txt".into(), b"keep-me".to_vec());
+        writer.write(dir.path(), &second).await.unwrap();
+
+        assert!(
+            !dir.path().join("drop/me.txt").exists(),
+            "file dropped from the bundle must be removed from a persistent workdir"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("keep.txt")).unwrap(),
+            b"keep-me",
+            "file present in both writes must survive with unchanged content"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_write_with_no_manifest_does_not_touch_pre_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate an existing checkout from before this fix shipped (or any
+        // unrelated project file): nothing this writer has a record of.
+        std::fs::write(dir.path().join("unrelated.txt"), b"pre-existing").unwrap();
+
+        let mut b = SecretsBundle::default();
+        b.files.insert("secret.txt".into(), b"s".to_vec());
+        FsSecretsWriter::new().write(dir.path(), &b).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(dir.path().join("unrelated.txt")).unwrap(),
+            b"pre-existing",
+            "a missing manifest must never cause deletion of files this writer didn't create"
+        );
+        assert_eq!(std::fs::read(dir.path().join("secret.txt")).unwrap(), b"s");
+    }
+
+    #[tokio::test]
+    async fn dropping_to_zero_files_removes_all_files_and_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = FsSecretsWriter::new();
+
+        let mut with_files = SecretsBundle::default();
+        with_files.files.insert("a.txt".into(), b"a".to_vec());
+        with_files.files.insert("nested/b.txt".into(), b"b".to_vec());
+        writer.write(dir.path(), &with_files).await.unwrap();
+        assert!(dir.path().join(MANIFEST_FILE_NAME).exists());
+
+        let empty = SecretsBundle::default();
+        writer.write(dir.path(), &empty).await.unwrap();
+
+        assert!(!dir.path().join("a.txt").exists());
+        assert!(!dir.path().join("nested/b.txt").exists());
+        assert!(
+            !dir.path().join(MANIFEST_FILE_NAME).exists(),
+            "manifest must not linger once there are no secret files left"
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_file_is_not_a_secret_path() {
+        let dir = tempfile::tempdir().unwrap();
+        FsSecretsWriter::new()
+            .write(dir.path(), &bundle_with_file())
+            .await
+            .unwrap();
+
+        // The manifest's own name is never a secret path a bundle could
+        // target: it must never collide with paths used in these tests, and
+        // it's never run through the same validation real secret paths are.
+        assert!(!bundle_with_file().files.contains_key(MANIFEST_FILE_NAME));
+        assert_ne!(MANIFEST_FILE_NAME, "certs/server.pem");
+        assert!(dir.path().join(MANIFEST_FILE_NAME).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn manifest_file_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        FsSecretsWriter::new()
+            .write(dir.path(), &bundle_with_file())
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(dir.path().join(MANIFEST_FILE_NAME))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[cfg(unix)]
