@@ -345,6 +345,58 @@ pub async fn lifecycle(project: String, action: &str, connect: ConnectOpts) -> a
     Ok(())
 }
 
+pub async fn command(
+    name: Option<String>,
+    args: Vec<String>,
+    connect: ConnectOpts,
+) -> anyhow::Result<()> {
+    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let project_name = rpitoml.project.name.clone();
+
+    let profile = connect.resolve()?;
+    let tunnel = SshTunnel::open(&profile).await?;
+    let api = ApiClient::new(tunnel.base_url.clone());
+
+    let Some(name) = name else {
+        // List mode: the agent's answer is the deployed reality; the local
+        // file only powers the "undeployed changes" hint.
+        let resp = api.list_commands(&project_name).await?;
+        if resp.commands.is_empty() {
+            eprintln!(
+                "no commands deployed for '{project_name}' - declare [commands] in rpi.toml and run `rpi deploy`"
+            );
+        } else {
+            for (cmd, argv) in &resp.commands {
+                println!("{cmd}  ->  {}", argv.join(" "));
+            }
+        }
+        let local = rpitoml.to_project_config().commands;
+        let undeployed: Vec<&str> = local
+            .keys()
+            .filter(|k| !resp.commands.contains_key(*k))
+            .map(String::as_str)
+            .collect();
+        if !undeployed.is_empty() {
+            eprintln!(
+                "note: local rpi.toml declares undeployed command(s): {} - run `rpi deploy`",
+                undeployed.join(", ")
+            );
+        }
+        return Ok(());
+    };
+
+    let code = api
+        .run_command(&project_name, &name, &args, |line| println!("{line}"))
+        .await?;
+    if code != 0 {
+        eprintln!("command '{name}' exited with code {code}");
+        drop(tunnel);
+        std::process::exit(code);
+    }
+    eprintln!("command '{name}' finished (exit 0)");
+    Ok(())
+}
+
 pub async fn rm(
     project: String,
     volumes: bool,

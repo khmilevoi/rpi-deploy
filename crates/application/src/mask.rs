@@ -31,7 +31,7 @@ impl MaskingSink {
             .filter(|(_, value)| value.len() >= MASK_MIN_LEN)
             .map(|(key, value)| (format!("***{key}***"), value.clone()))
             .collect();
-        secrets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        secrets.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
         if let Ok(mut held) = self.secrets.lock() {
             *held = secrets;
         }

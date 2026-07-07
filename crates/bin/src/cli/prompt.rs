@@ -28,7 +28,10 @@ impl Prompter for InquirePrompter {
         q.prompt().map_err(map_inquire)
     }
     fn confirm(&mut self, label: &str, default: bool) -> Result<bool> {
-        inquire::Confirm::new(label).with_default(default).prompt().map_err(map_inquire)
+        inquire::Confirm::new(label)
+            .with_default(default)
+            .prompt()
+            .map_err(map_inquire)
     }
     fn select(&mut self, label: &str, options: &[String], default: usize) -> Result<String> {
         inquire::Select::new(label, options.to_vec())
@@ -48,13 +51,19 @@ pub struct ScriptedPrompter {
 #[cfg(test)]
 impl Prompter for ScriptedPrompter {
     fn text(&mut self, _label: &str, default: Option<&str>) -> Result<String> {
-        Ok(self.texts.pop_front().unwrap_or_else(|| default.unwrap_or("").to_string()))
+        Ok(self
+            .texts
+            .pop_front()
+            .unwrap_or_else(|| default.unwrap_or("").to_string()))
     }
     fn confirm(&mut self, _label: &str, default: bool) -> Result<bool> {
         Ok(self.confirms.pop_front().unwrap_or(default))
     }
     fn select(&mut self, _label: &str, options: &[String], default: usize) -> Result<String> {
-        Ok(self.selects.pop_front().unwrap_or_else(|| options[default].clone()))
+        Ok(self
+            .selects
+            .pop_front()
+            .unwrap_or_else(|| options[default].clone()))
     }
 }
 

@@ -167,6 +167,8 @@ mod tests {
                 expose: ExposeMode::default(),
                 healthcheck: HealthcheckConfig::default(),
                 timeouts: StageTimeoutOverrides::default(),
+                commands: Default::default(),
+                command_timeout_secs: None,
             },
             host_port: 8000,
             created_at: 1,
@@ -278,11 +280,7 @@ mod tests {
         m.overrides
             .expect_write()
             .withf(|p, s, bind, hp, cp| {
-                p == "rateme"
-                    && s == "web"
-                    && bind == "127.0.0.1"
-                    && *hp == 8000
-                    && *cp == 3000
+                p == "rateme" && s == "web" && bind == "127.0.0.1" && *hp == 8000 && *cp == 3000
             })
             .times(1)
             .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov/rateme.yml")));
@@ -290,9 +288,9 @@ mod tests {
             .expect_up()
             .withf(|stack, _| {
                 stack.project_name == "rateme"
-                    && stack.workdir == PathBuf::from("/wd/rateme")
-                    && stack.compose_file == PathBuf::from("/wd/rateme/docker-compose.yml")
-                    && stack.override_file == PathBuf::from("/ov/rateme.yml")
+                    && stack.workdir == Path::new("/wd/rateme")
+                    && stack.compose_file == Path::new("/wd/rateme/docker-compose.yml")
+                    && stack.override_file == Path::new("/ov/rateme.yml")
             })
             .times(1)
             .returning(|_, log| {

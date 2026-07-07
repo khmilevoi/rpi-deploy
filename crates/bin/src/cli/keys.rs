@@ -7,10 +7,14 @@ use crate::cli::tunnel::expand_home;
 pub fn detect_ssh_keys(ssh_dir: &Path) -> Vec<PathBuf> {
     let skip = ["known_hosts", "config", "authorized_keys"];
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(ssh_dir) else { return out };
+    let Ok(entries) = std::fs::read_dir(ssh_dir) else {
+        return out;
+    };
     for e in entries.flatten() {
         let path = e.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if name.ends_with(".pub") || skip.contains(&name) || name.starts_with('.') {
             continue;
         }
@@ -67,7 +71,8 @@ pub async fn push_pubkey(profile: &ServerProfile, pubkey: &Path) -> anyhow::Resu
         cmd.arg("-i").arg(expand_home(key));
     }
     cmd.args([
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
         &format!("{}@{}", profile.user, profile.host),
         "umask 077; mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys",
     ]);
@@ -78,7 +83,13 @@ pub async fn push_pubkey(profile: &ServerProfile, pubkey: &Path) -> anyhow::Resu
     let failed = match &mut child {
         Ok(c) => {
             use tokio::io::AsyncWriteExt;
-            if c.stdin.take().unwrap().write_all(pubkey_text.as_bytes()).await.is_err() {
+            if c.stdin
+                .take()
+                .unwrap()
+                .write_all(pubkey_text.as_bytes())
+                .await
+                .is_err()
+            {
                 true
             } else {
                 match c.wait().await {
@@ -91,7 +102,10 @@ pub async fn push_pubkey(profile: &ServerProfile, pubkey: &Path) -> anyhow::Resu
     };
     if failed {
         eprintln!("{}", manual_copy_instructions(&pubkey_text, profile));
-        anyhow::bail!("failed to copy public key to {} — see instructions above", profile.host);
+        anyhow::bail!(
+            "failed to copy public key to {} — see instructions above",
+            profile.host
+        );
     }
     Ok(())
 }
@@ -102,7 +116,10 @@ mod tests {
 
     #[test]
     fn pubkey_path_appends_pub() {
-        assert_eq!(pubkey_path(Path::new("/home/u/.ssh/pi")), PathBuf::from("/home/u/.ssh/pi.pub"));
+        assert_eq!(
+            pubkey_path(Path::new("/home/u/.ssh/pi")),
+            PathBuf::from("/home/u/.ssh/pi.pub")
+        );
     }
 
     #[test]

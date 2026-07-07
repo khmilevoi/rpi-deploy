@@ -1,3 +1,4 @@
+pub mod command;
 pub mod deploy;
 pub mod diagnostics;
 pub mod gc;

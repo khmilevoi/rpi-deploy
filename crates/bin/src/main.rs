@@ -92,6 +92,16 @@ enum Cmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
+    /// Run a command declared in [commands] of rpi.toml inside the project container
+    Command {
+        /// Command name; omit to list commands deployed on the agent
+        name: Option<String>,
+        /// Extra arguments appended to the declared command (write them after --)
+        #[arg(last = true)]
+        args: Vec<String>,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
     /// Live CPU/memory/disk metrics
     Stats {
         project: Option<String>,
@@ -263,6 +273,11 @@ async fn main() -> anyhow::Result<()> {
             tail,
             connect,
         } => cli::commands::logs(project, follow, tail, connect).await,
+        Cmd::Command {
+            name,
+            args,
+            connect,
+        } => cli::commands::command(name, args, connect).await,
         Cmd::Stats {
             project,
             json,
@@ -331,7 +346,12 @@ async fn main() -> anyhow::Result<()> {
                 },
         } => cli::commands::agent_logs(follow, since, tail, connect).await,
         Cmd::Agent {
-            cmd: AgentCmd::Setup { user, with_cloudflared, dry_run },
+            cmd:
+                AgentCmd::Setup {
+                    user,
+                    with_cloudflared,
+                    dry_run,
+                },
         } => agent::setup::run_cmd(user, with_cloudflared, dry_run).await,
         Cmd::Agent {
             cmd: AgentCmd::Uninstall { purge, yes },
@@ -428,7 +448,15 @@ mod tests {
     #[test]
     fn setup_flags_parse() {
         let cli = Cli::try_parse_from([
-            "pi", "setup", "--host", "pihost.local", "--user", "piuser", "--key", "~/.ssh/pi", "--yes",
+            "pi",
+            "setup",
+            "--host",
+            "pihost.local",
+            "--user",
+            "piuser",
+            "--key",
+            "~/.ssh/pi",
+            "--yes",
         ])
         .unwrap();
         match cli.cmd {
@@ -443,9 +471,17 @@ mod tests {
 
     #[test]
     fn agent_setup_flags_parse() {
-        let cli = Cli::try_parse_from(["pi", "agent", "setup", "--user", "piuser", "--dry-run"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["pi", "agent", "setup", "--user", "piuser", "--dry-run"]).unwrap();
         match cli.cmd {
-            Cmd::Agent { cmd: AgentCmd::Setup { user, with_cloudflared, dry_run } } => {
+            Cmd::Agent {
+                cmd:
+                    AgentCmd::Setup {
+                        user,
+                        with_cloudflared,
+                        dry_run,
+                    },
+            } => {
                 assert_eq!(user.as_deref(), Some("piuser"));
                 assert!(!with_cloudflared);
                 assert!(dry_run);
@@ -458,7 +494,9 @@ mod tests {
     fn agent_uninstall_flags_parse() {
         let cli = Cli::try_parse_from(["pi", "agent", "uninstall", "--purge", "--yes"]).unwrap();
         match cli.cmd {
-            Cmd::Agent { cmd: AgentCmd::Uninstall { purge, yes } } => {
+            Cmd::Agent {
+                cmd: AgentCmd::Uninstall { purge, yes },
+            } => {
                 assert!(purge);
                 assert!(yes);
             }
@@ -475,5 +513,31 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["pi", "secrets", "ls"]).is_ok());
         assert!(Cli::try_parse_from(["pi", "env", "send"]).is_err(), "env is removed");
+    }
+
+    #[test]
+    fn command_parses_name_and_trailing_args() {
+        let cli =
+            Cli::try_parse_from(["pi", "command", "create-invite", "--", "--email", "x@y.com"])
+                .unwrap();
+        match cli.cmd {
+            Cmd::Command { name, args, .. } => {
+                assert_eq!(name.as_deref(), Some("create-invite"));
+                assert_eq!(args, vec!["--email".to_string(), "x@y.com".into()]);
+            }
+            _ => panic!("expected command"),
+        }
+    }
+
+    #[test]
+    fn bare_command_means_list_mode() {
+        let cli = Cli::try_parse_from(["pi", "command"]).unwrap();
+        match cli.cmd {
+            Cmd::Command { name, args, .. } => {
+                assert_eq!(name, None);
+                assert!(args.is_empty());
+            }
+            _ => panic!("expected command"),
+        }
     }
 }

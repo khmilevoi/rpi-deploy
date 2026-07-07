@@ -5,8 +5,7 @@ use pi_domain::contracts::{
     OverrideStore, ProjectRepository, SecretStore, SecretsWriter, Source,
 };
 use pi_domain::entities::{
-    ComposeStack, DeployRef, Deployment, DeploymentStatus, ExposeMode, ProjectConfig,
-    StageTimeouts,
+    ComposeStack, DeployRef, Deployment, DeploymentStatus, ExposeMode, ProjectConfig, StageTimeouts,
 };
 use pi_domain::error::DomainError;
 use tokio::sync::Semaphore;
@@ -294,9 +293,7 @@ impl DeployProject {
                         log.line(&msg);
                     }
                 }
-                None => {
-                    log.line(&format!("lan: {} (ip not detected)", project.host_port))
-                }
+                None => log.line(&format!("lan: {} (ip not detected)", project.host_port)),
             }
         }
 
@@ -362,6 +359,8 @@ mod tests {
             expose: ExposeMode::default(),
             healthcheck: HealthcheckConfig::default(),
             timeouts: StageTimeoutOverrides::default(),
+            commands: Default::default(),
+            command_timeout_secs: None,
         }
     }
 
@@ -461,11 +460,7 @@ mod tests {
         m.overrides
             .expect_write()
             .withf(|p, s, bind, hp, cp| {
-                p == "rateme"
-                    && s == "web"
-                    && bind == "127.0.0.1"
-                    && *hp == 8000
-                    && *cp == 3000
+                p == "rateme" && s == "web" && bind == "127.0.0.1" && *hp == 8000 && *cp == 3000
             })
             .times(1)
             .returning(move |_, _, _, _, _| {
@@ -478,8 +473,8 @@ mod tests {
             .withf(|stack, _| {
                 stack.project_name == "rateme"
                     && stack.compose_file
-                        == PathBuf::from("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
-                    && stack.override_file == PathBuf::from("/var/lib/rpi/overrides/rateme.yml")
+                        == Path::new("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
+                    && stack.override_file == Path::new("/var/lib/rpi/overrides/rateme.yml")
             })
             .times(1)
             .returning(move |_, _| {
@@ -492,8 +487,8 @@ mod tests {
             .withf(|stack, _| {
                 stack.project_name == "rateme"
                     && stack.compose_file
-                        == PathBuf::from("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
-                    && stack.override_file == PathBuf::from("/var/lib/rpi/overrides/rateme.yml")
+                        == Path::new("/var/lib/rpi/workdirs/rateme/docker-compose.yml")
+                    && stack.override_file == Path::new("/var/lib/rpi/overrides/rateme.yml")
             })
             .times(1)
             .returning(move |_, _| {
@@ -609,11 +604,7 @@ mod tests {
         m.overrides
             .expect_write()
             .withf(|p, s, bind, hp, cp| {
-                p == "rateme"
-                    && s == "web"
-                    && bind == "0.0.0.0"
-                    && *hp == 8000
-                    && *cp == 3000
+                p == "rateme" && s == "web" && bind == "0.0.0.0" && *hp == 8000 && *cp == 3000
             })
             .times(1)
             .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
@@ -674,12 +665,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.status, DeploymentStatus::Success);
-        assert!(
-            sink.lines
-                .lock()
-                .unwrap()
-                .contains(&"lan: http://192.168.1.50:8000".to_string())
-        );
+        assert!(sink
+            .lines
+            .lock()
+            .unwrap()
+            .contains(&"lan: http://192.168.1.50:8000".to_string()));
     }
 
     #[tokio::test]
@@ -713,12 +703,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.status, DeploymentStatus::Success);
-        assert!(
-            sink.lines
-                .lock()
-                .unwrap()
-                .contains(&"lan: 8000 (ip not detected)".to_string())
-        );
+        assert!(sink
+            .lines
+            .lock()
+            .unwrap()
+            .contains(&"lan: 8000 (ip not detected)".to_string()));
     }
 
     #[tokio::test]
@@ -760,9 +749,7 @@ mod tests {
             "missing url line in {lines:?}"
         );
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("93.184.216.34 is public")),
+            lines.iter().any(|l| l.contains("93.184.216.34 is public")),
             "missing public-ip warning in {lines:?}"
         );
     }
@@ -1231,6 +1218,16 @@ mod tests {
             _log: Arc<dyn LogSink>,
         ) -> Result<(), DomainError> {
             Ok(())
+        }
+
+        async fn exec(
+            &self,
+            _stack: &pi_domain::entities::ComposeStack,
+            _service: &str,
+            _argv: &[String],
+            _log: Arc<dyn LogSink>,
+        ) -> Result<i32, DomainError> {
+            Ok(0)
         }
     }
 

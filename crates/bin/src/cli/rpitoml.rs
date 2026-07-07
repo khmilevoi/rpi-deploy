@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::duration::parse_duration_secs;
@@ -22,6 +23,8 @@ pub struct RpiToml {
     /// via Option<toml::Value> because serde tolerates unknown sections.
     #[serde(default, rename = "env")]
     legacy_env: Option<toml::Value>,
+    #[serde(default)]
+    pub commands: Option<BTreeMap<String, CommandValue>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +82,8 @@ pub struct TimeoutsSection {
     pub fetch: Option<String>,
     pub build: Option<String>,
     pub up: Option<String>,
+    /// Budget for one `rpi command` run on the agent.
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -99,6 +104,35 @@ pub struct SecretsSection {
     /// Secret files, relative forward-slash paths (recreated verbatim on the Pi).
     #[serde(default)]
     pub files: Vec<String>,
+}
+
+/// [commands] value: a shell-word string or an explicit argv array (§spec).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum CommandValue {
+    Line(String),
+    Argv(Vec<String>),
+}
+
+fn is_valid_command_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('a'..='z' | '0'..='9'))
+        && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
+}
+
+/// String form is split client-side with shell-word rules (quotes only —
+/// no variables, pipes or redirects; a shell must be spelled out as
+/// `sh -c '...'`). Array form is taken verbatim.
+fn command_argv(name: &str, value: &CommandValue) -> anyhow::Result<Vec<String>> {
+    let argv = match value {
+        CommandValue::Argv(items) => items.clone(),
+        CommandValue::Line(line) => shlex::split(line)
+            .ok_or_else(|| anyhow::anyhow!("rpi.toml [commands].{name}: unbalanced quote"))?,
+    };
+    if argv.is_empty() || argv.iter().any(|a| a.is_empty()) {
+        anyhow::bail!("rpi.toml [commands].{name}: command must not be empty");
+    }
+    Ok(argv)
 }
 
 fn validate_expect(expect: &str) -> Result<(), String> {
@@ -130,6 +164,7 @@ impl RpiToml {
             ("fetch", &parsed.timeouts.fetch),
             ("build", &parsed.timeouts.build),
             ("up", &parsed.timeouts.up),
+            ("command", &parsed.timeouts.command),
         ] {
             if let Some(timeout) = value {
                 parse_duration_secs(timeout)
@@ -161,6 +196,21 @@ impl RpiToml {
                 .map_err(|e| anyhow::anyhow!("rpi.toml [secrets].files: '{path}': {e}"))?;
             if !seen.insert(path.as_str()) {
                 anyhow::bail!("rpi.toml [secrets].files: duplicate path '{path}'");
+            }
+        }
+        if let Some(commands) = &parsed.commands {
+            if commands.is_empty() {
+                anyhow::bail!(
+                    "rpi.toml [commands] is empty - declare a command or remove the section"
+                );
+            }
+            for (name, value) in commands {
+                if !is_valid_command_name(name) {
+                    anyhow::bail!(
+                        "rpi.toml [commands]: command name '{name}' must match ^[a-z0-9][a-z0-9_-]*$"
+                    );
+                }
+                command_argv(name, value)?;
             }
         }
         Ok(parsed)
@@ -218,6 +268,24 @@ impl RpiToml {
                     .as_deref()
                     .and_then(|t| parse_duration_secs(t).ok()),
             },
+            commands: self
+                .commands
+                .as_ref()
+                .map(|map| {
+                    map.iter()
+                        .map(|(name, value)| {
+                            let argv =
+                                command_argv(name, value).expect("validated in RpiToml::parse");
+                            (name.clone(), argv)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            command_timeout_secs: self
+                .timeouts
+                .command
+                .as_deref()
+                .and_then(|t| parse_duration_secs(t).ok()),
         }
     }
 }
@@ -383,10 +451,7 @@ files = ["certs/server.pem"]
     #[test]
     fn expose_defaults_private_and_parses_lan() {
         let default_cfg = RpiToml::parse(SAMPLE).unwrap().to_project_config();
-        assert_eq!(
-            default_cfg.expose,
-            pi_domain::entities::ExposeMode::Private
-        );
+        assert_eq!(default_cfg.expose, pi_domain::entities::ExposeMode::Private);
 
         let lan = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"lan\"");
         let lan_cfg = RpiToml::parse(&lan).unwrap().to_project_config();
@@ -398,5 +463,107 @@ files = ["certs/server.pem"]
         let bad = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"public\"");
         let err = RpiToml::parse(&bad).unwrap_err().to_string();
         assert!(err.contains("expose"), "got: {err}");
+    }
+
+    #[test]
+    fn commands_section_parses_string_and_array_forms() {
+        let toml = SAMPLE.replace(
+            "[healthcheck]",
+            "[commands]\ncreate-invite = \"node scripts/create-invite.js --admin\"\nmigrate = [\"npx\", \"prisma\", \"migrate\", \"deploy\"]\nbackup = \"sh -c 'pg_dump mydb | gzip > /b.gz'\"\n\n[healthcheck]",
+        );
+        let config = RpiToml::parse(&toml).unwrap().to_project_config();
+        assert_eq!(
+            config.commands.get("create-invite").unwrap(),
+            &vec![
+                "node".to_string(),
+                "scripts/create-invite.js".into(),
+                "--admin".into()
+            ]
+        );
+        assert_eq!(
+            config.commands.get("migrate").unwrap(),
+            &vec![
+                "npx".to_string(),
+                "prisma".into(),
+                "migrate".into(),
+                "deploy".into()
+            ]
+        );
+        assert_eq!(
+            config.commands.get("backup").unwrap(),
+            &vec![
+                "sh".to_string(),
+                "-c".into(),
+                "pg_dump mydb | gzip > /b.gz".into()
+            ],
+            "quoted segment must stay one argv item"
+        );
+    }
+
+    #[test]
+    fn missing_commands_section_means_no_commands() {
+        let config = RpiToml::parse(SAMPLE).unwrap().to_project_config();
+        assert!(config.commands.is_empty());
+        assert_eq!(config.command_timeout_secs, None);
+    }
+
+    #[test]
+    fn empty_commands_section_is_rejected() {
+        let toml = SAMPLE.replace("[healthcheck]", "[commands]\n\n[healthcheck]");
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("[commands]"), "got: {err}");
+    }
+
+    #[test]
+    fn invalid_command_name_is_rejected() {
+        for bad in [
+            "\"Bad Name\" = \"run\"",
+            "\"-x\" = \"run\"",
+            "\"UP\" = \"run\"",
+        ] {
+            let toml = SAMPLE.replace(
+                "[healthcheck]",
+                &format!("[commands]\n{bad}\n\n[healthcheck]"),
+            );
+            let err = RpiToml::parse(&toml).unwrap_err().to_string();
+            assert!(err.contains("command name"), "{bad}: got: {err}");
+        }
+    }
+
+    #[test]
+    fn empty_command_values_are_rejected() {
+        for bad in ["x = \"\"", "x = []", "x = [\"\"]"] {
+            let toml = SAMPLE.replace(
+                "[healthcheck]",
+                &format!("[commands]\n{bad}\n\n[healthcheck]"),
+            );
+            assert!(RpiToml::parse(&toml).is_err(), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn unbalanced_quotes_in_command_are_rejected() {
+        let toml = SAMPLE.replace(
+            "[healthcheck]",
+            "[commands]\nx = \"sh -c 'oops\"\n\n[healthcheck]",
+        );
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("quote"), "got: {err}");
+    }
+
+    #[test]
+    fn command_timeout_is_parsed_and_validated() {
+        let toml = SAMPLE.replace(
+            "[healthcheck]",
+            "[timeouts]\ncommand = \"30m\"\n\n[healthcheck]",
+        );
+        let config = RpiToml::parse(&toml).unwrap().to_project_config();
+        assert_eq!(config.command_timeout_secs, Some(1800));
+
+        let bad = SAMPLE.replace(
+            "[healthcheck]",
+            "[timeouts]\ncommand = \"soon\"\n\n[healthcheck]",
+        );
+        assert!(RpiToml::parse(&bad).is_err());
     }
 }

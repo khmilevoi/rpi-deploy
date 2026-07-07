@@ -35,6 +35,9 @@ impl std::fmt::Debug for SecretsBundle {
     }
 }
 
+/// Temporary alias while call sites migrate; removed in the cleanup task.
+pub type EnvBundle = SecretsBundle;
+
 /// Deploy gate settings from [healthcheck] in rpi.toml (§8, §12).
 /// Per-deploy input: travels with ProjectConfig, not persisted in the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +162,13 @@ pub struct ProjectConfig {
     pub healthcheck: HealthcheckConfig,
     /// Stage timeout overrides ([timeouts] from rpi.toml). Not persisted in DB.
     pub timeouts: StageTimeoutOverrides,
+    /// Declared admin commands ([commands] in rpi.toml), name -> argv.
+    /// Persisted in the registry: `rpi command` must run what was deployed,
+    /// not what the local file currently says.
+    pub commands: BTreeMap<String, Vec<String>>,
+    /// [timeouts].command override in seconds. Persisted alongside commands
+    /// because it is needed at invocation time, not deploy time.
+    pub command_timeout_secs: Option<u64>,
 }
 
 /// Registered project: config + allocated host port (§4).
@@ -395,7 +405,9 @@ mod tests {
     #[test]
     fn secrets_bundle_with_only_files_is_not_empty() {
         let mut bundle = SecretsBundle::default();
-        bundle.files.insert("certs/server.pem".into(), b"PEM".to_vec());
+        bundle
+            .files
+            .insert("certs/server.pem".into(), b"PEM".to_vec());
         assert!(!bundle.is_empty());
         assert_eq!(bundle.file_paths(), vec!["certs/server.pem".to_string()]);
         assert!(bundle.keys().is_empty());
@@ -404,7 +416,9 @@ mod tests {
     #[test]
     fn secrets_bundle_debug_shows_names_without_values_or_contents() {
         let mut bundle = SecretsBundle::default();
-        bundle.vars.insert("API_TOKEN".into(), "raw-token-value".into());
+        bundle
+            .vars
+            .insert("API_TOKEN".into(), "raw-token-value".into());
         bundle
             .files
             .insert("certs/server.pem".into(), b"secret-file-body".to_vec());

@@ -6,14 +6,14 @@ machine or in CI. The CLI connects to the agent through an SSH tunnel; the
 agent clones the Git repository, builds the Compose stack, and starts the
 containers.
 
-Status: v0.6 (npm install) — everything from v0.1–v0.5 (deploy/env/ingress/CI,
-`rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`, `rpi status`,
-`rpi doctor`, `rpi agent status|logs`, one-command setup) plus
-`npm install -g rpi-deploy` for both roles: the CLI command is now `rpi`, the
-package builds it from source on install, and `sudo rpi agent setup` installs
-the running binary to `/usr/local/bin/rpi` and restarts the agent on updates.
-Manual install from source remains as a fallback (see "Build And Install The
-Binary" below).
+Status: v0.7 (prebuilt binaries) — everything from v0.1–v0.6 (deploy/env/
+ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
+`rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
+`npm install -g rpi-deploy` for both roles) plus prebuilt binaries:
+GitHub Actions builds `rpi` for Windows x64, Linux x64, and Linux aarch64 on
+every release tag, and `npm install` downloads the matching binary in seconds
+instead of compiling for ~10 minutes. Building from source remains the
+fallback everywhere else (see "Build And Install The Binary" below).
 
 Supported features:
 
@@ -184,7 +184,7 @@ builds without it, but `rpi agent setup` requires it
 (`curl -fsSL https://get.docker.com | sh`):
 
 ```bash
-sudo npm install -g rpi-deploy    # builds from source, ~10 minutes on a Pi
+sudo npm install -g rpi-deploy    # downloads a prebuilt arm64 binary, seconds
 sudo rpi agent setup              # installs /usr/local/bin/rpi, unit, start
 rpi doctor
 ```
@@ -231,13 +231,17 @@ config `pi.toml` → `rpi.toml` (hard cutover, no fallback). Follow the
 step-by-step guide for both roles in
 [docs/migration-v0.5-to-v0.6.md](docs/migration-v0.5-to-v0.6.md).
 
-The npm package ships the Rust sources and builds them on install
-(`cargo build --release --locked`); rustup is installed automatically when
-cargo is missing, and the build directory is removed afterwards to save disk
-space. Building on Windows needs the Visual Studio Build Tools C++ workload.
-Installing with `--ignore-scripts` leaves the CLI unusable (`rpi` will report
-that the binary was not built) — as does npm's `allow-scripts` gate on recent
-versions, see above.
+On install the package downloads a prebuilt binary from the matching GitHub
+Release (Windows x64, Linux x64, Linux aarch64) and verifies its SHA-256
+checksum. On other platforms (macOS, 32-bit ARM), or when the download fails
+(offline, proxy, checksum mismatch), it falls back to building the bundled
+Rust sources (`cargo build --release --locked`); rustup is installed
+automatically when cargo is missing, and the build directory is removed
+afterwards to save disk space. Building on Windows needs the Visual Studio
+Build Tools C++ workload. Set `RPI_DEPLOY_BUILD_FROM_SOURCE=1` to skip the
+download and force the source build. Installing with `--ignore-scripts`
+leaves the CLI unusable (`rpi` will report that the binary was not built) —
+as does npm's `allow-scripts` gate on recent versions, see above.
 
 ## Build And Install The Binary
 
@@ -572,6 +576,22 @@ build = "45m"
 up = "2m"
 ```
 
+### `[commands]` — admin commands (optional)
+
+One-off admin commands runnable inside the service container with `rpi command`:
+
+```toml
+[commands]
+create-invite = "node scripts/create-invite.js"
+migrate = ["npx", "prisma", "migrate", "deploy"]
+backup = "sh -c 'pg_dump mydb | gzip > /data/backup.gz'"
+```
+
+- Value: string (split with shell-word rules — quotes work, no variables/pipes/redirects) or an explicit argv array. Need a shell? Spell it out: `sh -c '...'`.
+- Names must match `[a-z0-9][a-z0-9_-]*`.
+- Commands are registered on the agent **at deploy time** and run in the `ingress.service` container via `docker compose exec -T`. The agent only executes deployed commands — there is no generic remote exec.
+- Timeout: 10 minutes by default; override with `command = "30m"` in `[timeouts]`.
+
 ## Docker Compose Requirements
 
 `rpi-agent` writes an override file roughly like this:
@@ -719,6 +739,19 @@ Prune Docker images and build cache on the Pi:
 ```bash
 rpi gc
 ```
+
+Run an admin command declared in `[commands]`:
+
+```bash
+rpi command                                   # list commands deployed on the agent
+rpi command create-invite                     # run a command in the service container
+rpi command create-invite -- --email x@y.com  # extra args are appended to the declared argv
+```
+
+The remote exit code becomes the `rpi` exit code. Ctrl+C detaches and best-effort
+kills the run on the agent (the in-container process may survive — standard
+`docker exec` behavior). A concurrent deploy is not blocked by a running command;
+if it restarts the container mid-run, the command fails.
 
 `rpi deploy` reads `./rpi.toml`, asks the agent to clone or fetch the configured
 repository, builds the Compose stack, starts containers, runs the health check,
