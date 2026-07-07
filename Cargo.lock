@@ -1535,7 +1535,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pi"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "pi-application"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "mockall",
@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "pi-domain"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "mockall",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "pi-infrastructure"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "age",
  "async-trait",
