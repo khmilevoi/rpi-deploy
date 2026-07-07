@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{
-    Clock, ContainerRuntime, DeploymentHistory, EnvFileWriter, HealthGate, HostNetwork, Ingress,
-    LogSink, OverrideStore, ProjectRepository, SecretStore, Source,
+    Clock, ContainerRuntime, DeploymentHistory, HealthGate, HostNetwork, Ingress, LogSink,
+    OverrideStore, ProjectRepository, SecretStore, SecretsWriter, Source,
 };
 use pi_domain::entities::{
     ComposeStack, DeployRef, Deployment, DeploymentStatus, ExposeMode, ProjectConfig,
@@ -52,7 +52,7 @@ pub struct DeployProject {
     history: Arc<dyn DeploymentHistory>,
     overrides: Arc<dyn OverrideStore>,
     secrets: Arc<dyn SecretStore>,
-    env_files: Arc<dyn EnvFileWriter>,
+    env_files: Arc<dyn SecretsWriter>,
     health: Arc<dyn HealthGate>,
     ingress: Arc<dyn Ingress>,
     host_network: Arc<dyn HostNetwork>,
@@ -89,7 +89,7 @@ impl DeployProject {
         history: Arc<dyn DeploymentHistory>,
         overrides: Arc<dyn OverrideStore>,
         secrets: Arc<dyn SecretStore>,
-        env_files: Arc<dyn EnvFileWriter>,
+        env_files: Arc<dyn SecretsWriter>,
         health: Arc<dyn HealthGate>,
         ingress: Arc<dyn Ingress>,
         host_network: Arc<dyn HostNetwork>,
@@ -332,9 +332,9 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
-        MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe, MockEnvFileWriter,
-        MockHealthGate, MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository,
-        MockSecretStore, MockSource,
+        MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe, MockHealthGate,
+        MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository, MockSecretStore,
+        MockSecretsWriter, MockSource,
     };
     use pi_domain::entities::{
         DeployRef, DeploymentStatus, EnvBundle, ExposeMode, FetchedSource, HealthcheckConfig,
@@ -370,7 +370,7 @@ mod tests {
         pub history: MockDeploymentHistory,
         pub overrides: MockOverrideStore,
         pub secrets: MockSecretStore,
-        pub env_files: MockEnvFileWriter,
+        pub env_files: MockSecretsWriter,
         pub health: MockHealthGate,
         pub ingress: MockIngress,
         pub host_network: MockHostNetwork,
@@ -393,7 +393,7 @@ mod tests {
             history: MockDeploymentHistory::new(),
             overrides: MockOverrideStore::new(),
             secrets: MockSecretStore::new(),
-            env_files: MockEnvFileWriter::new(),
+            env_files: MockSecretsWriter::new(),
             health: MockHealthGate::new(),
             ingress: MockIngress::new(),
             host_network: MockHostNetwork::new(),

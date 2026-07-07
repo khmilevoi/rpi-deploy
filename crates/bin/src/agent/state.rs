@@ -17,7 +17,6 @@ use pi_domain::contracts::{DeploymentHistory, HostNetwork, IdGen, Ingress};
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
 use pi_infrastructure::disk::SysinfoDiskProbe;
 use pi_infrastructure::docker::DockerComposeRuntime;
-use pi_infrastructure::envfile::FsEnvFileWriter;
 use pi_infrastructure::events::DeployEventsHub;
 use pi_infrastructure::git::GitSource;
 use pi_infrastructure::health::HybridHealthGate;
@@ -27,6 +26,7 @@ use pi_infrastructure::overrides::FsOverrideStore;
 use pi_infrastructure::probe::{HostSystemProbe, SystemRunner};
 use pi_infrastructure::repo::SqliteProjectRepo;
 use pi_infrastructure::secrets::EncryptedFileStore;
+use pi_infrastructure::secretsfile::FsSecretsWriter;
 use pi_infrastructure::sqlite::Db;
 use pi_infrastructure::stats::CompositeStats;
 use pi_infrastructure::sys::{SystemClock, UuidGen};
@@ -70,7 +70,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     );
     let overrides = FsOverrideStore::new(config.data_dir.join("overrides"));
     let secrets = EncryptedFileStore::open(&config.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let env_files: Arc<dyn pi_domain::contracts::EnvFileWriter> = FsEnvFileWriter::new();
+    let env_files: Arc<dyn pi_domain::contracts::SecretsWriter> = FsSecretsWriter::new();
     let health = HybridHealthGate::new(runtime.clone());
     let ingress: Arc<dyn Ingress> = match &config.cloudflared {
         Some(cf) => {

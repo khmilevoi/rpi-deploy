@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{
-    ContainerRuntime, EnvFileWriter, LogSink, OverrideStore, ProjectRepository, SecretStore, Source,
+    ContainerRuntime, LogSink, OverrideStore, ProjectRepository, SecretStore, SecretsWriter, Source,
 };
 use pi_domain::entities::{ComposeStack, EnvBundle};
 use pi_domain::error::DomainError;
@@ -21,7 +21,7 @@ pub struct SendEnv {
     secrets: Arc<dyn SecretStore>,
     projects: Arc<dyn ProjectRepository>,
     source: Arc<dyn Source>,
-    env_files: Arc<dyn EnvFileWriter>,
+    env_files: Arc<dyn SecretsWriter>,
     overrides: Arc<dyn OverrideStore>,
     runtime: Arc<dyn ContainerRuntime>,
 }
@@ -31,7 +31,7 @@ impl SendEnv {
         secrets: Arc<dyn SecretStore>,
         projects: Arc<dyn ProjectRepository>,
         source: Arc<dyn Source>,
-        env_files: Arc<dyn EnvFileWriter>,
+        env_files: Arc<dyn SecretsWriter>,
         overrides: Arc<dyn OverrideStore>,
         runtime: Arc<dyn ContainerRuntime>,
     ) -> Arc<SendEnv> {
@@ -122,8 +122,8 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
-        MockContainerRuntime, MockEnvFileWriter, MockOverrideStore, MockProjectRepository,
-        MockSecretStore, MockSource,
+        MockContainerRuntime, MockOverrideStore, MockProjectRepository, MockSecretStore,
+        MockSecretsWriter, MockSource,
     };
     use pi_domain::entities::{
         ExposeMode, HealthcheckConfig, Project, ProjectConfig, StageTimeoutOverrides,
@@ -160,7 +160,7 @@ mod tests {
         secrets: MockSecretStore,
         projects: MockProjectRepository,
         source: MockSource,
-        env_files: MockEnvFileWriter,
+        env_files: MockSecretsWriter,
         overrides: MockOverrideStore,
         runtime: MockContainerRuntime,
     }
@@ -170,7 +170,7 @@ mod tests {
             secrets: MockSecretStore::new(),
             projects: MockProjectRepository::new(),
             source: MockSource::new(),
-            env_files: MockEnvFileWriter::new(),
+            env_files: MockSecretsWriter::new(),
             overrides: MockOverrideStore::new(),
             runtime: MockContainerRuntime::new(),
         }

@@ -559,10 +559,10 @@ mod tests {
         runtime: Arc<dyn ContainerRuntime>,
     ) -> AppState {
         use pi_infrastructure::cloudflared::DisabledIngress;
-        use pi_infrastructure::envfile::FsEnvFileWriter;
         use pi_infrastructure::health::HybridHealthGate;
         use pi_infrastructure::hostnet::UdpHostNetwork;
         use pi_infrastructure::secrets::EncryptedFileStore;
+        use pi_infrastructure::secretsfile::FsSecretsWriter;
 
         let db = Db::open(&dir.join("state.db")).unwrap();
         let projects = SqliteProjectRepo::new(db.clone(), 8000, 8999);
@@ -584,7 +584,7 @@ mod tests {
             Arc::clone(&history),
             overrides.clone(),
             secrets.clone(),
-            FsEnvFileWriter::new(),
+            FsSecretsWriter::new(),
             health,
             DisabledIngress::new(),
             Arc::new(UdpHostNetwork::new()),
@@ -636,7 +636,7 @@ mod tests {
             secrets.clone(),
             projects,
             source,
-            FsEnvFileWriter::new(),
+            FsSecretsWriter::new(),
             overrides,
             runtime,
         );
