@@ -36,6 +36,9 @@ inquire = "0.7"
 anyhow = "1"
 sysinfo = "0.33"
 shlex = "1"
+console = "0.15"
+indicatif = "0.17"
+comfy-table = "7"
 
 # dev
 mockall = "0.13"
