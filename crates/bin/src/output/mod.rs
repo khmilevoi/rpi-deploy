@@ -1,5 +1,8 @@
 use console::{style, Emoji};
 
+mod table;
+pub use table::table;
+
 fn no_color_requested() -> bool {
     std::env::var_os("NO_COLOR").is_some()
 }
