@@ -343,6 +343,14 @@ pub async fn lifecycle(project: String, action: &str, connect: ConnectOpts) -> a
     Ok(())
 }
 
+fn format_command_line(name: &str, spec: &pi_domain::entities::CommandSpec) -> String {
+    let base = format!("{name}  ->  {}", spec.argv.join(" "));
+    match &spec.service {
+        Some(service) => format!("{base}  [service: {service}]"),
+        None => base,
+    }
+}
+
 pub async fn command(
     name: Option<String>,
     args: Vec<String>,
@@ -365,7 +373,7 @@ pub async fn command(
             );
         } else {
             for (cmd, spec) in &resp.commands {
-                println!("{cmd}  ->  {}", spec.argv.join(" "));
+                println!("{}", format_command_line(cmd, spec));
             }
         }
         let local = rpitoml.to_project_config().commands;
@@ -906,5 +914,29 @@ mod tests {
                 "-f"
             ]
         );
+    }
+
+    #[cfg(test)]
+    mod command_list_tests {
+        use super::format_command_line;
+        use pi_domain::entities::CommandSpec;
+
+        #[test]
+        fn service_less_command_shows_argv_only() {
+            let spec = CommandSpec::new(vec!["node".into(), "seed.js".into()]);
+            assert_eq!(format_command_line("seed", &spec), "seed  ->  node seed.js");
+        }
+
+        #[test]
+        fn service_pinned_command_shows_service_suffix() {
+            let spec = CommandSpec {
+                argv: vec!["node".into(), "x.cjs".into()],
+                service: Some("server".into()),
+            };
+            assert_eq!(
+                format_command_line("create-invite", &spec),
+                "create-invite  ->  node x.cjs  [service: server]"
+            );
+        }
     }
 }
