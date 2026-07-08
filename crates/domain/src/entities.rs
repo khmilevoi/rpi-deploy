@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use serde::de::{Deserializer, Error as _};
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
+
 /// Project secrets: env vars + secret files (secrets spec 2026-07-07).
 /// Values and file contents never leave the agent unmasked.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -136,6 +140,78 @@ impl ExposeMode {
 impl std::fmt::Display for ExposeMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+
+/// One deployed `[commands]` entry: the declared argv plus an optional compose
+/// service to exec into. `service = None` means the project's ingress service
+/// (ProjectConfig.service).
+///
+/// Serde is hand-written for backward compatibility: a service-less command
+/// serializes to a bare argv array — byte-identical to the pre-service format
+/// stored in the registry and sent over the CLI<->agent protocol — while a
+/// service-pinned command uses a struct. Deserialization accepts both shapes,
+/// so existing rows and older-CLI payloads decode with `service = None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub argv: Vec<String>,
+    pub service: Option<String>,
+}
+
+impl CommandSpec {
+    pub fn new(argv: Vec<String>) -> CommandSpec {
+        CommandSpec {
+            argv,
+            service: None,
+        }
+    }
+}
+
+impl From<Vec<String>> for CommandSpec {
+    fn from(argv: Vec<String>) -> CommandSpec {
+        CommandSpec::new(argv)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum CommandSpecRepr {
+    Argv(Vec<String>),
+    Full {
+        argv: Vec<String>,
+        #[serde(default)]
+        service: Option<String>,
+    },
+}
+
+impl Serialize for CommandSpec {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.service {
+            None => self.argv.serialize(serializer),
+            Some(service) => CommandSpecRepr::Full {
+                argv: self.argv.clone(),
+                service: Some(service.clone()),
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CommandSpec {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<CommandSpec, D::Error> {
+        match CommandSpecRepr::deserialize(deserializer)? {
+            CommandSpecRepr::Argv(argv) => Ok(CommandSpec {
+                argv,
+                service: None,
+            }),
+            CommandSpecRepr::Full { argv, service } => {
+                if argv.is_empty() {
+                    return Err(D::Error::custom("command argv must not be empty"));
+                }
+                Ok(CommandSpec { argv, service })
+            }
+        }
     }
 }
 
@@ -557,5 +633,53 @@ mod tests {
             DiagnosticReport::default().all_passed(),
             "no checks - nothing failed"
         );
+    }
+}
+
+#[cfg(test)]
+mod command_spec_tests {
+    use super::CommandSpec;
+
+    #[test]
+    fn legacy_array_json_deserializes_to_no_service() {
+        let spec: CommandSpec = serde_json::from_str(r#"["node","seed.js"]"#).unwrap();
+        assert_eq!(spec, CommandSpec::new(vec!["node".into(), "seed.js".into()]));
+        assert_eq!(spec.service, None);
+    }
+
+    #[test]
+    fn no_service_serializes_back_to_bare_array() {
+        let spec = CommandSpec::new(vec!["node".into(), "seed.js".into()]);
+        let json = serde_json::to_string(&spec).unwrap();
+        assert_eq!(json, r#"["node","seed.js"]"#);
+    }
+
+    #[test]
+    fn service_pinned_uses_struct_shape_and_roundtrips() {
+        let spec = CommandSpec {
+            argv: vec!["node".into(), "create-invite.cjs".into()],
+            service: Some("server".into()),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert_eq!(
+            json,
+            r#"{"argv":["node","create-invite.cjs"],"service":"server"}"#
+        );
+        let back: CommandSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn struct_shape_without_service_key_deserializes_to_none() {
+        let spec: CommandSpec =
+            serde_json::from_str(r#"{"argv":["node","x.js"]}"#).unwrap();
+        assert_eq!(spec.service, None);
+        assert_eq!(spec.argv, vec!["node".to_string(), "x.js".into()]);
+    }
+
+    #[test]
+    fn from_vec_has_no_service() {
+        let spec: CommandSpec = vec!["a".to_string()].into();
+        assert_eq!(spec.service, None);
     }
 }
