@@ -125,6 +125,11 @@ async fn create_deployment(
                 "command '{cmd_name}' must have a non-empty argv"
             ))));
         }
+        if spec.service.as_deref().is_some_and(str::is_empty) {
+            return Err(ApiError(DomainError::Invalid(format!(
+                "command '{cmd_name}' service must not be empty"
+            ))));
+        }
     }
     let git_ref = DeployRef::parse(req.git_ref.as_deref().unwrap_or(&config.branch));
 
