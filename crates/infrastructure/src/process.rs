@@ -44,10 +44,37 @@ pub async fn run_streamed(cmd: Command, log: Arc<dyn LogSink>) -> Result<(), Str
     }
 }
 
+/// Strips bare CR and ANSI CSI escape sequences (`ESC '[' ... final byte`)
+/// from a captured subprocess line. Defense in depth: BuildKit and other
+/// interactive-terminal-UI subprocess output uses these to redraw progress
+/// in place; forwarding them through unchanged corrupts the cursor position
+/// of whatever prints the line later. Not a full VT100 parser — CSI final
+/// bytes are technically `@`-`~`, but every real-world use (colors, cursor
+/// movement, line clearing) ends in an ASCII letter, so that's the cutoff.
+pub fn sanitize_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => continue,
+            '\u{1b}' if chars.peek() == Some(&'[') => {
+                chars.next(); // consume '['
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 async fn forward_lines<R: AsyncRead + Unpin>(reader: R, log: Arc<dyn LogSink>) {
     let mut lines = BufReader::new(reader).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        log.line(&line);
+        log.line(&sanitize_line(&line));
     }
 }
 
@@ -81,6 +108,23 @@ mod tests {
             self.0.lock().unwrap().push(line.to_string());
         }
         fn finished(&self, _status: DeploymentStatus) {}
+    }
+
+    #[test]
+    fn sanitize_line_strips_bare_carriage_returns() {
+        assert_eq!(sanitize_line("hello\rworld"), "helloworld");
+    }
+
+    #[test]
+    fn sanitize_line_strips_ansi_csi_sequences() {
+        // BuildKit-style cursor-up + erase-line sequence embedded mid-line.
+        assert_eq!(sanitize_line("\x1b[1A\x1b[2Kstep 4/9"), "step 4/9");
+    }
+
+    #[test]
+    fn sanitize_line_leaves_plain_text_untouched() {
+        let plain = "Sending build context to Docker daemon  2.048kB";
+        assert_eq!(sanitize_line(plain), plain);
     }
 
     #[tokio::test]
