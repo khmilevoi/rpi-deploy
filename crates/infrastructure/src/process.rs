@@ -44,11 +44,14 @@ pub async fn run_streamed(cmd: Command, log: Arc<dyn LogSink>) -> Result<(), Str
     }
 }
 
-/// Strips bare CR and ANSI CSI escape sequences (`ESC '[' ... final byte`)
-/// from a captured subprocess line. Defense in depth: BuildKit and other
-/// interactive-terminal-UI subprocess output uses these to redraw progress
-/// in place; forwarding them through unchanged corrupts the cursor position
-/// of whatever prints the line later. Not a full VT100 parser — CSI final
+/// Strips bare CR and layout-breaking ANSI CSI escape sequences
+/// (`ESC '[' ... final byte`) from a captured subprocess line, while
+/// **preserving colour/style** (SGR, terminator `m`). Defense in depth:
+/// BuildKit and other interactive-terminal-UI subprocess output uses cursor
+/// movement and line/screen erase to redraw progress in place; forwarding
+/// those through unchanged corrupts the cursor position of whatever prints
+/// the line later. Colours don't move the cursor, so they survive — that's
+/// what keeps streamed logs colourful. Not a full VT100 parser — CSI final
 /// bytes are technically `@`-`~`, but every real-world use (colors, cursor
 /// movement, line clearing) ends in an ASCII letter, so that's the cutoff.
 pub fn sanitize_line(line: &str) -> String {
@@ -60,16 +63,20 @@ pub fn sanitize_line(line: &str) -> String {
             '\u{1b}' if chars.peek() == Some(&'[') => {
                 let mut consumed = String::from(c);
                 consumed.push(chars.next().unwrap()); // consume '['
-                let mut terminated = false;
+                let mut terminator = None;
                 for c in chars.by_ref() {
                     consumed.push(c);
                     if c.is_ascii_alphabetic() {
-                        terminated = true;
+                        terminator = Some(c);
                         break;
                     }
                 }
-                if !terminated {
-                    out.push_str(&consumed);
+                // Keep colour/style (SGR, terminator `m`) and any unterminated
+                // sequence untouched; drop layout-breaking control (cursor
+                // movement, line/screen erase, scroll — everything else).
+                match terminator {
+                    Some('m') | None => out.push_str(&consumed),
+                    Some(_) => {}
                 }
             }
             _ => out.push(c),
@@ -145,6 +152,24 @@ mod tests {
     fn sanitize_line_leaves_plain_text_untouched() {
         let plain = "Sending build context to Docker daemon  2.048kB";
         assert_eq!(sanitize_line(plain), plain);
+    }
+
+    #[test]
+    fn sanitize_line_preserves_sgr_color_sequences() {
+        // SGR (Select Graphic Rendition, terminator `m`) carries colours and
+        // does not move the cursor, so it must survive sanitisation.
+        let colored = "\x1b[32mgreen\x1b[0m and \x1b[1;31mbold red\x1b[0m";
+        assert_eq!(sanitize_line(colored), colored);
+    }
+
+    #[test]
+    fn sanitize_line_strips_cursor_control_but_keeps_color() {
+        // Cursor-erase (2K) is layout-breaking → gone; the colour around the
+        // text is harmless → kept.
+        assert_eq!(
+            sanitize_line("\x1b[2K\x1b[31merror\x1b[0m"),
+            "\x1b[31merror\x1b[0m"
+        );
     }
 
     #[tokio::test]
