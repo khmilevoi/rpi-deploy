@@ -43,16 +43,20 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
         );
     }
 
+    let mut pane = output::LogPane::new(format!("deploy '{}'", rpitoml.project.name), 10);
     let status = api
-        .follow_logs(&accepted.deployment_id, |line| println!("{line}"))
+        .follow_logs(&accepted.deployment_id, |line| pane.push_line(line))
         .await?;
-    eprintln!("deploy finished: {status}");
-    if status == "superseded" {
-        eprintln!("note: a newer deploy request replaced this one - not an error");
-    }
-    if status != "success" && status != "superseded" {
-        drop(tunnel);
-        std::process::exit(1);
+    match status.as_str() {
+        "success" => pane.finish_ok(&format!("deploy finished: {status}")),
+        "superseded" => pane.finish_neutral(
+            "deploy finished: superseded (a newer deploy request replaced this one - not an error)",
+        ),
+        _ => {
+            pane.finish_err(&format!("deploy finished: {status}"));
+            drop(tunnel);
+            std::process::exit(1);
+        }
     }
     Ok(())
 }
@@ -410,15 +414,16 @@ pub async fn command(
         return Ok(());
     };
 
+    let mut pane = output::LogPane::new(format!("command '{name}'"), 10);
     let code = api
-        .run_command(&project_name, &name, &args, |line| println!("{line}"))
+        .run_command(&project_name, &name, &args, |line| pane.push_line(line))
         .await?;
     if code != 0 {
-        eprintln!("command '{name}' exited with code {code}");
+        pane.finish_err(&format!("command '{name}' exited with code {code}"));
         drop(tunnel);
         std::process::exit(code);
     }
-    eprintln!("command '{name}' finished (exit 0)");
+    pane.finish_ok(&format!("command '{name}' finished (exit 0)"));
     Ok(())
 }
 
