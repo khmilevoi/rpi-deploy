@@ -6,6 +6,9 @@ pub use table::table;
 mod spinner;
 pub use spinner::spinner;
 
+mod logpane;
+pub use logpane::LogPane;
+
 fn no_color_requested() -> bool {
     std::env::var_os("NO_COLOR").is_some()
 }
