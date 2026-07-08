@@ -247,21 +247,35 @@ keep plain `println!(line)`. `rpi gc` doesn't stream at all.
 
 ### `output/logpane.rs`
 
+The pane is drawn as a bordered box matching the tables' rounded-corner
+style, with a caller-supplied label in the top border (e.g. `"deploy
+'myapp'"` or `"command 'migrate'"`) — `LogPane` itself stays content-agnostic
+and just displays whatever label string it's given:
+
+```
+╭─ docker compose build ────────────────────────╮
+│ Step 4/9 : COPY package.json ./                │
+│  ---> Using cache                              │
+│ Step 5/9 : RUN npm ci                          │
+╰─────────────────────────────────────────────────╯
+```
+
 ```rust
 pub struct LogPane {
     term: console::Term,
     interactive: bool,      // detected once at construction
+    label: String,
     max_visible: usize,     // 10, fixed for now — no CLI flag
     visible: std::collections::VecDeque<String>,
     full: Vec<String>,      // entire history, for the failure dump
-    rendered: usize,        // lines currently drawn, for clear_last_lines
+    rendered: usize,        // lines currently drawn (incl. borders), for clear_last_lines
 }
 
 impl LogPane {
-    pub fn new(max_visible: usize) -> Self {
+    pub fn new(label: impl Into<String>, max_visible: usize) -> Self {
         let term = console::Term::stdout();
         let interactive = term.features().is_attended();
-        Self { term, interactive, max_visible, visible: Default::default(), full: Vec::new(), rendered: 0 }
+        Self { term, interactive, label: label.into(), max_visible, visible: Default::default(), full: Vec::new(), rendered: 0 }
     }
 
     pub fn push_line(&mut self, line: &str) {
@@ -274,11 +288,19 @@ impl LogPane {
         if self.visible.len() > self.max_visible {
             self.visible.pop_front();
         }
+        self.redraw();
+    }
+
+    fn redraw(&mut self) {
+        let (_, cols) = self.term.size();
+        let width = (cols as usize).max(20);
         let _ = self.term.clear_last_lines(self.rendered);
+        let _ = self.term.write_line(&top_border(&self.label, width));
         for l in &self.visible {
-            let _ = self.term.write_line(&console::style(l).dim().to_string());
+            let _ = self.term.write_line(&side_line(l, width));
         }
-        self.rendered = self.visible.len();
+        let _ = self.term.write_line(&bottom_border(width));
+        self.rendered = self.visible.len() + 2; // + top and bottom border
     }
 
     pub fn finish_ok(mut self, summary: &str) {
@@ -294,19 +316,32 @@ impl LogPane {
 
     pub fn finish_err(mut self, summary: &str) {
         if self.interactive { let _ = self.term.clear_last_lines(self.rendered); }
-        for l in &self.full { println!("{l}"); } // full history, not just the last N
+        // Plain, unframed scrollback dump — this is a permanent historical
+        // record, not a live widget, and must include everything, not just
+        // the last N lines that happened to still be visible.
+        for l in &self.full { println!("{l}"); }
         output::error(summary);
     }
 }
 ```
 
+`top_border`/`side_line`/`bottom_border` are small box-drawing helpers
+(`╭─ label ───╮` / `│ content │` / `╰───╯`), padding or truncating each
+content line to `width - 4` characters; exact helper signatures are an
+implementation detail for the plan. Label width uses `.chars().count()`
+(project/command names are short and effectively ASCII in practice; exact
+grapheme-width handling is not critical here).
+
 Notes for the implementation plan:
 - `max_visible = 10`, hardcoded, no new CLI flag (matches the answered
   clarifying question).
+- Box width follows `term.size()` (same terminal-width source
+  `comfy-table`'s `Dynamic` arrangement already uses), so the frame matches
+  the table width the user is already used to.
 - Non-TTY fallback (`!interactive`, e.g. output redirected to a file, or no
   real terminal in CI) reverts to exactly today's behavior: full plain
-  streaming, nothing collapsed, nothing hidden.
-- Lines wider than the terminal are truncated for the *live* rendering only
+  streaming, no frame, nothing collapsed, nothing hidden.
+- Lines wider than the box are truncated for the *live* rendering only
   (`truncate_to_width`, using `term.size()`) so `clear_last_lines`'s
   line-count bookkeeping stays accurate even with wrapping-prone long
   docker output; the untruncated line still goes into `full` for the error
@@ -319,7 +354,7 @@ Notes for the implementation plan:
 
 `commands.rs::deploy()`:
 ```rust
-let mut pane = output::LogPane::new(10);
+let mut pane = output::LogPane::new(format!("deploy '{}'", project.name), 10);
 let status = api.follow_logs(&accepted.deployment_id, |line| pane.push_line(&line)).await?;
 match status.as_str() {
     "success" => pane.finish_ok(&format!("deploy finished: {status}")),
@@ -334,7 +369,7 @@ match status.as_str() {
 
 `commands.rs::command()`:
 ```rust
-let mut pane = output::LogPane::new(10);
+let mut pane = output::LogPane::new(format!("command '{name}'"), 10);
 let code = api.run_command(&project_name, &name, &args, |line| pane.push_line(&line)).await?;
 if code != 0 {
     pane.finish_err(&format!("command '{name}' exited with code {code}"));
@@ -377,6 +412,9 @@ when not attached to a terminal), so no extra handling needed here.
   `interactive = false` via a constructor variant used only in tests) —
   assert `push_line` prints immediately and `full` accumulates everything;
   interactive/cursor-control behavior is not unit-testable and is covered by
-  manual verification instead (see plan's verification section).
+  manual verification instead (see plan's verification section). The
+  `top_border`/`side_line`/`bottom_border` helpers are pure string functions
+  and get direct unit tests (correct width, truncation, label placement)
+  without needing a real terminal.
 - Workspace: `cargo fmt --all -- --check`, `cargo clippy --all-targets
   --locked -- -D warnings`, `cargo test --locked` per `CLAUDE.md`.
