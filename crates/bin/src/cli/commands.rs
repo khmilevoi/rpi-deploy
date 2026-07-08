@@ -3,13 +3,13 @@ use std::path::Path;
 
 use base64::Engine as _;
 
-use crate::output;
 use crate::cli::api::ApiClient;
 use crate::cli::config::ConnectOpts;
 use crate::cli::rpitoml::{RpiToml, SecretsSection};
 use crate::cli::ssh::SshExec;
 use crate::cli::tunnel::SshTunnel;
 use crate::duration::parse_duration_secs;
+use crate::output;
 use crate::proto::{DeployRequest, DiagnosticCheckDto};
 
 pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Result<()> {
@@ -23,7 +23,7 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
     let version = api.version().await?;
     eprintln!("agent {} (api {})", version.version, version.api);
     if let Some(warning) = version_mismatch_warning(env!("CARGO_PKG_VERSION"), &version.version) {
-        eprintln!("{warning}");
+        output::warn(warning);
     }
 
     let req = DeployRequest {
@@ -78,7 +78,10 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
             Ok(decision) => eprintln!("deployment {} ({}): {decision}", d.id, d.status),
             Err(err) => {
                 failures += 1;
-                eprintln!("deployment {} ({}): cancel failed: {err}", d.id, d.status);
+                output::error(format!(
+                    "deployment {} ({}): cancel failed: {err}",
+                    d.id, d.status
+                ));
             }
         }
     }
@@ -384,10 +387,10 @@ pub async fn command(
             .map(String::as_str)
             .collect();
         if !undeployed.is_empty() {
-            eprintln!(
-                "note: local rpi.toml declares undeployed command(s): {} - run `rpi deploy`",
+            output::note(format!(
+                "local rpi.toml declares undeployed command(s): {} - run `rpi deploy`",
                 undeployed.join(", ")
-            );
+            ));
         }
         return Ok(());
     };
@@ -439,8 +442,9 @@ pub async fn rm(
         }
     );
     if let Some(hostname) = resp.hostname {
-        eprintln!("note: the DNS record for {hostname} may still exist;");
-        eprintln!("delete it manually: Cloudflare dashboard -> your zone -> DNS -> remove the {hostname} CNAME");
+        output::note(format!(
+            "the DNS record for {hostname} may still exist; delete it manually: Cloudflare dashboard -> your zone -> DNS -> remove the {hostname} CNAME"
+        ));
     }
     Ok(())
 }
@@ -584,11 +588,11 @@ pub async fn agent_status(connect: ConnectOpts) -> anyhow::Result<()> {
             Ok(())
         }
         Err(err) => {
-            eprintln!("agent API unreachable ({err})");
-            eprintln!(
+            output::warn(format!("agent API unreachable ({err})"));
+            output::note(format!(
                 "falling back to: ssh {}@{} systemctl status rpi-agent",
                 profile.user, profile.host
-            );
+            ));
             SshExec { profile: &profile }
                 .run(&["systemctl", "status", "rpi-agent", "--no-pager"])
                 .await
@@ -650,19 +654,19 @@ pub async fn agent_logs(
     match api_attempt.await {
         Ok(()) => Ok(()),
         Err(err) => {
-            eprintln!("agent API unreachable ({err})");
+            output::warn(format!("agent API unreachable ({err})"));
             let since_unix = since
                 .as_deref()
                 .and_then(|s| parse_duration_secs(s).ok())
                 .map(|secs| now - secs as i64);
             let args = journalctl_args(follow, since_unix, tail);
             let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
-            eprintln!(
+            output::note(format!(
                 "falling back to: ssh {}@{} {}",
                 profile.user,
                 profile.host,
                 args.join(" ")
-            );
+            ));
             SshExec { profile: &profile }.run(&args_ref).await
         }
     }
@@ -685,7 +689,7 @@ fn human_duration(secs: u64) -> String {
 fn version_mismatch_warning(cli_version: &str, agent_version: &str) -> Option<String> {
     (cli_version != agent_version).then(|| {
         format!(
-            "warning: CLI v{cli_version} and agent v{agent_version} differ - \
+            "CLI v{cli_version} and agent v{agent_version} differ - \
 rebuild/update the agent on the Pi (`rpi agent update` ships in v0.5)"
         )
     })
