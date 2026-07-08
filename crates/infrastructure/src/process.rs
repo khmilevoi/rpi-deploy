@@ -56,13 +56,20 @@ pub fn sanitize_line(line: &str) -> String {
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\r' => continue,
+            '\r' => out.clear(),
             '\u{1b}' if chars.peek() == Some(&'[') => {
-                chars.next(); // consume '['
+                let mut consumed = String::from(c);
+                consumed.push(chars.next().unwrap()); // consume '['
+                let mut terminated = false;
                 for c in chars.by_ref() {
+                    consumed.push(c);
                     if c.is_ascii_alphabetic() {
+                        terminated = true;
                         break;
                     }
+                }
+                if !terminated {
+                    out.push_str(&consumed);
                 }
             }
             _ => out.push(c),
@@ -111,14 +118,27 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_line_strips_bare_carriage_returns() {
-        assert_eq!(sanitize_line("hello\rworld"), "helloworld");
+    fn sanitize_line_keeps_only_the_segment_after_the_last_carriage_return() {
+        assert_eq!(sanitize_line("hello\rworld"), "world");
+    }
+
+    #[test]
+    fn sanitize_line_handles_repeated_progress_bar_overwrites() {
+        assert_eq!(sanitize_line("10%\r55%\r100%\n"), "100%\n");
     }
 
     #[test]
     fn sanitize_line_strips_ansi_csi_sequences() {
         // BuildKit-style cursor-up + erase-line sequence embedded mid-line.
         assert_eq!(sanitize_line("\x1b[1A\x1b[2Kstep 4/9"), "step 4/9");
+    }
+
+    #[test]
+    fn sanitize_line_preserves_content_when_csi_has_no_terminator() {
+        // A CSI sequence truncated mid-line (e.g. the process was killed, or
+        // the line was split oddly by the reader) must not swallow the rest
+        // of the line — there's no terminator to swallow *up to*.
+        assert_eq!(sanitize_line("\x1b[38;5;2"), "\x1b[38;5;2");
     }
 
     #[test]

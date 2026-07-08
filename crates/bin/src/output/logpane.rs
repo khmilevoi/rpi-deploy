@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn push_line_sanitizes_before_storing() {
         let mut pane = LogPane::new_non_interactive("test", 3);
-        pane.push_line("step 4/9\r\x1b[2K");
+        pane.push_line("\x1b[2K\rstep 4/9");
         assert_eq!(pane.full, vec!["step 4/9"]);
     }
 }
