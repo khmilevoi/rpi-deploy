@@ -1,6 +1,9 @@
 use console::Term;
 
 fn top_border(label: &str, width: usize) -> String {
+    // "╭─ " + " " + "╮" = 5 chars of fixed decoration around the label.
+    let max_label_width = width.saturating_sub(5);
+    let label: String = label.chars().take(max_label_width).collect();
     let prefix = format!("╭─ {label} ");
     let prefix_len = prefix.chars().count();
     let fill = width.saturating_sub(prefix_len + 1); // +1 for the closing ╮
@@ -28,6 +31,7 @@ pub struct LogPane {
     visible: std::collections::VecDeque<String>,
     full: Vec<String>,
     rendered: usize,
+    print_line: Box<dyn Fn(&str)>,
 }
 
 impl LogPane {
@@ -42,6 +46,7 @@ impl LogPane {
             visible: std::collections::VecDeque::new(),
             full: Vec::new(),
             rendered: 0,
+            print_line: Box::new(|l: &str| println!("{l}")),
         }
     }
 
@@ -52,11 +57,24 @@ impl LogPane {
         pane
     }
 
+    #[cfg(test)]
+    fn new_recording(
+        label: impl Into<String>,
+        max_visible: usize,
+        interactive: bool,
+        printed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
+        let mut pane = Self::new(label, max_visible);
+        pane.interactive = interactive;
+        pane.print_line = Box::new(move |l: &str| printed.lock().unwrap().push(l.to_string()));
+        pane
+    }
+
     pub fn push_line(&mut self, line: &str) {
         let clean = sanitize_line(line);
         self.full.push(clean.clone());
         if !self.interactive {
-            println!("{clean}");
+            (self.print_line)(&clean);
             return;
         }
         self.visible.push_back(clean);
@@ -96,12 +114,14 @@ impl LogPane {
     pub fn finish_err(self, summary: &str) {
         if self.interactive {
             let _ = self.term.clear_last_lines(self.rendered);
-        }
-        // Plain, unframed scrollback dump — a permanent historical record,
-        // not a live widget, so it must include everything, not just the
-        // last N lines that happened to still be visible.
-        for l in &self.full {
-            println!("{l}");
+            // Plain, unframed scrollback dump — a permanent historical record,
+            // not a live widget, so it must include everything, not just the
+            // last N lines that happened to still be visible. In
+            // non-interactive mode push_line already streamed every line live,
+            // so dumping again here would duplicate the whole log.
+            for l in &self.full {
+                (self.print_line)(l);
+            }
         }
         crate::output::error(summary);
     }
@@ -136,6 +156,14 @@ mod tests {
     }
 
     #[test]
+    fn top_border_truncates_a_label_wider_than_the_box() {
+        let line = top_border("command 'run-full-integration-suite'", 40);
+        assert_eq!(line.chars().count(), 40, "{line}");
+        assert!(line.starts_with("╭─ "), "{line}");
+        assert!(line.ends_with('╮'), "{line}");
+    }
+
+    #[test]
     fn bottom_border_matches_width() {
         let line = bottom_border(12);
         assert_eq!(line.chars().count(), 12, "{line}");
@@ -160,5 +188,25 @@ mod tests {
         let mut pane = LogPane::new_non_interactive("test", 3);
         pane.push_line("\x1b[2K\rstep 4/9");
         assert_eq!(pane.full, vec!["step 4/9"]);
+    }
+
+    #[test]
+    fn finish_err_does_not_reprint_lines_already_streamed_live() {
+        let printed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut pane = LogPane::new_recording("test", 3, false, printed.clone());
+        pane.push_line("one");
+        pane.push_line("two");
+        pane.finish_err("boom");
+        assert_eq!(*printed.lock().unwrap(), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn finish_err_dumps_full_history_when_interactive() {
+        let printed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut pane = LogPane::new_recording("test", 3, true, printed.clone());
+        pane.push_line("one");
+        pane.push_line("two");
+        pane.finish_err("boom");
+        assert_eq!(*printed.lock().unwrap(), vec!["one", "two"]);
     }
 }
