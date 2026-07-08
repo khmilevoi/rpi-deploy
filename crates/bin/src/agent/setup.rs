@@ -1,6 +1,6 @@
 use super::self_install::{self, SelfInstallAction};
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// All OS effects setup needs, behind a trait so logic is testable off-Linux.
 #[async_trait]
@@ -550,6 +550,28 @@ async fn run_with(sys: &dyn Sys, opts: &SetupOpts) -> anyhow::Result<SetupReport
     Ok(report)
 }
 
+/// When self-install already believes the running exe is the canonical file
+/// (the common case: `sudo` resolves `rpi` to /usr/local/bin/rpi directly,
+/// bypassing any npm/nvm shim on the invoking user's own PATH — nvm/volta/fnm
+/// bin dirs are never on root's secure_path), check whether the invoking
+/// login user's own npm has a — possibly newer — build installed instead of
+/// trusting that self-referential "canonical" result. Returns None when npm
+/// is unavailable to that user or `rpi-deploy` isn't installed via it.
+async fn resolve_npm_dist_binary(sys: &dyn Sys, login_user: &str) -> Option<PathBuf> {
+    let root = sys
+        .run("sudo", &["-u", login_user, "-i", "--", "npm", "root", "-g"])
+        .await
+        .ok()?;
+    // The agent only ever runs on Linux, and `npm root -g` reports a Linux
+    // path — join with `/` explicitly rather than `Path::join` so the result
+    // is correct regardless of the host platform this is compiled/tested on.
+    let candidate = PathBuf::from(format!(
+        "{}/rpi-deploy/dist/rpi",
+        root.trim().trim_end_matches('/')
+    ));
+    sys.exists(&candidate).then_some(candidate)
+}
+
 /// CLI entrypoint: resolve the login user (--user or $SUDO_USER), install the
 /// running binary to /usr/local/bin/rpi (npm installs live under node_modules,
 /// but the systemd unit expects the canonical path), run setup, and restart
@@ -572,9 +594,27 @@ pub async fn run_cmd(
     };
 
     let current = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
-    let action =
+    let mut action =
         self_install::ensure_installed(&current, Path::new(self_install::AGENT_BIN_PATH), dry_run)
             .map_err(|e| anyhow::anyhow!("self-install {}: {e}", self_install::AGENT_BIN_PATH))?;
+    let mut installed_from = current.clone();
+
+    if action == SelfInstallAction::AlreadyCanonical {
+        if let Some(candidate) = resolve_npm_dist_binary(&HostSys, &opts.login_user).await {
+            if candidate != current {
+                action = self_install::ensure_installed(
+                    &candidate,
+                    Path::new(self_install::AGENT_BIN_PATH),
+                    dry_run,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!("self-install {}: {e}", self_install::AGENT_BIN_PATH)
+                })?;
+                installed_from = candidate;
+            }
+        }
+    }
+
     match &action {
         SelfInstallAction::AlreadyCanonical => {
             println!(
@@ -597,7 +637,7 @@ pub async fn run_cmd(
                     "installed"
                 },
                 self_install::AGENT_BIN_PATH,
-                current.display(),
+                installed_from.display(),
             );
         }
     }
@@ -1428,5 +1468,47 @@ mod tests {
             .insert(FakeSys::key("systemctl", &["restart", "rpi-agent"]));
         let note = restart_agent_if_active(&sys).await;
         assert!(note.unwrap().starts_with("warning:"));
+    }
+
+    #[tokio::test]
+    async fn resolve_npm_dist_binary_finds_login_users_npm_install() {
+        let mut sys = FakeSys::default();
+        sys.ok.insert(
+            FakeSys::key("sudo", &["-u", "piuser", "-i", "--", "npm", "root", "-g"]),
+            "/home/piuser/.nvm/versions/node/v24.18.0/lib/node_modules".into(),
+        );
+        sys.paths.insert(
+            "/home/piuser/.nvm/versions/node/v24.18.0/lib/node_modules/rpi-deploy/dist/rpi".into(),
+        );
+        let found = resolve_npm_dist_binary(&sys, "piuser").await;
+        assert_eq!(
+            found,
+            Some(PathBuf::from(
+                "/home/piuser/.nvm/versions/node/v24.18.0/lib/node_modules/rpi-deploy/dist/rpi"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_npm_dist_binary_none_when_npm_unavailable() {
+        let mut sys = FakeSys::default();
+        sys.err.insert(FakeSys::key(
+            "sudo",
+            &["-u", "piuser", "-i", "--", "npm", "root", "-g"],
+        ));
+        let found = resolve_npm_dist_binary(&sys, "piuser").await;
+        assert_eq!(found, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_npm_dist_binary_none_when_package_not_installed() {
+        let mut sys = FakeSys::default();
+        sys.ok.insert(
+            FakeSys::key("sudo", &["-u", "piuser", "-i", "--", "npm", "root", "-g"]),
+            "/home/piuser/.nvm/versions/node/v24.18.0/lib/node_modules".into(),
+        );
+        // no paths inserted: rpi-deploy/dist/rpi does not exist for this user
+        let found = resolve_npm_dist_binary(&sys, "piuser").await;
+        assert_eq!(found, None);
     }
 }
