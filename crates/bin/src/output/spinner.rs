@@ -1,7 +1,7 @@
 pub fn spinner(msg: impl Into<String>) -> indicatif::ProgressBar {
     let pb = indicatif::ProgressBar::new_spinner();
     pb.set_style(
-        indicatif::ProgressStyle::with_template("{spinner} {msg}")
+        indicatif::ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .expect("static spinner template is valid"),
     );
     pb.set_message(msg.into());
