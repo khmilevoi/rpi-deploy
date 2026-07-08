@@ -39,7 +39,12 @@ check (versions+tests) → build (3 archives named `rpi-vX.Y.Z-<triple>.*`) → 
 rtk gh run list --workflow release --limit 1   # 4 jobs green
 gh release view vX.Y.Z                         # 3 archives + SHA256SUMS
 npm view rpi-deploy version                    # X.Y.Z
-npx -y rpi-deploy@X.Y.Z --version              # must log "downloading prebuilt binary", not build from source
+```
+
+The `npx rpi-deploy@X.Y.Z --version` check must run in a throwaway Docker container, never directly on the dev machine — a local machine can have a global `rpi-deploy` install or npx cache that shadows the version resolution and silently passes/fails against stale state instead of the real published package:
+
+```
+docker run --rm node:20-slim npx -y rpi-deploy@X.Y.Z --version   # must print rpi X.Y.Z, and install must be fast (prebuilt binary), not a multi-minute cargo build
 ```
 
 ## If the release workflow fails after the tag
