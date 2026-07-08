@@ -269,9 +269,9 @@ pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut table = output::table();
-    table.set_header(vec![
+    table.set_header(output::header([
         "NAME", "BRANCH", "HOSTNAME", "PORT", "EXPOSE", "SERVICES",
-    ]);
+    ]));
     for p in projects {
         let services = if p.services.is_empty() {
             "-".to_string()
@@ -282,14 +282,20 @@ pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let services_sem = output::services_sem(
+            &p.services
+                .iter()
+                .map(|s| s.state.as_str())
+                .collect::<Vec<_>>(),
+        );
         let expose = expose_cell(&p.expose, p.lan_ip.as_deref(), p.host_port);
         table.add_row(vec![
-            p.name,
-            p.branch,
-            p.hostname.unwrap_or_else(|| "-".into()),
-            p.host_port.to_string(),
-            expose,
-            services,
+            output::cell(p.name),
+            output::cell(p.branch),
+            output::cell(p.hostname.unwrap_or_else(|| "-".into())),
+            output::cell(p.host_port.to_string()),
+            output::cell(expose),
+            output::cell_sem(services, services_sem),
         ]);
     }
     println!("{table}");
@@ -326,29 +332,54 @@ pub async fn stats(
         return Ok(());
     }
     let mut host_table = output::table();
-    host_table.set_header(vec!["CPU", "MEM", "DISK", "UPTIME"]);
+    host_table.set_header(output::header(["CPU", "MEM", "DISK", "UPTIME"]));
+    let host_mem_pct = if resp.host.mem_total_bytes > 0 {
+        resp.host.mem_used_bytes as f64 / resp.host.mem_total_bytes as f64 * 100.0
+    } else {
+        0.0
+    };
     host_table.add_row(vec![
-        format!("{:.1}%", resp.host.cpu_percent),
-        format!(
-            "{}/{} bytes",
-            resp.host.mem_used_bytes, resp.host.mem_total_bytes
+        output::cell_sem(
+            format!("{:.1}%", resp.host.cpu_percent),
+            output::usage_sem(resp.host.cpu_percent),
         ),
-        format!("{}%", resp.host.disk_used_percent),
-        human_duration(resp.host.uptime_secs),
+        output::cell_sem(
+            format!(
+                "{}/{} bytes",
+                resp.host.mem_used_bytes, resp.host.mem_total_bytes
+            ),
+            output::usage_sem(host_mem_pct),
+        ),
+        output::cell_sem(
+            format!("{}%", resp.host.disk_used_percent),
+            output::usage_sem(resp.host.disk_used_percent as f64),
+        ),
+        output::cell(human_duration(resp.host.uptime_secs)),
     ]);
     println!("{host_table}");
 
     if !resp.projects.is_empty() {
         let mut services_table = output::table();
-        services_table.set_header(vec!["PROJECT", "SERVICE", "CPU", "MEM"]);
+        services_table.set_header(output::header(["PROJECT", "SERVICE", "CPU", "MEM"]));
         for p in resp.projects {
             let project_name = p.project.clone();
             for s in p.services {
+                let mem_pct = if s.mem_limit_bytes > 0 {
+                    s.mem_used_bytes as f64 / s.mem_limit_bytes as f64 * 100.0
+                } else {
+                    0.0
+                };
                 services_table.add_row(vec![
-                    project_name.clone(),
-                    s.service,
-                    format!("{:.1}%", s.cpu_percent),
-                    format!("{}/{} bytes", s.mem_used_bytes, s.mem_limit_bytes),
+                    output::cell(project_name.clone()),
+                    output::cell(s.service),
+                    output::cell_sem(
+                        format!("{:.1}%", s.cpu_percent),
+                        output::usage_sem(s.cpu_percent),
+                    ),
+                    output::cell_sem(
+                        format!("{}/{} bytes", s.mem_used_bytes, s.mem_limit_bytes),
+                        output::usage_sem(mem_pct),
+                    ),
                 ]);
             }
         }
@@ -484,7 +515,7 @@ pub async fn status(json: bool, connect: ConnectOpts) -> anyhow::Result<()> {
 
 fn print_agent_status(resp: &crate::proto::AgentOverviewDto) {
     let mut table = output::table();
-    table.set_header(vec!["FIELD", "VALUE"]);
+    table.set_header(output::header(["FIELD", "VALUE"]));
     table.add_row(vec![
         "agent".to_string(),
         format!("v{} (cli v{})", resp.version, env!("CARGO_PKG_VERSION")),

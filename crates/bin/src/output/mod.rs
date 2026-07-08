@@ -1,7 +1,7 @@
 use console::{Emoji, Style};
 
 mod table;
-pub use table::table;
+pub use table::{cell, cell_sem, header, table};
 
 mod spinner;
 pub use spinner::spinner;
@@ -38,9 +38,6 @@ pub enum Sem {
     Warn,
     Muted,
     Accent,
-    // Not constructed yet: reserved for the log-pane frame/table/spinner
-    // consumers added in later tasks of this plan.
-    #[allow(dead_code)]
     Neutral,
 }
 
@@ -102,6 +99,49 @@ pub fn styled_err(text: &str) -> String {
     console_style(Sem::Error).bold().apply_to(text).to_string()
 }
 
+/// Container state (+ optional health) -> semantic role.
+/// running/healthy = success; restarting/paused/created or a non-healthy
+/// healthcheck = warn; everything else (exited, dead, unknown) = error.
+pub fn status_sem(state: &str, health: Option<&str>) -> Sem {
+    if matches!(health, Some("unhealthy") | Some("starting")) {
+        return Sem::Warn;
+    }
+    match state {
+        "running" => Sem::Success,
+        "restarting" | "created" | "paused" => Sem::Warn,
+        _ => Sem::Error,
+    }
+}
+
+/// Resource-usage percentage -> semantic role: >=90 error, >=70 warn, else none.
+pub fn usage_sem(percent: f64) -> Sem {
+    if percent >= 90.0 {
+        Sem::Error
+    } else if percent >= 70.0 {
+        Sem::Warn
+    } else {
+        Sem::Neutral
+    }
+}
+
+/// Aggregate of a project's service states -> the worst role among them
+/// (Error worse than Warn worse than Success); empty = Neutral.
+pub fn services_sem(states: &[&str]) -> Sem {
+    fn rank(sem: Sem) -> u8 {
+        match sem {
+            Sem::Error => 3,
+            Sem::Warn => 2,
+            Sem::Success => 1,
+            _ => 0,
+        }
+    }
+    states
+        .iter()
+        .map(|s| status_sem(s, None))
+        .max_by_key(|s| rank(*s))
+        .unwrap_or(Sem::Neutral)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +174,29 @@ mod tests {
     #[test]
     fn console_style_neutral_is_a_no_op() {
         assert_eq!(console_style(Sem::Neutral).apply_to("x").to_string(), "x");
+    }
+
+    #[test]
+    fn usage_sem_thresholds() {
+        assert_eq!(usage_sem(10.0), Sem::Neutral);
+        assert_eq!(usage_sem(70.0), Sem::Warn);
+        assert_eq!(usage_sem(89.9), Sem::Warn);
+        assert_eq!(usage_sem(90.0), Sem::Error);
+    }
+
+    #[test]
+    fn status_sem_maps_states_and_health() {
+        assert_eq!(status_sem("running", None), Sem::Success);
+        assert_eq!(status_sem("running", Some("unhealthy")), Sem::Warn);
+        assert_eq!(status_sem("restarting", None), Sem::Warn);
+        assert_eq!(status_sem("exited", None), Sem::Error);
+    }
+
+    #[test]
+    fn services_sem_takes_the_worst_state() {
+        assert_eq!(services_sem(&["running", "running"]), Sem::Success);
+        assert_eq!(services_sem(&["running", "restarting"]), Sem::Warn);
+        assert_eq!(services_sem(&["running", "exited"]), Sem::Error);
+        assert_eq!(services_sem(&[]), Sem::Neutral);
     }
 }
