@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk git *)",
+      "Bash(rtk cargo *)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/claude-stop-check.sh",
+            "shell": "bash",
+            "timeout": 480,
+            "statusMessage": "Running cargo fmt/clippy/test gate before finishing..."
+          }
+        ]
+      }
+    ]
+  }
+}
