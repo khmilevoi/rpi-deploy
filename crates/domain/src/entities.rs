@@ -143,7 +143,6 @@ impl std::fmt::Display for ExposeMode {
     }
 }
 
-
 /// One deployed `[commands]` entry: the declared argv plus an optional compose
 /// service to exec into. `service = None` means the project's ingress service
 /// (ProjectConfig.service).
@@ -643,7 +642,10 @@ mod command_spec_tests {
     #[test]
     fn legacy_array_json_deserializes_to_no_service() {
         let spec: CommandSpec = serde_json::from_str(r#"["node","seed.js"]"#).unwrap();
-        assert_eq!(spec, CommandSpec::new(vec!["node".into(), "seed.js".into()]));
+        assert_eq!(
+            spec,
+            CommandSpec::new(vec!["node".into(), "seed.js".into()])
+        );
         assert_eq!(spec.service, None);
     }
 
@@ -671,8 +673,7 @@ mod command_spec_tests {
 
     #[test]
     fn struct_shape_without_service_key_deserializes_to_none() {
-        let spec: CommandSpec =
-            serde_json::from_str(r#"{"argv":["node","x.js"]}"#).unwrap();
+        let spec: CommandSpec = serde_json::from_str(r#"{"argv":["node","x.js"]}"#).unwrap();
         assert_eq!(spec.service, None);
         assert_eq!(spec.argv, vec!["node".to_string(), "x.js".into()]);
     }

@@ -556,7 +556,10 @@ files = ["certs/server.pem"]
         );
         let config = RpiToml::parse(&toml).unwrap().to_project_config();
         let invite = config.commands.get("create-invite").unwrap();
-        assert_eq!(invite.argv, vec!["node".to_string(), "create-invite.cjs".into()]);
+        assert_eq!(
+            invite.argv,
+            vec!["node".to_string(), "create-invite.cjs".into()]
+        );
         assert_eq!(invite.service.as_deref(), Some("server"));
         let seed = config.commands.get("seed").unwrap();
         assert_eq!(seed.argv, vec!["node".to_string(), "seed.js".into()]);
