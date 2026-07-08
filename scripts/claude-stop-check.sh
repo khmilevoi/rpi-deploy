@@ -4,6 +4,18 @@
 # the failing command's output when a check fails.
 set -uo pipefail
 
+# Skip the (expensive) CI-parity gate entirely when no Rust sources changed.
+# Text-only turns and doc/config-only edits don't need fmt/clippy/test, and the
+# PostToolUse `cargo check` hook already gives fast feedback while editing. If
+# git is unavailable we fall through and run the gate (fail-safe).
+if command -v git >/dev/null 2>&1; then
+  rs_changed=$(git status --porcelain --untracked-files=all 2>/dev/null | grep -E '\.rs"?$' || true)
+  if [ -z "$rs_changed" ]; then
+    printf '{}'
+    exit 0
+  fi
+fi
+
 output=""
 failed=""
 

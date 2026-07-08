@@ -6,6 +6,20 @@
     ]
   },
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/claude-rust-check.sh",
+            "shell": "bash",
+            "timeout": 180,
+            "statusMessage": "cargo check (Rust edit)..."
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
