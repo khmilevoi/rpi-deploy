@@ -220,13 +220,13 @@ pub async fn secrets_ls(connect: ConnectOpts) -> anyhow::Result<()> {
         return Ok(());
     }
     if !resp.keys.is_empty() {
-        println!("env keys:");
+        output::heading("env keys:");
         for key in &resp.keys {
             println!("  {key}");
         }
     }
     if !resp.files.is_empty() {
-        println!("files:");
+        output::heading("files:");
         for file in &resp.files {
             println!("  {file}");
         }
