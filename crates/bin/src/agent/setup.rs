@@ -139,22 +139,22 @@ pub struct SetupReport {
 impl SetupReport {
     pub fn print(&self) {
         for c in &self.created {
-            println!("created: {c}");
+            crate::output::success(format!("created: {c}"));
         }
         for r in &self.repaired {
-            println!("repaired: {r}");
+            crate::output::success(format!("repaired: {r}"));
         }
         for s in &self.skipped {
-            println!("ok (already present): {s}");
+            crate::output::success(format!("ok (already present): {s}"));
         }
         for w in &self.warnings {
-            println!("warning: {w}");
+            crate::output::warn(w);
         }
         for e in &self.errors {
-            println!("error: {e}");
+            crate::output::error(e);
         }
         if self.repaired.iter().any(|r| r.contains("/var/log/rpi")) {
-            println!("note: run `sudo systemctl restart rpi-agent` to activate file logs");
+            crate::output::note("run `sudo systemctl restart rpi-agent` to activate file logs");
         }
     }
 }

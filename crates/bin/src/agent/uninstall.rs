@@ -79,19 +79,19 @@ pub async fn run_cmd(purge: bool, yes: bool) -> anyhow::Result<()> {
     }
     let report = uninstall(&HostSys, &UninstallOpts { purge }).await;
     for r in &report.removed {
-        println!("removed: {r}");
+        crate::output::success(format!("removed: {r}"));
     }
     for k in &report.kept {
-        println!("kept: {k}");
+        crate::output::note(format!("kept: {k}"));
     }
     for w in &report.warnings {
-        println!("warning: {w}");
+        crate::output::warn(w);
     }
     for e in &report.errors {
-        println!("error: {e}");
+        crate::output::error(e);
     }
     if !report.kept.is_empty() {
-        println!("note: data kept; re-run with `--purge` to delete it");
+        crate::output::note("data kept; re-run with `--purge` to delete it");
     }
     if !report.errors.is_empty() {
         anyhow::bail!(
