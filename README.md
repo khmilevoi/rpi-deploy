@@ -593,7 +593,17 @@ backup = "sh -c 'pg_dump mydb | gzip > /data/backup.gz'"
 
 - Value: string (split with shell-word rules — quotes work, no variables/pipes/redirects) or an explicit argv array. Need a shell? Spell it out: `sh -c '...'`.
 - Names must match `[a-z0-9][a-z0-9_-]*`.
-- Commands are registered on the agent **at deploy time** and run in the `ingress.service` container via `docker compose exec -T`. The agent only executes deployed commands — there is no generic remote exec.
+- Commands are registered on the agent **at deploy time** and run in the `ingress.service` container by default via `docker compose exec -T`. To run a command in a different compose service, use the table form:
+
+```toml
+[commands.create-invite]
+run     = "node dist/scripts/create-invite.cjs"   # string or array, same rules as the shorthand
+service = "server"                                 # optional; omitted => ingress service
+```
+
+`rpi command` (list mode, no name given) shows the target service for commands that pin one.
+
+- The agent only executes deployed commands — there is no generic remote exec.
 - Timeout: 10 minutes by default; override with `command = "30m"` in `[timeouts]`.
 
 ## Docker Compose Requirements

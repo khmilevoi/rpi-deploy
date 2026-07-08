@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::duration::parse_duration_secs;
-use pi_domain::entities::{ExposeMode, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides};
+use pi_domain::entities::{
+    CommandSpec, ExposeMode, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -106,10 +108,24 @@ pub struct SecretsSection {
     pub files: Vec<String>,
 }
 
-/// [commands] value: a shell-word string or an explicit argv array (§spec).
+/// [commands] value: a shell-word string, an explicit argv array, or a table
+/// with `run` (string/array) plus an optional `service` (§spec).
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum CommandValue {
+    Line(String),
+    Argv(Vec<String>),
+    Table {
+        run: CommandRun,
+        #[serde(default)]
+        service: Option<String>,
+    },
+}
+
+/// The `run` of a table-form command: same two shapes as the shorthand value.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum CommandRun {
     Line(String),
     Argv(Vec<String>),
 }
@@ -120,19 +136,47 @@ fn is_valid_command_name(s: &str) -> bool {
         && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
 }
 
-/// String form is split client-side with shell-word rules (quotes only —
-/// no variables, pipes or redirects; a shell must be spelled out as
-/// `sh -c '...'`). Array form is taken verbatim.
-fn command_argv(name: &str, value: &CommandValue) -> anyhow::Result<Vec<String>> {
-    let argv = match value {
-        CommandValue::Argv(items) => items.clone(),
-        CommandValue::Line(line) => shlex::split(line)
+fn argv_from_run(name: &str, line_or_argv: RunShape) -> anyhow::Result<Vec<String>> {
+    let argv = match line_or_argv {
+        RunShape::Argv(items) => items,
+        RunShape::Line(line) => shlex::split(&line)
             .ok_or_else(|| anyhow::anyhow!("rpi.toml [commands].{name}: unbalanced quote"))?,
     };
     if argv.is_empty() || argv.iter().any(|a| a.is_empty()) {
         anyhow::bail!("rpi.toml [commands].{name}: command must not be empty");
     }
     Ok(argv)
+}
+
+/// Internal shape passed to `argv_from_run` from either the shorthand value or a
+/// table's `run`.
+enum RunShape {
+    Line(String),
+    Argv(Vec<String>),
+}
+
+/// String form is split client-side with shell-word rules (quotes only —
+/// no variables, pipes or redirects; a shell must be spelled out as
+/// `sh -c '...'`). Array form is taken verbatim.
+fn command_spec(name: &str, value: &CommandValue) -> anyhow::Result<CommandSpec> {
+    let (run, service) = match value {
+        CommandValue::Line(line) => (RunShape::Line(line.clone()), None),
+        CommandValue::Argv(items) => (RunShape::Argv(items.clone()), None),
+        CommandValue::Table { run, service } => {
+            let run = match run {
+                CommandRun::Line(line) => RunShape::Line(line.clone()),
+                CommandRun::Argv(items) => RunShape::Argv(items.clone()),
+            };
+            (run, service.clone())
+        }
+    };
+    if let Some(service) = &service {
+        if service.is_empty() {
+            anyhow::bail!("rpi.toml [commands].{name}: service must not be empty");
+        }
+    }
+    let argv = argv_from_run(name, run)?;
+    Ok(CommandSpec { argv, service })
 }
 
 fn validate_expect(expect: &str) -> Result<(), String> {
@@ -210,7 +254,7 @@ impl RpiToml {
                         "rpi.toml [commands]: command name '{name}' must match ^[a-z0-9][a-z0-9_-]*$"
                     );
                 }
-                command_argv(name, value)?;
+                command_spec(name, value)?;
             }
         }
         Ok(parsed)
@@ -274,9 +318,9 @@ impl RpiToml {
                 .map(|map| {
                     map.iter()
                         .map(|(name, value)| {
-                            let argv =
-                                command_argv(name, value).expect("validated in RpiToml::parse");
-                            (name.clone(), argv)
+                            let spec =
+                                command_spec(name, value).expect("validated in RpiToml::parse");
+                            (name.clone(), spec)
                         })
                         .collect()
                 })
@@ -477,16 +521,16 @@ files = ["certs/server.pem"]
         );
         let config = RpiToml::parse(&toml).unwrap().to_project_config();
         assert_eq!(
-            config.commands.get("create-invite").unwrap(),
-            &vec![
+            config.commands.get("create-invite").unwrap().argv,
+            vec![
                 "node".to_string(),
                 "scripts/create-invite.js".into(),
                 "--admin".into()
             ]
         );
         assert_eq!(
-            config.commands.get("migrate").unwrap(),
-            &vec![
+            config.commands.get("migrate").unwrap().argv,
+            vec![
                 "npx".to_string(),
                 "prisma".into(),
                 "migrate".into(),
@@ -494,14 +538,52 @@ files = ["certs/server.pem"]
             ]
         );
         assert_eq!(
-            config.commands.get("backup").unwrap(),
-            &vec![
+            config.commands.get("backup").unwrap().argv,
+            vec![
                 "sh".to_string(),
                 "-c".into(),
                 "pg_dump mydb | gzip > /b.gz".into()
             ],
             "quoted segment must stay one argv item"
         );
+    }
+
+    #[test]
+    fn commands_table_form_pins_service() {
+        let toml = SAMPLE.replace(
+            "[healthcheck]",
+            "[commands.create-invite]\nrun = \"node create-invite.cjs\"\nservice = \"server\"\n\n[commands.seed]\nrun = [\"node\", \"seed.js\"]\n\n[healthcheck]",
+        );
+        let config = RpiToml::parse(&toml).unwrap().to_project_config();
+        let invite = config.commands.get("create-invite").unwrap();
+        assert_eq!(
+            invite.argv,
+            vec!["node".to_string(), "create-invite.cjs".into()]
+        );
+        assert_eq!(invite.service.as_deref(), Some("server"));
+        let seed = config.commands.get("seed").unwrap();
+        assert_eq!(seed.argv, vec!["node".to_string(), "seed.js".into()]);
+        assert_eq!(seed.service, None, "table form without service => None");
+    }
+
+    #[test]
+    fn shorthand_forms_have_no_service() {
+        let toml = SAMPLE.replace(
+            "[healthcheck]",
+            "[commands]\nmigrate = \"npx prisma migrate deploy\"\n\n[healthcheck]",
+        );
+        let config = RpiToml::parse(&toml).unwrap().to_project_config();
+        assert_eq!(config.commands.get("migrate").unwrap().service, None);
+    }
+
+    #[test]
+    fn empty_service_string_is_rejected() {
+        let toml = SAMPLE.replace(
+            "[healthcheck]",
+            "[commands.x]\nrun = \"node x.js\"\nservice = \"\"\n\n[healthcheck]",
+        );
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("service"), "got: {err}");
     }
 
     #[test]

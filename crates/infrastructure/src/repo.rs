@@ -312,9 +312,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = repo(&dir, 8000, 8999);
         let mut config = cfg("a");
-        config
-            .commands
-            .insert("migrate".into(), vec!["npx".into(), "prisma".into()]);
+        config.commands.insert(
+            "migrate".into(),
+            pi_domain::entities::CommandSpec::new(vec!["npx".into(), "prisma".into()]),
+        );
         config.command_timeout_secs = Some(1800);
 
         repo.upsert(&config).await.unwrap();
@@ -324,15 +325,34 @@ mod tests {
 
         // update path: replacing commands persists the new set
         config.commands.clear();
-        config
-            .commands
-            .insert("seed".into(), vec!["node".into(), "seed.js".into()]);
+        config.commands.insert(
+            "seed".into(),
+            pi_domain::entities::CommandSpec::new(vec!["node".into(), "seed.js".into()]),
+        );
         config.command_timeout_secs = None;
         repo.upsert(&config).await.unwrap();
         let loaded = repo.get("a").await.unwrap().unwrap();
         assert_eq!(loaded.config.commands.len(), 1);
         assert!(loaded.config.commands.contains_key("seed"));
         assert_eq!(loaded.config.command_timeout_secs, None);
+    }
+
+    #[tokio::test]
+    async fn loads_legacy_array_shaped_commands_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo(&dir, 8000, 8999);
+        let mut config = cfg("legacy");
+        config.commands.insert(
+            "migrate".into(),
+            pi_domain::entities::CommandSpec::new(vec!["npx".into()]),
+        );
+        repo.upsert(&config).await.unwrap();
+        let loaded = repo.get("legacy").await.unwrap().unwrap();
+        assert_eq!(
+            loaded.config.commands.get("migrate").unwrap().service,
+            None,
+            "service-less command decodes with no service"
+        );
     }
 
     #[tokio::test]

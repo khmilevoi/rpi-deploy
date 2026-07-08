@@ -10,3 +10,7 @@ mocks = ["dep:mockall"]
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 mockall = { workspace = true, optional = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
