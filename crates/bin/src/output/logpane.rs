@@ -1,16 +1,48 @@
 use console::Term;
 
-fn top_border(label: &str, width: usize) -> String {
-    // "╭─ " + " " + "╮" = 5 chars of fixed decoration around the label.
-    let max_label_width = width.saturating_sub(5);
-    let label: String = label.chars().take(max_label_width).collect();
-    let prefix = format!("╭─ {label} ");
-    let prefix_len = prefix.chars().count();
-    let fill = width.saturating_sub(prefix_len + 1); // +1 for the closing ╮
-    format!("{prefix}{}╮", "─".repeat(fill))
+use console::Style;
+
+use super::{console_style, Sem};
+
+/// Colours for one rendered frame: the box glyphs and the label can differ
+/// (grey box + cyan label while streaming; all-red on failure).
+struct FrameStyle {
+    border: Style,
+    label: Style,
 }
 
-fn side_line(content: &str, width: usize) -> String {
+/// Neutral streaming frame: bright-black (grey) border, cyan label.
+fn neutral_frame() -> FrameStyle {
+    FrameStyle {
+        border: Style::new().black().bright(),
+        label: console_style(Sem::Accent),
+    }
+}
+
+/// Failure frame: border and label both red.
+fn err_frame() -> FrameStyle {
+    let red = console_style(Sem::Error);
+    FrameStyle {
+        border: red.clone(),
+        label: red,
+    }
+}
+
+fn top_border(label: &str, width: usize, style: &FrameStyle) -> String {
+    // "╭─ " + label + " " + fill + "╮" — visible width == `width`.
+    let max_label_width = width.saturating_sub(5);
+    let label: String = label.chars().take(max_label_width).collect();
+    let prefix_len = 3 + label.chars().count() + 1; // "╭─ " + label + " "
+    let fill = width.saturating_sub(prefix_len + 1); // +1 for the closing ╮
+    format!(
+        "{}{}{}",
+        style.border.apply_to("╭─ "),
+        style.label.apply_to(&label),
+        style.border.apply_to(format!(" {}╮", "─".repeat(fill))),
+    )
+}
+
+fn side_line(content: &str, width: usize, style: &FrameStyle) -> String {
     // Truncate by *visible* columns: ANSI CSI escape sequences (colours) carry
     // no width, so they pass through without spending the budget. This keeps
     // streamed colour intact while still fitting the box.
@@ -43,12 +75,19 @@ fn side_line(content: &str, width: usize) -> String {
     if had_escape && !truncated.ends_with("\x1b[0m") {
         truncated.push_str("\x1b[0m");
     }
-    let pad = inner_width.saturating_sub(visible);
-    format!("│ {truncated}{} │", " ".repeat(pad))
+    let pad = " ".repeat(inner_width.saturating_sub(visible));
+    format!(
+        "{}{truncated}{pad}{}",
+        style.border.apply_to("│ "),
+        style.border.apply_to(" │"),
+    )
 }
 
-fn bottom_border(width: usize) -> String {
-    format!("╰{}╯", "─".repeat(width.saturating_sub(2)))
+fn bottom_border(width: usize, style: &FrameStyle) -> String {
+    style
+        .border
+        .apply_to(format!("╰{}╯", "─".repeat(width.saturating_sub(2))))
+        .to_string()
 }
 
 /// Builds the whole pane as a single string ready for one atomic write.
@@ -64,13 +103,14 @@ fn render_frame(
     visible: &std::collections::VecDeque<String>,
     width: usize,
     prev_rendered: usize,
+    style: &FrameStyle,
 ) -> String {
     let mut rows = Vec::with_capacity(visible.len() + 2);
-    rows.push(top_border(label, width));
+    rows.push(top_border(label, width, style));
     for l in visible {
-        rows.push(side_line(l, width));
+        rows.push(side_line(l, width, style));
     }
-    rows.push(bottom_border(width));
+    rows.push(bottom_border(width, style));
 
     let mut buf = String::new();
     // Return to the top of the previously drawn block (nothing to return to on
@@ -164,7 +204,13 @@ impl LogPane {
         let width = (cols as usize).max(20);
         // One buffer, one write, one repaint — see `render_frame` for why this
         // is what kills the flicker.
-        let frame = render_frame(&self.label, &self.visible, width, self.rendered);
+        let frame = render_frame(
+            &self.label,
+            &self.visible,
+            width,
+            self.rendered,
+            &neutral_frame(),
+        );
         let _ = self.term.write_str(&frame);
         let _ = self.term.flush();
         self.rendered = self.visible.len() + 2; // + top and bottom border
@@ -187,12 +233,26 @@ impl LogPane {
 
     pub fn finish_err(self, summary: &str) {
         if self.interactive {
-            let _ = self.term.clear_last_lines(self.rendered);
-            // Plain, unframed scrollback dump — a permanent historical record,
-            // not a live widget, so it must include everything, not just the
-            // last N lines that happened to still be visible. In
-            // non-interactive mode push_line already streamed every line live,
-            // so dumping again here would duplicate the whole log.
+            let (_, cols) = self.term.size();
+            let width = (cols as usize).max(20);
+            // Recolour the final frame red in place and leave it on screen as
+            // the "here it stopped" marker (no clear).
+            let frame = render_frame(
+                &self.label,
+                &self.visible,
+                width,
+                self.rendered,
+                &err_frame(),
+            );
+            let _ = self.term.write_str(&frame);
+            let _ = self.term.flush();
+            // Full captured log below the framed tail — the complete record,
+            // since there is no log file. A dim separator marks it as such.
+            (self.print_line)(
+                &console_style(Sem::Muted)
+                    .apply_to("— full log —")
+                    .to_string(),
+            );
             for l in &self.full {
                 (self.print_line)(l);
             }
@@ -207,7 +267,7 @@ mod tests {
 
     #[test]
     fn top_border_wraps_label_and_fills_width() {
-        let line = top_border("build", 20);
+        let line = top_border("build", 20, &neutral_frame());
         assert!(line.starts_with("╭─ build "), "{line}");
         assert!(line.ends_with('╮'), "{line}");
         assert_eq!(line.chars().count(), 20, "{line}");
@@ -215,7 +275,7 @@ mod tests {
 
     #[test]
     fn side_line_pads_short_content_to_full_width() {
-        let line = side_line("hi", 10);
+        let line = side_line("hi", 10, &neutral_frame());
         assert_eq!(line.chars().count(), 10, "{line}");
         assert!(line.starts_with("│ hi"), "{line}");
         assert!(line.ends_with(" │"), "{line}");
@@ -223,7 +283,7 @@ mod tests {
 
     #[test]
     fn side_line_truncates_content_wider_than_the_box() {
-        let line = side_line("this is way too long for the box", 10);
+        let line = side_line("this is way too long for the box", 10, &neutral_frame());
         assert_eq!(line.chars().count(), 10, "{line}");
         assert!(line.starts_with('│'), "{line}");
         assert!(line.ends_with('│'), "{line}");
@@ -235,7 +295,7 @@ mod tests {
         // inner width (10 - 4 = 6), so all of "hello" survives and the line is
         // padded to a visible width of 10. A reset already terminates the
         // colour, so no extra one is appended.
-        let line = side_line("\x1b[31mhello\x1b[0m", 10);
+        let line = side_line("\x1b[31mhello\x1b[0m", 10, &neutral_frame());
         assert_eq!(line, "│ \x1b[31mhello\x1b[0m  │", "{line:?}");
     }
 
@@ -243,13 +303,13 @@ mod tests {
     fn side_line_resets_color_when_truncation_drops_the_reset() {
         // Truncation cuts the line before its own reset; side_line must append
         // one so colour cannot bleed onto the border or following lines.
-        let line = side_line("\x1b[32mthis is way too long\x1b[0m", 10);
+        let line = side_line("\x1b[32mthis is way too long\x1b[0m", 10, &neutral_frame());
         assert_eq!(line, "│ \x1b[32mthis i\x1b[0m │", "{line:?}");
     }
 
     #[test]
     fn top_border_truncates_a_label_wider_than_the_box() {
-        let line = top_border("command 'run-full-integration-suite'", 40);
+        let line = top_border("command 'run-full-integration-suite'", 40, &neutral_frame());
         assert_eq!(line.chars().count(), 40, "{line}");
         assert!(line.starts_with("╭─ "), "{line}");
         assert!(line.ends_with('╮'), "{line}");
@@ -258,7 +318,7 @@ mod tests {
     #[test]
     fn render_frame_first_paint_does_not_move_the_cursor() {
         let visible = std::collections::VecDeque::new();
-        let frame = render_frame("build", &visible, 20, 0);
+        let frame = render_frame("build", &visible, 20, 0, &neutral_frame());
         // Nothing was drawn before, so there is no previous block to return to.
         assert!(
             !frame.starts_with("\x1b["),
@@ -271,7 +331,7 @@ mod tests {
     fn render_frame_overwrites_previous_block_in_place() {
         let mut visible = std::collections::VecDeque::new();
         visible.push_back("hello".to_string());
-        let frame = render_frame("build", &visible, 20, 3);
+        let frame = render_frame("build", &visible, 20, 3, &neutral_frame());
         // Returns to the top of the 3-line previous block instead of clearing
         // it first — the whole update lands as one write, so no blank frame.
         assert!(frame.starts_with("\x1b[3A"), "{frame:?}");
@@ -282,7 +342,7 @@ mod tests {
 
     #[test]
     fn bottom_border_matches_width() {
-        let line = bottom_border(12);
+        let line = bottom_border(12, &neutral_frame());
         assert_eq!(line.chars().count(), 12, "{line}");
         assert!(line.starts_with('╰'), "{line}");
         assert!(line.ends_with('╯'), "{line}");
@@ -324,6 +384,25 @@ mod tests {
         pane.push_line("one");
         pane.push_line("two");
         pane.finish_err("boom");
-        assert_eq!(*printed.lock().unwrap(), vec!["one", "two"]);
+        assert_eq!(*printed.lock().unwrap(), vec!["— full log —", "one", "two"]);
+    }
+
+    #[test]
+    fn borders_are_plain_when_colours_disabled() {
+        // Non-TTY test env => console styling disabled => the styled frame
+        // pieces must be byte-identical to the unstyled box (no ANSI).
+        let fs = neutral_frame();
+        assert!(
+            !top_border("build", 20, &fs).contains('\u{1b}'),
+            "no ANSI in top"
+        );
+        assert!(
+            !bottom_border(12, &fs).contains('\u{1b}'),
+            "no ANSI in border"
+        );
+        assert!(
+            !side_line("hi", 10, &fs).contains('\u{1b}'),
+            "no ANSI in side"
+        );
     }
 }
