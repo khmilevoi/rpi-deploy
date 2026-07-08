@@ -321,22 +321,34 @@ pub async fn stats(
         println!("{}", serde_json::to_string_pretty(&resp)?);
         return Ok(());
     }
-    println!(
-        "host: cpu {:.1}%, mem {}/{} bytes, disk {}%, uptime {}",
-        resp.host.cpu_percent,
-        resp.host.mem_used_bytes,
-        resp.host.mem_total_bytes,
-        resp.host.disk_used_percent,
-        human_duration(resp.host.uptime_secs)
-    );
-    for p in resp.projects {
-        println!("project {}", p.project);
-        for s in p.services {
-            println!(
-                "  {}: cpu {:.1}%, mem {}/{} bytes",
-                s.service, s.cpu_percent, s.mem_used_bytes, s.mem_limit_bytes
-            );
+    let mut host_table = output::table();
+    host_table.set_header(vec!["CPU", "MEM", "DISK", "UPTIME"]);
+    host_table.add_row(vec![
+        format!("{:.1}%", resp.host.cpu_percent),
+        format!(
+            "{}/{} bytes",
+            resp.host.mem_used_bytes, resp.host.mem_total_bytes
+        ),
+        format!("{}%", resp.host.disk_used_percent),
+        human_duration(resp.host.uptime_secs),
+    ]);
+    println!("{host_table}");
+
+    if !resp.projects.is_empty() {
+        let mut services_table = output::table();
+        services_table.set_header(vec!["PROJECT", "SERVICE", "CPU", "MEM"]);
+        for p in resp.projects {
+            let project_name = p.project.clone();
+            for s in p.services {
+                services_table.add_row(vec![
+                    project_name.clone(),
+                    s.service,
+                    format!("{:.1}%", s.cpu_percent),
+                    format!("{}/{} bytes", s.mem_used_bytes, s.mem_limit_bytes),
+                ]);
+            }
         }
+        println!("{services_table}");
     }
     Ok(())
 }
@@ -466,17 +478,23 @@ pub async fn status(json: bool, connect: ConnectOpts) -> anyhow::Result<()> {
 }
 
 fn print_agent_status(resp: &crate::proto::AgentOverviewDto) {
-    println!(
-        "agent v{} (cli v{})",
-        resp.version,
-        env!("CARGO_PKG_VERSION")
-    );
-    println!("uptime: {}", human_duration(resp.uptime_secs));
-    println!("disk: {}% used", resp.disk_used_percent);
-    println!(
-        "projects: {}, active deployments: {}",
-        resp.projects, resp.active_deployments
-    );
+    let mut table = output::table();
+    table.set_header(vec!["FIELD", "VALUE"]);
+    table.add_row(vec![
+        "agent".to_string(),
+        format!("v{} (cli v{})", resp.version, env!("CARGO_PKG_VERSION")),
+    ]);
+    table.add_row(vec!["uptime".to_string(), human_duration(resp.uptime_secs)]);
+    table.add_row(vec![
+        "disk".to_string(),
+        format!("{}% used", resp.disk_used_percent),
+    ]);
+    table.add_row(vec!["projects".to_string(), resp.projects.to_string()]);
+    table.add_row(vec![
+        "active deployments".to_string(),
+        resp.active_deployments.to_string(),
+    ]);
+    println!("{table}");
 }
 
 pub(crate) fn render_doctor(checks: &[DiagnosticCheckDto]) -> (String, bool) {
