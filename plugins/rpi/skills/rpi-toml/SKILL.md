@@ -100,6 +100,14 @@ migrate = ["npx", "prisma", "migrate", "deploy"]
 backup = "sh -c 'pg_dump mydb | gzip > /data/backup.gz'"
 ```
 
+Commands run in the `[ingress].service` container by default. To run a command in a different compose service, use the table form:
+
+```toml
+[commands.create-invite]
+run     = "node dist/scripts/create-invite.cjs"   # string or array, same rules as the shorthand
+service = "server"                                 # optional compose service to exec into; defaults to [ingress].service
+```
+
 ## Authoring Workflow
 
 1. Identify the Compose service name and container port first.
