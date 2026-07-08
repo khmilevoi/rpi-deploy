@@ -101,7 +101,7 @@ pub async fn push_pubkey(profile: &ServerProfile, pubkey: &Path) -> anyhow::Resu
         Err(_) => true,
     };
     if failed {
-        eprintln!("{}", manual_copy_instructions(&pubkey_text, profile));
+        crate::output::error(manual_copy_instructions(&pubkey_text, profile));
         anyhow::bail!(
             "failed to copy public key to {} — see instructions above",
             profile.host

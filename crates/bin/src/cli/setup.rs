@@ -97,13 +97,15 @@ pub async fn run(flags: SetupFlags) -> anyhow::Result<()> {
     }
 
     let path = ClientConfig::save_merged(&name, profile.clone(), make_default)?;
-    println!("saved profile '{name}' to {}", path.display());
+    crate::output::success(format!("saved profile '{name}' to {}", path.display()));
 
     // Connectivity test reuses the existing doctor path against the new profile.
     println!("testing connection...");
     if let Err(e) = ssh.check().await {
-        println!("ssh check failed: {e}");
-        println!("fix SSH access, then run `rpi doctor --server {name}`");
+        crate::output::error(format!("ssh check failed: {e}"));
+        crate::output::note(format!(
+            "fix SSH access, then run `rpi doctor --server {name}`"
+        ));
         return Ok(());
     }
     let connect = ConnectOpts {

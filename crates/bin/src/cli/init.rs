@@ -219,7 +219,7 @@ pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
         backup_existing_rpi_toml(&path)?;
     }
     std::fs::write(&path, &text)?;
-    println!("wrote {}", path.display());
+    crate::output::success(format!("wrote {}", path.display()));
     println!("next: `rpi secrets send` (if you use secrets), then `rpi deploy`");
     Ok(())
 }
