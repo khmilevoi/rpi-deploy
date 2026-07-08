@@ -28,7 +28,7 @@ fn sem_colour(sem: Sem) -> Option<Color> {
         Sem::Error => Some(Color::Red),
         Sem::Warn => Some(Color::Yellow),
         Sem::Accent => Some(Color::Cyan),
-        Sem::Muted | Sem::Neutral => None,
+        Sem::Muted | Sem::Neutral | Sem::Frame => None,
     }
 }
 

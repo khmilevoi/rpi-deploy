@@ -14,7 +14,7 @@ struct FrameStyle {
 /// Neutral streaming frame: bright-black (grey) border, cyan label.
 fn neutral_frame() -> FrameStyle {
     FrameStyle {
-        border: Style::new().black().bright(),
+        border: console_style(Sem::Frame),
         label: console_style(Sem::Accent),
     }
 }

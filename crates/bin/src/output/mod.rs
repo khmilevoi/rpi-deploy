@@ -39,6 +39,7 @@ pub enum Sem {
     Muted,
     Accent,
     Neutral,
+    Frame,
 }
 
 /// Role -> terminal style for `console`-rendered output (messages, pane).
@@ -51,6 +52,7 @@ pub(crate) fn console_style(sem: Sem) -> Style {
         Sem::Accent => s.cyan(),
         Sem::Muted => s.dim(),
         Sem::Neutral => s,
+        Sem::Frame => s.black().bright(),
     }
 }
 
