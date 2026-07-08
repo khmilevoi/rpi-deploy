@@ -264,10 +264,10 @@ pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
         println!("no projects deployed yet");
         return Ok(());
     }
-    println!(
-        "{:<16} {:<10} {:<28} {:<6} {:<28} SERVICES",
-        "NAME", "BRANCH", "HOSTNAME", "PORT", "EXPOSE"
-    );
+    let mut table = output::table();
+    table.set_header(vec![
+        "NAME", "BRANCH", "HOSTNAME", "PORT", "EXPOSE", "SERVICES",
+    ]);
     for p in projects {
         let services = if p.services.is_empty() {
             "-".to_string()
@@ -279,15 +279,16 @@ pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
                 .join(", ")
         };
         let expose = expose_cell(&p.expose, p.lan_ip.as_deref(), p.host_port);
-        println!(
-            "{:<16} {:<10} {:<28} {:<6} {:<28} {services}",
+        table.add_row(vec![
             p.name,
             p.branch,
             p.hostname.unwrap_or_else(|| "-".into()),
-            p.host_port,
-            expose
-        );
+            p.host_port.to_string(),
+            expose,
+            services,
+        ]);
     }
+    println!("{table}");
     Ok(())
 }
 
