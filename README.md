@@ -6,7 +6,7 @@ machine or in CI. The CLI connects to the agent through an SSH tunnel; the
 agent clones the Git repository, builds the Compose stack, and starts the
 containers.
 
-Status: v0.9 (secret files) — everything from v0.1–v0.6 (deploy/secrets/
+Status: v0.11 (colorful console output) — everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
 `npm install -g rpi-deploy` for both roles), v0.7 prebuilt binaries
@@ -14,9 +14,13 @@ ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 every release tag, and `npm install` downloads the matching binary in seconds
 instead of compiling for ~10 minutes; building from source remains the
 fallback everywhere else, see "Build And Install The Binary" below), `[commands]`
-/ `rpi command` for one-off admin commands in the service container, and
+/ `rpi command` for one-off admin commands in the service container,
 `[secrets].files` for delivering arbitrary secret files (certs, keys)
-alongside the env file.
+alongside the env file, v0.10 per-command service override (`[commands]`
+entries can target a different Compose service than the project default),
+and v0.11 colorful console output (colored semantic messages, tables for
+`rpi ls`/`status`/`stats`, spinners, and a bordered scrolling log pane for
+`rpi deploy`/`rpi command` streaming output).
 
 Supported features:
 
