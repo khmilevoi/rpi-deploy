@@ -194,6 +194,11 @@ impl DockerComposeRuntime {
         let mut cmd = Command::new("docker");
         cmd.args(compose_args(&stack.project_name, &file_chain(stack), tail));
         cmd.current_dir(&stack.workdir);
+        // BuildKit's fancy multi-line, cursor-redrawing progress UI corrupts
+        // captured output even when stdout is a pipe, not a TTY — plain mode
+        // emits ordinary newline-terminated lines instead. Applies uniformly
+        // to every subcommand; a no-op for ones that don't build anything.
+        cmd.env("BUILDKIT_PROGRESS", "plain");
         cmd
     }
 }
@@ -363,6 +368,20 @@ mod tests {
         .map(Into::into)
         .collect();
         assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn compose_sets_buildkit_progress_plain() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = stack(dir.path());
+        let runtime = DockerComposeRuntime;
+        let cmd = runtime.compose(&s, &["build"]);
+        let value = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("BUILDKIT_PROGRESS"))
+            .and_then(|(_, v)| v);
+        assert_eq!(value, Some(std::ffi::OsStr::new("plain")));
     }
 
     #[test]
