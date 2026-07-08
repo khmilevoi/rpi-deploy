@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use pi_application::list::ProjectView;
 use pi_application::remove::RemoveReport;
 use pi_domain::entities::{
-    AgentOverview, Deployment, DiagnosticCheck, DiagnosticReport, ExposeMode, HealthcheckConfig,
-    HostStats, ProjectConfig, ProjectStats, ServiceStats, StageTimeoutOverrides, StatsReport,
+    AgentOverview, CommandSpec, Deployment, DiagnosticCheck, DiagnosticReport, ExposeMode,
+    HealthcheckConfig, HostStats, ProjectConfig, ProjectStats, ServiceStats, StageTimeoutOverrides,
+    StatsReport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +46,7 @@ pub struct ProjectDto {
     #[serde(default)]
     pub timeouts: Option<TimeoutsDto>,
     #[serde(default)]
-    pub commands: BTreeMap<String, Vec<String>>,
+    pub commands: BTreeMap<String, CommandSpec>,
 }
 
 impl From<ProjectDto> for ProjectConfig {
@@ -303,7 +304,7 @@ pub struct LifecycleResponse {
 /// GET /v1/projects/{name}/commands — deployed [commands], name -> argv.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandsResponse {
-    pub commands: BTreeMap<String, Vec<String>>,
+    pub commands: BTreeMap<String, CommandSpec>,
 }
 
 /// POST /v1/projects/{name}/commands/{command} body: extra argv items
@@ -552,9 +553,10 @@ mod tests {
             commands: Default::default(),
             command_timeout_secs: Some(1800),
         };
-        config
-            .commands
-            .insert("migrate".into(), vec!["npx".into(), "prisma".into()]);
+        config.commands.insert(
+            "migrate".into(),
+            CommandSpec::new(vec!["npx".into(), "prisma".into()]),
+        );
 
         let dto: ProjectDto = (&config).into();
         let json = serde_json::to_value(&dto).unwrap();
@@ -562,5 +564,43 @@ mod tests {
         let roundtripped: pi_domain::entities::ProjectConfig = back.into();
         assert_eq!(roundtripped.commands, config.commands);
         assert_eq!(roundtripped.command_timeout_secs, Some(1800));
+    }
+
+    #[test]
+    fn service_pinned_command_survives_dto_roundtrip() {
+        let mut config = pi_domain::entities::ProjectConfig {
+            name: "rateme".into(),
+            repo: "r".into(),
+            branch: "main".into(),
+            compose_path: "docker-compose.yml".into(),
+            service: "web".into(),
+            container_port: 3000,
+            hostname: None,
+            expose: Default::default(),
+            healthcheck: Default::default(),
+            timeouts: Default::default(),
+            commands: Default::default(),
+            command_timeout_secs: None,
+        };
+        config.commands.insert(
+            "create-invite".into(),
+            CommandSpec {
+                argv: vec!["node".into(), "x.cjs".into()],
+                service: Some("server".into()),
+            },
+        );
+        let dto: ProjectDto = (&config).into();
+        let json = serde_json::to_value(&dto).unwrap();
+        let back: ProjectDto = serde_json::from_value(json).unwrap();
+        let roundtripped: pi_domain::entities::ProjectConfig = back.into();
+        assert_eq!(
+            roundtripped
+                .commands
+                .get("create-invite")
+                .unwrap()
+                .service
+                .as_deref(),
+            Some("server")
+        );
     }
 }

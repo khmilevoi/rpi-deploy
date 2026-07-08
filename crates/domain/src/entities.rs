@@ -235,10 +235,10 @@ pub struct ProjectConfig {
     pub healthcheck: HealthcheckConfig,
     /// Stage timeout overrides ([timeouts] from rpi.toml). Not persisted in DB.
     pub timeouts: StageTimeoutOverrides,
-    /// Declared admin commands ([commands] in rpi.toml), name -> argv.
+    /// Declared admin commands ([commands] in rpi.toml), name -> spec.
     /// Persisted in the registry: `rpi command` must run what was deployed,
     /// not what the local file currently says.
-    pub commands: BTreeMap<String, Vec<String>>,
+    pub commands: BTreeMap<String, CommandSpec>,
     /// [timeouts].command override in seconds. Persisted alongside commands
     /// because it is needed at invocation time, not deploy time.
     pub command_timeout_secs: Option<u64>,

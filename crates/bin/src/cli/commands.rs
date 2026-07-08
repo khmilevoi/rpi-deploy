@@ -364,8 +364,8 @@ pub async fn command(
                 "no commands deployed for '{project_name}' - declare [commands] in rpi.toml and run `rpi deploy`"
             );
         } else {
-            for (cmd, argv) in &resp.commands {
-                println!("{cmd}  ->  {}", argv.join(" "));
+            for (cmd, spec) in &resp.commands {
+                println!("{cmd}  ->  {}", spec.argv.join(" "));
             }
         }
         let local = rpitoml.to_project_config().commands;

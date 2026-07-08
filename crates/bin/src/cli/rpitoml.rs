@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::duration::parse_duration_secs;
-use pi_domain::entities::{ExposeMode, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides};
+use pi_domain::entities::{
+    CommandSpec, ExposeMode, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -276,7 +278,7 @@ impl RpiToml {
                         .map(|(name, value)| {
                             let argv =
                                 command_argv(name, value).expect("validated in RpiToml::parse");
-                            (name.clone(), argv)
+                            (name.clone(), CommandSpec::new(argv))
                         })
                         .collect()
                 })
@@ -477,16 +479,16 @@ files = ["certs/server.pem"]
         );
         let config = RpiToml::parse(&toml).unwrap().to_project_config();
         assert_eq!(
-            config.commands.get("create-invite").unwrap(),
-            &vec![
+            config.commands.get("create-invite").unwrap().argv,
+            vec![
                 "node".to_string(),
                 "scripts/create-invite.js".into(),
                 "--admin".into()
             ]
         );
         assert_eq!(
-            config.commands.get("migrate").unwrap(),
-            &vec![
+            config.commands.get("migrate").unwrap().argv,
+            vec![
                 "npx".to_string(),
                 "prisma".into(),
                 "migrate".into(),
@@ -494,8 +496,8 @@ files = ["certs/server.pem"]
             ]
         );
         assert_eq!(
-            config.commands.get("backup").unwrap(),
-            &vec![
+            config.commands.get("backup").unwrap().argv,
+            vec![
                 "sh".to_string(),
                 "-c".into(),
                 "pg_dump mydb | gzip > /b.gz".into()

@@ -114,13 +114,13 @@ async fn create_deployment(
             "project.port must be > 0".into(),
         )));
     }
-    for (cmd_name, argv) in &config.commands {
+    for (cmd_name, spec) in &config.commands {
         if !is_valid_name(cmd_name) {
             return Err(ApiError(DomainError::Invalid(format!(
                 "command name '{cmd_name}' must match ^[a-z0-9][a-z0-9_-]*$"
             ))));
         }
-        if argv.is_empty() || argv.iter().any(|a| a.is_empty()) {
+        if spec.argv.is_empty() || spec.argv.iter().any(|a| a.is_empty()) {
             return Err(ApiError(DomainError::Invalid(format!(
                 "command '{cmd_name}' must have a non-empty argv"
             ))));
