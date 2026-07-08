@@ -1,6 +1,7 @@
 mod agent;
 mod cli;
 mod duration;
+mod output;
 mod proto;
 
 use std::path::PathBuf;
