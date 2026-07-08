@@ -105,9 +105,11 @@ pub async fn secrets_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<(
 
     let (n, m) = (vars.len(), files.len());
     let resp = api.send_secrets(&project_name, vars, files, apply).await?;
-    eprintln!("saved {n} key(s) and {m} file(s) for project '{project_name}'");
+    output::success(format!(
+        "saved {n} key(s) and {m} file(s) for project '{project_name}'"
+    ));
     if resp.applied {
-        eprintln!("secrets applied to running containers");
+        output::success("secrets applied to running containers");
     }
     Ok(())
 }
@@ -196,11 +198,11 @@ pub async fn gc(connect: ConnectOpts) -> anyhow::Result<()> {
     let api = ApiClient::new(tunnel.base_url.clone());
 
     let resp = api.gc().await?;
-    eprintln!(
+    output::success(format!(
         "gc done: disk {}% used; build cache pruned: {}",
         resp.disk_used_percent,
         if resp.builder_pruned { "yes" } else { "no" }
-    );
+    ));
     Ok(())
 }
 
@@ -343,7 +345,7 @@ pub async fn lifecycle(project: String, action: &str, connect: ConnectOpts) -> a
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
     api.lifecycle(&project, action).await?;
-    eprintln!("{action} '{project}': done");
+    output::success(format!("{action} '{project}': done"));
     Ok(())
 }
 
@@ -432,7 +434,7 @@ pub async fn rm(
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
     let resp = api.remove_project(&project, volumes).await?;
-    eprintln!(
+    output::success(format!(
         "project '{}' removed{}",
         resp.project,
         if resp.volumes_removed {
@@ -440,7 +442,7 @@ pub async fn rm(
         } else {
             " (volumes kept)"
         }
-    );
+    ));
     if let Some(hostname) = resp.hostname {
         output::note(format!(
             "the DNS record for {hostname} may still exist; delete it manually: Cloudflare dashboard -> your zone -> DNS -> remove the {hostname} CNAME"
