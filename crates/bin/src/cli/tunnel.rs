@@ -39,7 +39,11 @@ impl SshTunnel {
             .spawn()
             .map_err(|e| anyhow::anyhow!("cannot spawn ssh: {e}"))?;
 
-        wait_port(port, Duration::from_secs(10)).await?;
+        let pb = crate::output::spinner("connecting to agent...");
+        let result = wait_port(port, Duration::from_secs(10)).await;
+        pb.finish_and_clear();
+        result?;
+
         Ok(SshTunnel {
             child: Some(child),
             base_url: format!("http://127.0.0.1:{port}"),
