@@ -58,7 +58,7 @@ Do not combine `--server` with `--host`; direct `--host` mode requires `--user`.
 ## Running Admin Commands
 
 `rpi command` runs entries declared in `[commands]` in `rpi.toml`, inside the
-`ingress.service` container on the agent:
+`ingress.service` container by default; use the `[commands.<name>]` table form with `service = "<other-service>"` to run in a different compose service:
 
 ```bash
 rpi command                                   # list mode: commands deployed on the agent

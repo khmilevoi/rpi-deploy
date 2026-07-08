@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pi_domain::contracts::{ContainerRuntime, LogSink, OverrideStore, ProjectRepository, Source};
-use pi_domain::entities::{ComposeStack, Project};
+use pi_domain::entities::{CommandSpec, ComposeStack, Project};
 use pi_domain::error::DomainError;
 
 /// Agent-side budget for one command run when the project sets no
@@ -36,7 +36,7 @@ impl RunCommand {
     }
 
     /// Deployed commands of a project — `rpi command` list mode.
-    pub async fn list(&self, project: &str) -> Result<BTreeMap<String, Vec<String>>, DomainError> {
+    pub async fn list(&self, project: &str) -> Result<BTreeMap<String, CommandSpec>, DomainError> {
         Ok(self.registered(project).await?.config.commands)
     }
 
@@ -55,8 +55,14 @@ impl RunCommand {
         extra_args: &[String],
         log: Arc<dyn LogSink>,
     ) -> Result<i32, DomainError> {
-        let (registered, mut argv) = self.lookup(project, command).await?;
+        let (registered, spec) = self.lookup(project, command).await?;
+        let mut argv = spec.argv.clone();
         argv.extend(extra_args.iter().cloned());
+        let service = spec
+            .service
+            .as_deref()
+            .unwrap_or(&registered.config.service)
+            .to_string();
         let workdir = self.source.workdir(project);
         let compose_file = workdir.join(&registered.config.compose_path);
         let override_file = self.overrides.path(project);
@@ -72,8 +78,7 @@ impl RunCommand {
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
         tokio::time::timeout(
             Duration::from_secs(secs),
-            self.runtime
-                .exec(&stack, &registered.config.service, &argv, log),
+            self.runtime.exec(&stack, &service, &argv, log),
         )
         .await
         .map_err(|_| DomainError::Timeout {
@@ -93,12 +98,12 @@ impl RunCommand {
         &self,
         project: &str,
         command: &str,
-    ) -> Result<(Project, Vec<String>), DomainError> {
+    ) -> Result<(Project, CommandSpec), DomainError> {
         let registered = self.registered(project).await?;
         match registered.config.commands.get(command) {
-            Some(argv) => {
-                let argv = argv.clone();
-                Ok((registered, argv))
+            Some(spec) => {
+                let spec = spec.clone();
+                Ok((registered, spec))
             }
             None => {
                 let available: Vec<&str> = registered
@@ -126,6 +131,7 @@ mod tests {
     use pi_domain::contracts::{
         MockContainerRuntime, MockOverrideStore, MockProjectRepository, MockSource,
     };
+    use pi_domain::entities::CommandSpec;
     use pi_domain::entities::ProjectConfig;
     use std::path::PathBuf;
 
@@ -146,7 +152,7 @@ mod tests {
         };
         config.commands.insert(
             "create-invite".into(),
-            vec!["node".into(), "scripts/create-invite.js".into()],
+            CommandSpec::new(vec!["node".into(), "scripts/create-invite.js".into()]),
         );
         Project {
             config,
@@ -199,6 +205,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(code, 42, "exit code propagates untouched");
+    }
+
+    #[tokio::test]
+    async fn execs_into_pinned_service_when_set() {
+        let mut runtime = MockContainerRuntime::new();
+        runtime
+            .expect_exec()
+            .withf(|_, service, _, _| service == "server")
+            .returning(|_, _, _, _| Ok(0));
+
+        let mut proj = project("rateme");
+        proj.config.commands.insert(
+            "create-invite".into(),
+            CommandSpec {
+                argv: vec!["node".into(), "create-invite.cjs".into()],
+                service: Some("server".into()),
+            },
+        );
+        let run = deps_with(runtime, proj);
+        let code = run
+            .execute("rateme", "create-invite", &[], CollectSink::new())
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
     }
 
     #[tokio::test]
