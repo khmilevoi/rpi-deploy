@@ -25,7 +25,7 @@ pub fn init_colors() {
 }
 
 pub fn success(msg: impl std::fmt::Display) {
-    println!("{} {msg}", style(Emoji("✓", "OK")).green());
+    eprintln!("{} {msg}", style(Emoji("✓", "OK")).green().for_stderr());
 }
 
 pub fn error(msg: impl std::fmt::Display) {
