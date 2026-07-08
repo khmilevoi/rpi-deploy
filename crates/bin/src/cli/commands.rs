@@ -3,6 +3,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 
+use crate::output;
 use crate::cli::api::ApiClient;
 use crate::cli::config::ConnectOpts;
 use crate::cli::rpitoml::{RpiToml, SecretsSection};
@@ -476,10 +477,10 @@ pub(crate) fn render_doctor(checks: &[DiagnosticCheckDto]) -> (String, bool) {
     let mut ok = true;
     for c in checks {
         let mark = if c.passed {
-            "PASS"
+            output::styled_ok("PASS")
         } else {
             ok = false;
-            "FAIL"
+            output::styled_err("FAIL")
         };
         out.push_str(&format!("{mark}  {} - {}\n", c.name, c.detail));
         if let (false, Some(hint)) = (c.passed, &c.hint) {
