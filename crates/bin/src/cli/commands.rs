@@ -454,7 +454,7 @@ pub async fn command(
         drop(tunnel);
         std::process::exit(code);
     }
-    pane.finish_ok(&format!("command '{name}' finished (exit 0)"));
+    pane.finish_ok_keep(&format!("command '{name}' finished (exit 0)"));
     Ok(())
 }
 
