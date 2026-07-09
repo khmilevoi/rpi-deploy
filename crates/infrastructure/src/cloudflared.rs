@@ -86,8 +86,8 @@ pub(crate) fn remove_ingress_rule(
 /// command when the agent's own environment lacks it.
 fn restart_extra_env(current: Option<&str>, uid: u32) -> Option<(&'static str, String)> {
     match current {
-        Some(_) => None,
-        None => Some(("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))),
+        Some(v) if !v.is_empty() => None,
+        _ => Some(("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))),
     }
 }
 
@@ -470,6 +470,10 @@ mod tests {
             Some(("XDG_RUNTIME_DIR", "/run/user/999".into()))
         );
         assert_eq!(restart_extra_env(Some("/run/user/1000"), 999), None);
+        assert_eq!(
+            restart_extra_env(Some(""), 999),
+            Some(("XDG_RUNTIME_DIR", "/run/user/999".into()))
+        );
     }
 
     #[cfg(unix)]

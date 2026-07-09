@@ -559,7 +559,7 @@ pub(crate) fn looks_like_tunnel_id(s: &str) -> bool {
     s.len() == 36
         && s.chars().enumerate().all(|(i, c)| match i {
             8 | 13 | 18 | 23 => c == '-',
-            _ => c.is_ascii_hexdigit(),
+            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
         })
 }
 
@@ -677,13 +677,17 @@ pub struct CloudflaredBootstrap {
 /// chown/chmod on it (or on config.yml) is surfaced as an error rather than
 /// swallowed — otherwise setup could report success while leaving a secret
 /// world-readable.
+/// Returns `true` when an existing config.yml was adopted (in which case the
+/// caller must not touch the cloudflared systemd unit or restart anything),
+/// `false` when the fresh-install path was taken (including all early
+/// returns on that path, dry-run or error).
 pub(crate) async fn cloudflared_bootstrap_full(
     sys: &dyn Sys,
     cf: &dyn CloudflareApi,
     opts: &CloudflaredBootstrap,
     dry: bool,
     rep: &mut SetupReport,
-) {
+) -> bool {
     ensure_cloudflared_binary(sys, dry, rep).await;
 
     // Adoption (§3.1): an existing config.yml is never rewritten.
@@ -692,15 +696,15 @@ pub(crate) async fn cloudflared_bootstrap_full(
             rep.skipped.push(format!(
                 "{CLOUDFLARED_CONFIG_PATH} exists — would adopt (dry run)"
             ));
-            return;
+            return true;
         }
         adopt_existing_cloudflared(sys, cf, opts, rep).await;
-        return;
+        return true;
     }
 
     if dry {
         rep.created.push("cloudflared tunnel (dry run)".into());
-        return;
+        return false;
     }
 
     let _ = sys
@@ -721,7 +725,7 @@ pub(crate) async fn cloudflared_bootstrap_full(
         Ok(c) => c,
         Err(e) => {
             rep.errors.push(format!("create tunnel: {e}"));
-            return;
+            return false;
         }
     };
     let creds_path = format!("/var/lib/rpi/cloudflared/{}.json", creds.tunnel_id);
@@ -730,7 +734,7 @@ pub(crate) async fn cloudflared_bootstrap_full(
     if !creds.tunnel_secret.is_empty() {
         if let Err(e) = sys.write(Path::new(&creds_path), &credentials_json(&creds)) {
             rep.errors.push(format!("write creds: {e}"));
-            return;
+            return false;
         }
         let chown = sys
             .run("chown", &["rpi-agent:rpi-agent", &creds_path])
@@ -749,13 +753,13 @@ pub(crate) async fn cloudflared_bootstrap_full(
             "adopted tunnel {} but no credentials at {creds_path}; re-create the tunnel or restore its JSON",
             creds.tunnel_id
         ));
-        return;
+        return false;
     }
 
     let config = render_config_yml(&creds.tunnel_id, &creds_path);
     if let Err(e) = sys.write(Path::new(CLOUDFLARED_CONFIG_PATH), &config) {
         rep.errors.push(format!("write config.yml: {e}"));
-        return;
+        return false;
     }
     let chown = sys
         .run("chown", &["rpi-agent:rpi-agent", CLOUDFLARED_CONFIG_PATH])
@@ -789,6 +793,7 @@ pub(crate) async fn cloudflared_bootstrap_full(
     }
 
     upsert_cloudflared_agent_toml(sys, &creds.tunnel_id, &opts.zone, rep);
+    false
 }
 
 /// Append [cloudflare] + [cloudflared] to /etc/rpi/agent.toml only when absent.
@@ -856,10 +861,15 @@ async fn cloudflared_bootstrap(sys: &dyn Sys, opts: &SetupOpts, rep: &mut SetupR
             tunnel_name: resolve_tunnel_name(sys, opts).await,
             zone: domain.clone(),
         };
-        cloudflared_bootstrap_full(sys, &api, &bopts, dry, rep).await;
+        let adopted = cloudflared_bootstrap_full(sys, &api, &bopts, dry, rep).await;
         if rep.errors.len() > errs_before {
             // token write or tunnel bootstrap failed; do NOT enable a user
             // service that would respawn against a missing/broken config.yml
+            return;
+        }
+        if adopted {
+            // Adoption never restarts cloudflared or touches its systemd unit —
+            // the existing install is left running untouched (spec §3.1).
             return;
         }
         cloudflared_user_service(sys, dry, rep).await;
@@ -2389,6 +2399,54 @@ ingress:\n  - hostname: board.example.com\n    service: http://127.0.0.1:8001\n 
     }
 
     #[tokio::test]
+    async fn adoption_via_wrapper_does_not_restart_or_enable_cloudflared_service() {
+        // Regression for the wrapper-level bug: cloudflared_bootstrap_full
+        // correctly never rewrites config.yml or restarts anything on the
+        // adoption branch, but its caller (cloudflared_bootstrap) used to
+        // unconditionally fall through into cloudflared_user_service
+        // afterwards — bouncing user@<uid>.service (and therefore any
+        // manually-run cloudflared) even though nothing failed. Exercise the
+        // wrapper directly, not cloudflared_bootstrap_full, so this seam is
+        // covered.
+        let mut sys = adoption_sys(MANUAL_CONFIG_UUID);
+        sys.paths
+            .insert("/var/lib/rpi/cloudflared/creds.json".into());
+        // Let `id -u rpi-agent` succeed so cloudflared_user_service (if
+        // reached) proceeds far enough to attempt the disruptive calls,
+        // rather than bailing out early for an unrelated reason.
+        sys.err.remove(&FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.ok
+            .insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+
+        let opts = SetupOpts {
+            login_user: "piuser".into(),
+            with_cloudflared: true,
+            dry_run: false,
+            cf_token: Some("tok".into()),
+            domain: Some("example.com".into()),
+            tunnel_name: None,
+        };
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap(&sys, &opts, &mut rep).await;
+
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        let calls = sys.calls();
+        assert!(
+            !calls.iter().any(|c| c.contains("restart")),
+            "adoption must not restart any service: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("enable")),
+            "adoption must not enable the cloudflared user service: {calls:?}"
+        );
+        let writes = sys.writes.lock().unwrap();
+        assert!(
+            writes.iter().all(|(p, _)| p != CLOUDFLARED_UNIT_PATH),
+            "adoption must not (re)write the cloudflared unit file: {writes:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn adoption_resolves_tunnel_name_via_api() {
         use pi_domain::contracts::{MockCloudflareApi, TunnelCreds};
         let mut sys = adoption_sys(
@@ -2553,5 +2611,8 @@ ingress:\n  - hostname: board.example.com\n    service: http://127.0.0.1:8001\n 
         assert!(!looks_like_tunnel_id(
             "gc15c4e2-1111-2222-3333-444455556666"
         )); // non-hex
+        assert!(!looks_like_tunnel_id(
+            "BC15C4E2-1111-2222-3333-444455556666"
+        )); // uppercase hex
     }
 }
