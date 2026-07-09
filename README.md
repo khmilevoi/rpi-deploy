@@ -8,7 +8,8 @@ containers.
 
 Website: https://rpi.iiskelo.com
 
-Status: v0.12 (semantic console colours) — everything from v0.1–v0.6 (deploy/secrets/
+Status: v0.13 (Cloudflare Tunnel auto-bootstrap + `rpi agent migrate`) —
+everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
 `npm install -g rpi-deploy` for both roles), v0.7 prebuilt binaries
@@ -28,7 +29,15 @@ flicker and preserving streamed color), and v0.12 semantic console colours
 status/usage-colored cells, the spinner glyph, and the log-pane frame — grey
 while streaming, red with a full-log dump on failure — and `rpi command` now
 keeps its streamed output on screen after a successful run instead of
-clearing it).
+clearing it), and v0.13 Cloudflare Tunnel auto-bootstrap (`rpi agent setup`
+with a Cloudflare API token and a domain installs `cloudflared`, creates or
+adopts the tunnel and DNS record entirely through the Cloudflare API — no
+`cloudflared tunnel login`, no `cert.pem` — and writes a validated
+`config.yml`; the agent degrades to disabled ingress instead of failing to
+start when the token is missing or misconfigured) plus a unified
+`rpi agent migrate` framework (detects pending internal migrations, tracks
+applied ones in a ledger in `state.db`; the existing `pi`-to-`rpi` rename now
+runs through it).
 
 Supported features:
 
@@ -51,6 +60,7 @@ Supported features:
 - `rpi init`;
 - `rpi agent setup`;
 - `rpi agent uninstall`;
+- `rpi agent migrate [--list] [--dry-run] [--run <id>] [--all --yes]`;
 - stable host port allocation;
 - Docker Compose overrides;
 - health checks;
