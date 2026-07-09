@@ -31,7 +31,8 @@ impl Paint {
     }
 
     /// Foreground colour for `comfy-table` cells; `None` = uncoloured.
-    pub fn table(self) -> Option<comfy_table::Color> {
+    /// `Rgb` is exact under truecolor, else reduced to the nearest xterm-256.
+    pub fn table_color(self, truecolor: bool) -> Option<comfy_table::Color> {
         use comfy_table::Color;
         match self {
             Paint::Default => None,
@@ -39,7 +40,11 @@ impl Paint {
             Paint::Green => Some(Color::Green),
             Paint::Yellow => Some(Color::Yellow),
             Paint::Red => Some(Color::Red),
-            Paint::Rgb(r, g, b) => Some(Color::AnsiValue(rgb_to_ansi256(r, g, b))),
+            Paint::Rgb(r, g, b) => Some(if truecolor {
+                Color::Rgb { r, g, b }
+            } else {
+                Color::AnsiValue(rgb_to_ansi256(r, g, b))
+            }),
         }
     }
 
@@ -145,6 +150,19 @@ pub fn theme() -> &'static Theme {
     ACTIVE.get_or_init(|| Theme::from_env_value(std::env::var("PI_THEME").ok().as_deref()))
 }
 
+/// True when 24-bit colour should be emitted: colours are enabled and the
+/// terminal advertises truecolor via `COLORTERM`. Pure core in `truecolor_from`.
+pub fn truecolor_enabled() -> bool {
+    truecolor_from(
+        std::env::var("COLORTERM").ok().as_deref(),
+        console::colors_enabled(),
+    )
+}
+
+fn truecolor_from(colorterm: Option<&str>, colors_on: bool) -> bool {
+    colors_on && matches!(colorterm, Some("truecolor") | Some("24bit"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,14 +206,31 @@ mod tests {
             Paint::Rgb(197, 26, 74).template_token().as_deref(),
             Some("161")
         );
-        assert!(Paint::Default.table().is_none());
+        assert!(Paint::Default.table_color(false).is_none());
         assert!(matches!(
-            Paint::Rgb(197, 26, 74).table(),
+            Paint::Rgb(197, 26, 74).table_color(false),
             Some(comfy_table::Color::AnsiValue(161))
         ));
         assert!(matches!(
-            Paint::Green.table(),
+            Paint::Rgb(197, 26, 74).table_color(true),
+            Some(comfy_table::Color::Rgb {
+                r: 197,
+                g: 26,
+                b: 74
+            })
+        ));
+        assert!(matches!(
+            Paint::Green.table_color(false),
             Some(comfy_table::Color::Green)
         ));
+    }
+
+    #[test]
+    fn truecolor_needs_colours_on_and_a_truecolor_colorterm() {
+        assert!(truecolor_from(Some("truecolor"), true));
+        assert!(truecolor_from(Some("24bit"), true));
+        assert!(!truecolor_from(Some("truecolor"), false)); // colours off
+        assert!(!truecolor_from(Some("256color"), true));
+        assert!(!truecolor_from(None, true));
     }
 }
