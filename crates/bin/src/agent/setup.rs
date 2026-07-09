@@ -483,6 +483,9 @@ pub(crate) const CLOUDFLARED_UNIT_PATH: &str =
 /// Canonical cloudflared config the setup flow instructs operators to write.
 pub(crate) const CLOUDFLARED_CONFIG_PATH: &str = "/var/lib/rpi/cloudflared/config.yml";
 
+#[allow(dead_code)]
+pub(crate) const CLOUDFLARE_TOKEN_PATH: &str = "/var/lib/rpi/cloudflare/token";
+
 const CLOUDFLARED_UNIT: &str = "\
 [Unit]
 Description=cloudflared tunnel (rpi-agent)
@@ -531,6 +534,38 @@ async fn cloudflared_bootstrap(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) 
          then `systemctl --user enable --now cloudflared` as rpi-agent"
             .into(),
     );
+}
+
+#[allow(dead_code)]
+pub(crate) async fn ensure_cloudflare_token(
+    sys: &dyn Sys,
+    token: &str,
+    dry: bool,
+    rep: &mut SetupReport,
+) {
+    if dry {
+        rep.created.push(CLOUDFLARE_TOKEN_PATH.into());
+        return;
+    }
+    let _ = sys.run("groupadd", &["-f", "rpi-secrets"]).await;
+    let _ = sys
+        .run("usermod", &["-aG", "rpi-secrets", "rpi-agent"])
+        .await;
+    let _ = sys
+        .run("install", &["-d", "-m", "0750", "/var/lib/rpi/cloudflare"])
+        .await;
+    match sys.write(Path::new(CLOUDFLARE_TOKEN_PATH), token) {
+        Ok(_) => {
+            let _ = sys
+                .run("chown", &["root:rpi-secrets", CLOUDFLARE_TOKEN_PATH])
+                .await;
+            let _ = sys.run("chmod", &["640", CLOUDFLARE_TOKEN_PATH]).await;
+            rep.created.push(CLOUDFLARE_TOKEN_PATH.into());
+        }
+        Err(e) => rep
+            .errors
+            .push(format!("write {CLOUDFLARE_TOKEN_PATH}: {e}")),
+    }
 }
 
 async fn run_with(sys: &dyn Sys, opts: &SetupOpts) -> anyhow::Result<SetupReport> {
@@ -1484,5 +1519,32 @@ mod tests {
         // no paths inserted: rpi-deploy/dist/rpi does not exist for this user
         let found = resolve_npm_dist_binary(&sys, "piuser").await;
         assert_eq!(found, None);
+    }
+
+    #[tokio::test]
+    async fn writes_token_with_rpi_secrets_group() {
+        let sys = fresh_sys();
+        let mut rep = SetupReport::default();
+        ensure_cloudflare_token(&sys, "cf-token-value", false, &mut rep).await;
+        let writes = sys.writes.lock().unwrap();
+        assert!(
+            writes
+                .iter()
+                .any(|(p, c)| p == "/var/lib/rpi/cloudflare/token" && c == "cf-token-value"),
+            "token written"
+        );
+        let calls = sys.calls();
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("groupadd") && c.contains("rpi-secrets")));
+        assert!(calls
+            .iter()
+            .any(|c| c == "usermod -aG rpi-secrets rpi-agent"));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("chmod 640 /var/lib/rpi/cloudflare/token")));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("chown root:rpi-secrets /var/lib/rpi/cloudflare/token")));
     }
 }
