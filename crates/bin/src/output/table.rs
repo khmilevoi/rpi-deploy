@@ -15,19 +15,26 @@ pub fn table() -> comfy_table::Table {
     t
 }
 
-/// Cyan + bold header cells.
+/// Accent + bold header cells (accent colour from the active theme).
 pub fn header<const N: usize>(cols: [&str; N]) -> Vec<Cell> {
     cols.iter()
-        .map(|c| Cell::new(c).fg(Color::Cyan).add_attribute(Attribute::Bold))
+        .map(|c| {
+            let cell = Cell::new(c).add_attribute(Attribute::Bold);
+            match super::theme::theme().accent.table() {
+                Some(colour) => cell.fg(colour),
+                None => cell,
+            }
+        })
         .collect()
 }
 
 fn sem_colour(sem: Sem) -> Option<Color> {
+    let t = super::theme::theme();
     match sem {
-        Sem::Success => Some(Color::Green),
-        Sem::Error => Some(Color::Red),
-        Sem::Warn => Some(Color::Yellow),
-        Sem::Accent => Some(Color::Cyan),
+        Sem::Success => t.success.table(),
+        Sem::Error => t.error.table(),
+        Sem::Warn => t.warn.table(),
+        Sem::Accent => t.accent.table(),
         Sem::Muted | Sem::Neutral | Sem::Frame => None,
     }
 }
@@ -59,5 +66,16 @@ mod tests {
         assert!(rendered.contains("NAME"), "{rendered}");
         assert!(rendered.contains("rateme"), "{rendered}");
         assert!(rendered.contains("main"), "{rendered}");
+    }
+
+    #[test]
+    fn sem_colour_follows_the_theme() {
+        let t = super::super::theme::theme();
+        assert_eq!(sem_colour(Sem::Accent), t.accent.table());
+        assert_eq!(sem_colour(Sem::Success), t.success.table());
+        assert_eq!(sem_colour(Sem::Warn), t.warn.table());
+        assert_eq!(sem_colour(Sem::Error), t.error.table());
+        assert_eq!(sem_colour(Sem::Neutral), None);
+        assert_eq!(sem_colour(Sem::Muted), None);
     }
 }

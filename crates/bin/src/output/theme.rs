@@ -31,7 +31,6 @@ impl Paint {
     }
 
     /// Foreground colour for `comfy-table` cells; `None` = uncoloured.
-    #[allow(dead_code)] // no caller until Task 3 (table)
     pub fn table(self) -> Option<comfy_table::Color> {
         use comfy_table::Color;
         match self {
@@ -47,7 +46,6 @@ impl Paint {
     /// Colour token for an `indicatif` template (`{spinner:.<token>}`).
     /// `indicatif` parses it with `console::Style::from_dotted_str`, which
     /// accepts ANSI names and numeric `0-255` tokens. `None` = no colour.
-    #[allow(dead_code)] // no caller until Task 3 (template_token)
     pub fn template_token(self) -> Option<String> {
         match self {
             Paint::Default => None,
