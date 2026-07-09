@@ -1676,6 +1676,7 @@ dependencies = [
  "base64 0.22.1",
  "mockall",
  "pi-domain",
+ "rand 0.8.6",
  "reqwest",
  "rusqlite",
  "rusqlite_migration",

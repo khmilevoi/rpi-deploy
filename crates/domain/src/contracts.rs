@@ -202,6 +202,30 @@ pub trait Ingress: Send + Sync {
     async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
 }
 
+/// Locally-managed tunnel credentials (no cert.pem, no `cloudflared tunnel login`).
+pub struct TunnelCreds {
+    pub account_tag: String,
+    pub tunnel_id: String,
+    pub tunnel_name: String,
+    pub tunnel_secret: String, // base64
+}
+
+/// Cloudflare REST API: tunnel create/adopt + DNS CNAME writes (§6, §11).
+#[cfg_attr(feature = "mocks", automock)]
+#[async_trait]
+pub trait CloudflareApi: Send + Sync {
+    async fn zone_id(&self, zone: &str) -> Result<String, DomainError>;
+    /// Adopt an existing tunnel by name, else create it. Returns creds.
+    async fn find_or_create_tunnel(&self, name: &str) -> Result<TunnelCreds, DomainError>;
+    /// Upsert a proxied CNAME <name> -> <tunnel_id>.cfargotunnel.com.
+    async fn put_tunnel_cname(
+        &self,
+        zone: &str,
+        name: &str,
+        tunnel_id: &str,
+    ) -> Result<(), DomainError>;
+}
+
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
 pub trait StatsProvider: Send + Sync {

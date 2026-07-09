@@ -1,3 +1,4 @@
+pub mod cloudflare;
 pub mod cloudflared;
 pub mod disk;
 pub mod docker;
