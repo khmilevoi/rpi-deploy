@@ -486,6 +486,51 @@ pub(crate) const CLOUDFLARED_CONFIG_PATH: &str = "/var/lib/rpi/cloudflared/confi
 #[allow(dead_code)]
 pub(crate) const CLOUDFLARE_TOKEN_PATH: &str = "/var/lib/rpi/cloudflare/token";
 
+pub(crate) const CLOUDFLARED_BIN: &str = "/usr/local/bin/cloudflared";
+
+pub(crate) fn cloudflared_asset(uname_m: &str) -> Option<&'static str> {
+    match uname_m {
+        "aarch64" | "arm64" => Some("cloudflared-linux-arm64"),
+        "armv7l" | "armv6l" | "arm" => Some("cloudflared-linux-arm"),
+        "x86_64" | "amd64" => Some("cloudflared-linux-amd64"),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)] // wired in Task 9
+pub(crate) async fn ensure_cloudflared_binary(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
+    if sys.run("cloudflared", &["--version"]).await.is_ok() {
+        rep.skipped.push(CLOUDFLARED_BIN.into());
+        return;
+    }
+    if dry {
+        rep.created.push(CLOUDFLARED_BIN.into());
+        return;
+    }
+    let arch = match sys.run("uname", &["-m"]).await {
+        Ok(a) => a,
+        Err(e) => {
+            rep.errors.push(format!("uname -m failed: {e}"));
+            return;
+        }
+    };
+    let Some(asset) = cloudflared_asset(arch.trim()) else {
+        rep.errors
+            .push(format!("unsupported architecture for cloudflared: {arch}"));
+        return;
+    };
+    let url = format!("https://github.com/cloudflare/cloudflared/releases/latest/download/{asset}");
+    if let Err(e) = sys
+        .run("curl", &["-fsSL", "-o", CLOUDFLARED_BIN, &url])
+        .await
+    {
+        rep.errors.push(format!("download cloudflared: {e}"));
+        return;
+    }
+    let _ = sys.run("chmod", &["0755", CLOUDFLARED_BIN]).await;
+    rep.created.push(CLOUDFLARED_BIN.into());
+}
+
 const CLOUDFLARED_UNIT: &str = "\
 [Unit]
 Description=cloudflared tunnel (rpi-agent)
@@ -1586,5 +1631,35 @@ mod tests {
                 .any(|c| c == "/var/lib/rpi/cloudflare/token"),
             "token must not be reported as successfully created"
         );
+    }
+
+    #[test]
+    fn cloudflared_asset_maps_known_arches() {
+        assert_eq!(
+            cloudflared_asset("aarch64"),
+            Some("cloudflared-linux-arm64")
+        );
+        assert_eq!(cloudflared_asset("armv7l"), Some("cloudflared-linux-arm"));
+        assert_eq!(cloudflared_asset("x86_64"), Some("cloudflared-linux-amd64"));
+        assert_eq!(cloudflared_asset("mips"), None);
+    }
+
+    #[tokio::test]
+    async fn installs_cloudflared_when_absent() {
+        let mut sys = fresh_sys();
+        sys.ok
+            .insert(FakeSys::key("uname", &["-m"]), "aarch64".into());
+        // `cloudflared --version` fails => not installed yet
+        sys.err.insert(FakeSys::key("cloudflared", &["--version"]));
+        let mut rep = SetupReport::default();
+        ensure_cloudflared_binary(&sys, false, &mut rep).await;
+        let calls = sys.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("cloudflared-linux-arm64")),
+            "downloads the arm64 asset: {calls:?}"
+        );
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("chmod") && c.contains("/usr/local/bin/cloudflared")));
     }
 }
