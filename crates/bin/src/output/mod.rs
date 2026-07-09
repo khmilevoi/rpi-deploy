@@ -114,7 +114,6 @@ pub fn heading(msg: impl std::fmt::Display) {
 
 /// Informational stdout line (answer content, not a status verdict):
 /// accent bold marker + untinted text.
-#[allow(dead_code)] // no caller until Task 4 wires `info` into CLI/agent call sites
 fn info_line(msg: &str) -> String {
     format!(
         "{} {}",
@@ -123,13 +122,11 @@ fn info_line(msg: &str) -> String {
     )
 }
 
-#[allow(dead_code)] // no caller until Task 4 wires `info` into CLI/agent call sites
 pub fn info(msg: impl std::fmt::Display) {
     println!("{}", info_line(&msg.to_string()));
 }
 
 /// Progress/status stderr line: accent bold marker + untinted text.
-#[allow(dead_code)] // no caller until Task 4 wires `status` into CLI/agent call sites
 fn status_line(msg: &str) -> String {
     format!(
         "{} {}",
@@ -141,7 +138,6 @@ fn status_line(msg: &str) -> String {
     )
 }
 
-#[allow(dead_code)] // no caller until Task 4 wires `status` into CLI/agent call sites
 pub fn status(msg: impl std::fmt::Display) {
     eprintln!("{}", status_line(&msg.to_string()));
 }

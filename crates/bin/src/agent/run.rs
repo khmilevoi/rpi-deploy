@@ -17,10 +17,10 @@ pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             true
         }
         Err(e) => {
-            eprintln!(
-                "warning: cannot create log directory {}: {e} – agent logs to stderr only",
+            crate::output::warn(format!(
+                "cannot create log directory {}: {e} – agent logs to stderr only",
                 config.logs.dir.display()
-            );
+            ));
             false
         }
     };

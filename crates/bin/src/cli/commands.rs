@@ -21,7 +21,7 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
     let api = ApiClient::new(tunnel.base_url.clone());
 
     let version = api.version().await?;
-    eprintln!("agent {} (api {})", version.version, version.api);
+    output::status(format!("agent {} (api {})", version.version, version.api));
     if let Some(warning) = version_mismatch_warning(env!("CARGO_PKG_VERSION"), &version.version) {
         output::warn(warning);
     }
@@ -32,15 +32,15 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
     };
     let accepted = api.deploy(&req).await?;
     if accepted.queued {
-        eprintln!(
+        output::status(format!(
             "deployment {} queued behind the active deploy (latest wins); waiting...",
             accepted.deployment_id
-        );
+        ));
     } else {
-        eprintln!(
+        output::status(format!(
             "deployment {} started; streaming logs:",
             accepted.deployment_id
-        );
+        ));
     }
 
     let mut pane = output::LogPane::new(format!("deploy '{}'", rpitoml.project.name), 10);
@@ -71,7 +71,9 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
 
     let active = api.active_deployments(&project_name).await?;
     if active.is_empty() {
-        eprintln!("no active deployment for '{project_name}' - nothing to cancel");
+        output::status(format!(
+            "no active deployment for '{project_name}' - nothing to cancel"
+        ));
         return Ok(());
     }
     // One failed cancel (e.g. a deploy that finished in the meantime) must not
@@ -79,7 +81,9 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
     let mut failures = 0usize;
     for d in active {
         match api.cancel_deployment(&d.id).await {
-            Ok(decision) => eprintln!("deployment {} ({}): {decision}", d.id, d.status),
+            Ok(decision) => {
+                output::status(format!("deployment {} ({}): {decision}", d.id, d.status))
+            }
             Err(err) => {
                 failures += 1;
                 output::error(format!(
@@ -220,7 +224,7 @@ pub async fn secrets_ls(connect: ConnectOpts) -> anyhow::Result<()> {
 
     let resp = api.list_secrets(&project_name).await?;
     if resp.keys.is_empty() && resp.files.is_empty() {
-        println!("no secrets stored for project '{project_name}'");
+        output::info(format!("no secrets stored for project '{project_name}'"));
         return Ok(());
     }
     if !resp.keys.is_empty() {
@@ -265,7 +269,7 @@ pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
 
     let projects = api.projects().await?;
     if projects.is_empty() {
-        println!("no projects deployed yet");
+        output::info("no projects deployed yet");
         return Ok(());
     }
     let mut table = output::table();
@@ -422,9 +426,9 @@ pub async fn command(
         // file only powers the "undeployed changes" hint.
         let resp = api.list_commands(&project_name).await?;
         if resp.commands.is_empty() {
-            eprintln!(
+            output::status(format!(
                 "no commands deployed for '{project_name}' - declare [commands] in rpi.toml and run `rpi deploy`"
-            );
+            ));
         } else {
             for (cmd, spec) in &resp.commands {
                 println!("{}", format_command_line(cmd, spec));
@@ -465,10 +469,10 @@ pub async fn rm(
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
     if !yes {
-        eprintln!(
+        output::warn(format!(
             "this removes containers{}, the ingress route, workdir, secrets, deploy key and history of '{project}'",
             if volumes { ", VOLUMES (project data!)" } else { "" }
-        );
+        ));
         eprint!("type the project name to confirm: ");
         use std::io::Write;
         std::io::stderr().flush()?;

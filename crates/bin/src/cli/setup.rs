@@ -100,7 +100,7 @@ pub async fn run(flags: SetupFlags) -> anyhow::Result<()> {
     crate::output::success(format!("saved profile '{name}' to {}", path.display()));
 
     // Connectivity test reuses the existing doctor path against the new profile.
-    println!("testing connection...");
+    crate::output::info("testing connection...");
     if let Err(e) = ssh.check().await {
         crate::output::error(format!("ssh check failed: {e}"));
         crate::output::note(format!(

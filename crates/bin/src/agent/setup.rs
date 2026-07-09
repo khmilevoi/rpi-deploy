@@ -904,7 +904,7 @@ async fn run_with(sys: &dyn Sys, opts: &SetupOpts) -> anyhow::Result<SetupReport
     let report = setup(sys, opts).await;
     report.print();
     if opts.dry_run {
-        println!("(dry run — no changes made)");
+        crate::output::info("(dry run — no changes made)");
     }
     if !report.errors.is_empty() {
         anyhow::bail!(
@@ -989,19 +989,19 @@ pub async fn run_cmd(
 
     match &action {
         SelfInstallAction::AlreadyCanonical => {
-            println!(
+            crate::output::success(format!(
                 "ok (already present): {} (running from it)",
                 self_install::AGENT_BIN_PATH
-            );
+            ));
         }
         SelfInstallAction::UpToDate => {
-            println!(
+            crate::output::success(format!(
                 "ok (already present): {} (binary up to date)",
                 self_install::AGENT_BIN_PATH
-            );
+            ));
         }
         SelfInstallAction::Installed => {
-            println!(
+            let line = format!(
                 "{}: {} (from {})",
                 if dry_run {
                     "would install"
@@ -1011,6 +1011,11 @@ pub async fn run_cmd(
                 self_install::AGENT_BIN_PATH,
                 installed_from.display(),
             );
+            if dry_run {
+                crate::output::info(line);
+            } else {
+                crate::output::success(line);
+            }
         }
     }
 
@@ -1018,7 +1023,7 @@ pub async fn run_cmd(
 
     if matches!(action, SelfInstallAction::Installed) && !dry_run {
         if let Some(note) = restart_agent_if_active(&HostSys).await {
-            println!("{note}");
+            crate::output::info(note);
         }
     }
     Ok(())
