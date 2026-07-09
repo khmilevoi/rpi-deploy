@@ -552,15 +552,34 @@ pub(crate) async fn ensure_cloudflare_token(
         .run("usermod", &["-aG", "rpi-secrets", "rpi-agent"])
         .await;
     let _ = sys
-        .run("install", &["-d", "-m", "0750", "/var/lib/rpi/cloudflare"])
+        .run(
+            "install",
+            &[
+                "-d",
+                "-m",
+                "0750",
+                "-o",
+                "root",
+                "-g",
+                "rpi-secrets",
+                "/var/lib/rpi/cloudflare",
+            ],
+        )
         .await;
     match sys.write(Path::new(CLOUDFLARE_TOKEN_PATH), token) {
         Ok(_) => {
-            let _ = sys
+            let chown = sys
                 .run("chown", &["root:rpi-secrets", CLOUDFLARE_TOKEN_PATH])
                 .await;
-            let _ = sys.run("chmod", &["640", CLOUDFLARE_TOKEN_PATH]).await;
-            rep.created.push(CLOUDFLARE_TOKEN_PATH.into());
+            let chmod = sys.run("chmod", &["640", CLOUDFLARE_TOKEN_PATH]).await;
+            if chown.is_ok() && chmod.is_ok() {
+                rep.created.push(CLOUDFLARE_TOKEN_PATH.into());
+            } else {
+                rep.errors.push(format!(
+                    "wrote {CLOUDFLARE_TOKEN_PATH} but failed to set root:rpi-secrets/0640 — \
+                     the token may be world-readable; fix ownership/permissions manually"
+                ));
+            }
         }
         Err(e) => rep
             .errors
@@ -1540,11 +1559,32 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c == "usermod -aG rpi-secrets rpi-agent"));
+        assert!(calls.iter().any(|c| c.contains("install")
+            && c.contains("-g rpi-secrets")
+            && c.contains("/var/lib/rpi/cloudflare")));
         assert!(calls
             .iter()
             .any(|c| c.contains("chmod 640 /var/lib/rpi/cloudflare/token")));
         assert!(calls
             .iter()
             .any(|c| c.contains("chown root:rpi-secrets /var/lib/rpi/cloudflare/token")));
+    }
+
+    #[tokio::test]
+    async fn token_chmod_failure_is_surfaced() {
+        let mut sys = fresh_sys();
+        sys.err.insert(FakeSys::key(
+            "chmod",
+            &["640", "/var/lib/rpi/cloudflare/token"],
+        ));
+        let mut rep = SetupReport::default();
+        ensure_cloudflare_token(&sys, "cf-token-value", false, &mut rep).await;
+        assert!(!rep.errors.is_empty(), "chmod failure should be surfaced");
+        assert!(
+            !rep.created
+                .iter()
+                .any(|c| c == "/var/lib/rpi/cloudflare/token"),
+            "token must not be reported as successfully created"
+        );
     }
 }
