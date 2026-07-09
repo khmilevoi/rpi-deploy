@@ -44,8 +44,14 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
     }
 
     let mut pane = output::LogPane::new(format!("deploy '{}'", rpitoml.project.name), 10);
+    let mut warnings: Vec<String> = Vec::new();
     let status = api
-        .follow_logs(&accepted.deployment_id, |line| pane.push_line(line))
+        .follow_logs(&accepted.deployment_id, |line| {
+            if let Some(w) = deploy_warning(line) {
+                warnings.push(w.to_string());
+            }
+            pane.push_line(line)
+        })
         .await?;
     match status.as_str() {
         "success" => pane.finish_ok(&format!("deploy finished: {status}")),
@@ -54,9 +60,15 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
         ),
         _ => {
             pane.finish_err(&format!("deploy finished: {status}"));
+            for w in &warnings {
+                output::warn(w);
+            }
             drop(tunnel);
             std::process::exit(1);
         }
+    }
+    for w in &warnings {
+        output::warn(w);
     }
     Ok(())
 }
@@ -756,6 +768,12 @@ rebuild/update the agent on the Pi (`rpi agent update` ships in v0.5)"
     })
 }
 
+/// A deploy log line the agent marked as a warning — re-surfaced next to the
+/// final summary so it cannot scroll away with the stream.
+fn deploy_warning(line: &str) -> Option<&str> {
+    line.strip_prefix("warning: ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,6 +784,13 @@ mod tests {
             env: env.map(str::to_string),
             files: files.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn deploy_warning_extracts_only_prefixed_lines() {
+        assert_eq!(deploy_warning("warning: x y"), Some("x y"));
+        assert_eq!(deploy_warning("ingress: routing a -> b"), None);
+        assert_eq!(deploy_warning(" warning: not at start"), None);
     }
 
     #[test]

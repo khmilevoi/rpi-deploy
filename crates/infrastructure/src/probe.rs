@@ -36,10 +36,12 @@ pub struct HostSystemProbe {
     version: String,
     disk_threshold_percent: u8,
     cloudflared_enabled: bool,
+    ingress_active: bool,
     started_at: i64,
 }
 
 impl HostSystemProbe {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         runner: Arc<dyn ProbeRunner>,
         disk: Arc<dyn DiskProbe>,
@@ -47,6 +49,7 @@ impl HostSystemProbe {
         version: String,
         disk_threshold_percent: u8,
         cloudflared_enabled: bool,
+        ingress_active: bool,
         started_at: i64,
     ) -> Arc<HostSystemProbe> {
         Arc::new(HostSystemProbe {
@@ -56,6 +59,7 @@ impl HostSystemProbe {
             version,
             disk_threshold_percent,
             cloudflared_enabled,
+            ingress_active,
             started_at,
         })
     }
@@ -175,6 +179,30 @@ impl SystemProbe for HostSystemProbe {
             );
         }
 
+        if !self.ingress_active {
+            if let Ok(projects) = self.projects.list().await {
+                let hostnames: Vec<String> = projects
+                    .iter()
+                    .filter_map(|p| p.config.hostname.clone())
+                    .collect();
+                if !hostnames.is_empty() {
+                    checks.push(DiagnosticCheck {
+                        name: "ingress routing".into(),
+                        passed: false,
+                        detail: format!(
+                            "hostname(s) declared but automatic ingress is disabled: {}",
+                            hostnames.join(", ")
+                        ),
+                        hint: Some(
+                            "enable it: sudo rpi agent setup --with-cloudflared \
+                             --cf-token <token> --domain <zone>"
+                                .into(),
+                        ),
+                    });
+                }
+            }
+        }
+
         checks.push(match self.disk.used_percent() {
             Ok(percent) => DiagnosticCheck {
                 name: "disk space".into(),
@@ -209,5 +237,90 @@ impl SystemProbe for HostSystemProbe {
             projects,
             active_deployments: 0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_domain::contracts::{MockDiskProbe, MockProjectRepository, SystemProbe};
+    use pi_domain::entities::{
+        ExposeMode, HealthcheckConfig, Project, ProjectConfig, StageTimeoutOverrides,
+    };
+
+    struct FakeRunner;
+    #[async_trait]
+    impl ProbeRunner for FakeRunner {
+        async fn run(&self, _program: &str, _args: &[&str]) -> Result<String, String> {
+            Ok("ok".into())
+        }
+    }
+
+    fn project(hostname: Option<&str>) -> Project {
+        Project {
+            config: ProjectConfig {
+                name: "app".into(),
+                repo: "r".into(),
+                branch: "main".into(),
+                compose_path: "docker-compose.yml".into(),
+                service: "web".into(),
+                container_port: 80,
+                hostname: hostname.map(String::from),
+                expose: ExposeMode::default(),
+                healthcheck: HealthcheckConfig::default(),
+                timeouts: StageTimeoutOverrides::default(),
+                commands: Default::default(),
+                command_timeout_secs: None,
+            },
+            host_port: 8002,
+            created_at: 1,
+        }
+    }
+
+    fn probe(ingress_active: bool, projects: Vec<Project>) -> Arc<HostSystemProbe> {
+        let mut repo = MockProjectRepository::new();
+        repo.expect_list().return_once(move || Ok(projects));
+        let mut disk = MockDiskProbe::new();
+        disk.expect_used_percent().returning(|| Ok(10));
+        HostSystemProbe::new(
+            Arc::new(FakeRunner),
+            Arc::new(disk),
+            Arc::new(repo),
+            "0.0.0".into(),
+            85,
+            false, // cloudflared binary/service checks off — not under test
+            ingress_active,
+            0,
+        )
+    }
+
+    #[tokio::test]
+    async fn disabled_ingress_with_hostnames_fails_the_ingress_check() {
+        let report = probe(false, vec![project(Some("rpi.example.com"))])
+            .diagnostics()
+            .await;
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "ingress routing")
+            .expect("ingress routing check present");
+        assert!(!check.passed);
+        assert!(check.detail.contains("rpi.example.com"));
+        assert!(check
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sudo rpi agent setup --with-cloudflared"));
+    }
+
+    #[tokio::test]
+    async fn active_ingress_or_no_hostnames_add_no_check() {
+        for (active, host) in [(true, Some("a.example.com")), (false, None)] {
+            let report = probe(active, vec![project(host)]).diagnostics().await;
+            assert!(
+                report.checks.iter().all(|c| c.name != "ingress routing"),
+                "unexpected check for active={active} host={host:?}"
+            );
+        }
     }
 }

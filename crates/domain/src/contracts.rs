@@ -189,6 +189,15 @@ pub trait HealthGate: Send + Sync {
     ) -> Result<(), DomainError>;
 }
 
+/// Result of an ingress upsert: `Applied` when the edge is (or already was)
+/// routing the hostname, `Skipped` when a disabled backend did nothing and
+/// routing remains manual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressOutcome {
+    Applied,
+    Skipped,
+}
+
 /// Routes hostname -> 127.0.0.1:host_port on the edge (§6, §11).
 #[cfg_attr(feature = "mocks", automock)]
 #[async_trait]
@@ -198,7 +207,7 @@ pub trait Ingress: Send + Sync {
         hostname: &str,
         host_port: u16,
         log: Arc<dyn LogSink>,
-    ) -> Result<(), DomainError>;
+    ) -> Result<IngressOutcome, DomainError>;
     async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError>;
 }
 

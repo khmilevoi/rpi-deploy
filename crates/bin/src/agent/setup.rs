@@ -547,6 +547,113 @@ pub(crate) async fn ensure_cloudflared_binary(sys: &dyn Sys, dry: bool, rep: &mu
     }
 }
 
+/// Existing locally-managed config.yml, as found on a host where the tunnel
+/// was built by hand (adoption spec §3.1).
+pub(crate) struct ExistingTunnelConfig {
+    pub tunnel: String,
+    pub credentials_file: Option<String>,
+}
+
+/// A 36-char hyphenated hex UUID — the shape of a cloudflared tunnel id.
+pub(crate) fn looks_like_tunnel_id(s: &str) -> bool {
+    s.len() == 36
+        && s.chars().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+        })
+}
+
+pub(crate) fn parse_existing_config(text: &str) -> Result<ExistingTunnelConfig, String> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(text).map_err(|e| format!("yaml: {e}"))?;
+    if !doc.is_mapping() {
+        return Err("top level must be a mapping".into());
+    }
+    let tunnel = doc
+        .get("tunnel")
+        .and_then(|v| v.as_str())
+        .ok_or("missing `tunnel:` key")?
+        .to_string();
+    let credentials_file = doc
+        .get("credentials-file")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    Ok(ExistingTunnelConfig {
+        tunnel,
+        credentials_file,
+    })
+}
+
+/// §3.1: a host with an existing config.yml is adopted, never rewritten —
+/// the running tunnel and its hand-written routes stay untouched; deploys
+/// take over route management from here.
+async fn adopt_existing_cloudflared(
+    sys: &dyn Sys,
+    cf: &dyn CloudflareApi,
+    opts: &CloudflaredBootstrap,
+    rep: &mut SetupReport,
+) {
+    let Some(text) = sys.read(Path::new(CLOUDFLARED_CONFIG_PATH)) else {
+        rep.errors
+            .push(format!("cannot read {CLOUDFLARED_CONFIG_PATH}"));
+        return;
+    };
+    let parsed = match parse_existing_config(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            rep.errors.push(format!(
+                "{CLOUDFLARED_CONFIG_PATH} exists but is not a usable cloudflared config ({e}); \
+                 fix it or move it aside and re-run setup"
+            ));
+            return;
+        }
+    };
+    let tunnel_id = if looks_like_tunnel_id(&parsed.tunnel) {
+        parsed.tunnel.clone()
+    } else {
+        match cf.find_or_create_tunnel(&parsed.tunnel).await {
+            Ok(creds) => creds.tunnel_id,
+            Err(e) => {
+                rep.errors
+                    .push(format!("resolve tunnel '{}': {e}", parsed.tunnel));
+                return;
+            }
+        }
+    };
+    let creds_path = parsed
+        .credentials_file
+        .clone()
+        .unwrap_or_else(|| format!("/var/lib/rpi/cloudflared/{tunnel_id}.json"));
+    if !sys.exists(Path::new(&creds_path)) {
+        rep.errors.push(format!(
+            "{CLOUDFLARED_CONFIG_PATH} references credentials {creds_path}, which does not \
+             exist; restore the credentials JSON and re-run setup"
+        ));
+        return;
+    }
+    match sys
+        .run(
+            "cloudflared",
+            &[
+                "tunnel",
+                "--config",
+                CLOUDFLARED_CONFIG_PATH,
+                "ingress",
+                "validate",
+            ],
+        )
+        .await
+    {
+        Ok(_) => rep.skipped.push(format!(
+            "{CLOUDFLARED_CONFIG_PATH} (adopted, left untouched)"
+        )),
+        Err(e) => rep.warnings.push(format!(
+            "adopted {CLOUDFLARED_CONFIG_PATH}, but `cloudflared tunnel ingress validate` \
+             failed: {e}"
+        )),
+    }
+    upsert_cloudflared_agent_toml(sys, &tunnel_id, &opts.zone, rep);
+}
+
 /// Minimal locally-managed cloudflared config: spaces only, catch-all last.
 /// Per-hostname ingress rules are added later at deploy time by CloudflaredIngress.
 pub(crate) fn render_config_yml(tunnel_id: &str, creds_path: &str) -> String {
@@ -570,18 +677,34 @@ pub struct CloudflaredBootstrap {
 /// chown/chmod on it (or on config.yml) is surfaced as an error rather than
 /// swallowed — otherwise setup could report success while leaving a secret
 /// world-readable.
+/// Returns `true` when an existing config.yml was adopted (in which case the
+/// caller must not touch the cloudflared systemd unit or restart anything),
+/// `false` when the fresh-install path was taken (including all early
+/// returns on that path, dry-run or error).
 pub(crate) async fn cloudflared_bootstrap_full(
     sys: &dyn Sys,
     cf: &dyn CloudflareApi,
     opts: &CloudflaredBootstrap,
     dry: bool,
     rep: &mut SetupReport,
-) {
+) -> bool {
     ensure_cloudflared_binary(sys, dry, rep).await;
+
+    // Adoption (§3.1): an existing config.yml is never rewritten.
+    if sys.exists(Path::new(CLOUDFLARED_CONFIG_PATH)) {
+        if dry {
+            rep.skipped.push(format!(
+                "{CLOUDFLARED_CONFIG_PATH} exists — would adopt (dry run)"
+            ));
+            return true;
+        }
+        adopt_existing_cloudflared(sys, cf, opts, rep).await;
+        return true;
+    }
 
     if dry {
         rep.created.push("cloudflared tunnel (dry run)".into());
-        return;
+        return false;
     }
 
     let _ = sys
@@ -602,7 +725,7 @@ pub(crate) async fn cloudflared_bootstrap_full(
         Ok(c) => c,
         Err(e) => {
             rep.errors.push(format!("create tunnel: {e}"));
-            return;
+            return false;
         }
     };
     let creds_path = format!("/var/lib/rpi/cloudflared/{}.json", creds.tunnel_id);
@@ -611,7 +734,7 @@ pub(crate) async fn cloudflared_bootstrap_full(
     if !creds.tunnel_secret.is_empty() {
         if let Err(e) = sys.write(Path::new(&creds_path), &credentials_json(&creds)) {
             rep.errors.push(format!("write creds: {e}"));
-            return;
+            return false;
         }
         let chown = sys
             .run("chown", &["rpi-agent:rpi-agent", &creds_path])
@@ -630,13 +753,13 @@ pub(crate) async fn cloudflared_bootstrap_full(
             "adopted tunnel {} but no credentials at {creds_path}; re-create the tunnel or restore its JSON",
             creds.tunnel_id
         ));
-        return;
+        return false;
     }
 
     let config = render_config_yml(&creds.tunnel_id, &creds_path);
     if let Err(e) = sys.write(Path::new(CLOUDFLARED_CONFIG_PATH), &config) {
         rep.errors.push(format!("write config.yml: {e}"));
-        return;
+        return false;
     }
     let chown = sys
         .run("chown", &["rpi-agent:rpi-agent", CLOUDFLARED_CONFIG_PATH])
@@ -670,6 +793,7 @@ pub(crate) async fn cloudflared_bootstrap_full(
     }
 
     upsert_cloudflared_agent_toml(sys, &creds.tunnel_id, &opts.zone, rep);
+    false
 }
 
 /// Append [cloudflare] + [cloudflared] to /etc/rpi/agent.toml only when absent.
@@ -737,10 +861,15 @@ async fn cloudflared_bootstrap(sys: &dyn Sys, opts: &SetupOpts, rep: &mut SetupR
             tunnel_name: resolve_tunnel_name(sys, opts).await,
             zone: domain.clone(),
         };
-        cloudflared_bootstrap_full(sys, &api, &bopts, dry, rep).await;
+        let adopted = cloudflared_bootstrap_full(sys, &api, &bopts, dry, rep).await;
         if rep.errors.len() > errs_before {
             // token write or tunnel bootstrap failed; do NOT enable a user
             // service that would respawn against a missing/broken config.yml
+            return;
+        }
+        if adopted {
+            // Adoption never restarts cloudflared or touches its systemd unit —
+            // the existing install is left running untouched (spec §3.1).
             return;
         }
         cloudflared_user_service(sys, dry, rep).await;
@@ -2220,5 +2349,270 @@ mod tests {
                 .any(|c| c.contains("install") && c.contains("/var/lib/rpi/cloudflared")),
             "dry run must not create /var/lib/rpi/cloudflared"
         );
+    }
+
+    const MANUAL_CONFIG_UUID: &str = "tunnel: bc15c4e2-1111-2222-3333-444455556666\n\
+credentials-file: /var/lib/rpi/cloudflared/creds.json\n\
+ingress:\n  - hostname: board.example.com\n    service: http://127.0.0.1:8001\n  - service: http_status:404\n";
+
+    fn adoption_sys(config: &str) -> FakeSys {
+        let mut sys = fresh_sys();
+        // binary already installed -> ensure_cloudflared_binary skips
+        sys.ok
+            .insert(FakeSys::key("cloudflared", &["--version"]), "ok".into());
+        sys.paths.insert(CLOUDFLARED_CONFIG_PATH.into());
+        sys.files
+            .insert(CLOUDFLARED_CONFIG_PATH.into(), config.into());
+        sys
+    }
+
+    fn adoption_opts() -> CloudflaredBootstrap {
+        CloudflaredBootstrap {
+            tunnel_name: "ignored-on-adoption".into(),
+            zone: "example.com".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn adoption_never_rewrites_config_and_uses_uuid_without_tunnel_api() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let mut sys = adoption_sys(MANUAL_CONFIG_UUID);
+        sys.paths
+            .insert("/var/lib/rpi/cloudflared/creds.json".into());
+        let cf = MockCloudflareApi::new(); // no expectations: any tunnel-API call panics
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap_full(&sys, &cf, &adoption_opts(), false, &mut rep).await;
+
+        let writes = sys.writes.lock().unwrap();
+        assert!(
+            writes.iter().all(|(p, _)| p != CLOUDFLARED_CONFIG_PATH),
+            "config.yml must never be rewritten on adoption: {writes:?}"
+        );
+        let (_, toml) = writes
+            .iter()
+            .find(|(p, _)| p == AGENT_TOML_PATH)
+            .expect("agent.toml sections written");
+        assert!(toml.contains("tunnel_id = \"bc15c4e2-1111-2222-3333-444455556666\""));
+        drop(writes);
+        assert!(sys.calls().iter().any(|c| c.contains("ingress validate")));
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    }
+
+    #[tokio::test]
+    async fn adoption_via_wrapper_does_not_restart_or_enable_cloudflared_service() {
+        // Regression for the wrapper-level bug: cloudflared_bootstrap_full
+        // correctly never rewrites config.yml or restarts anything on the
+        // adoption branch, but its caller (cloudflared_bootstrap) used to
+        // unconditionally fall through into cloudflared_user_service
+        // afterwards — bouncing user@<uid>.service (and therefore any
+        // manually-run cloudflared) even though nothing failed. Exercise the
+        // wrapper directly, not cloudflared_bootstrap_full, so this seam is
+        // covered.
+        let mut sys = adoption_sys(MANUAL_CONFIG_UUID);
+        sys.paths
+            .insert("/var/lib/rpi/cloudflared/creds.json".into());
+        // Let `id -u rpi-agent` succeed so cloudflared_user_service (if
+        // reached) proceeds far enough to attempt the disruptive calls,
+        // rather than bailing out early for an unrelated reason.
+        sys.err.remove(&FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.ok
+            .insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+
+        let opts = SetupOpts {
+            login_user: "piuser".into(),
+            with_cloudflared: true,
+            dry_run: false,
+            cf_token: Some("tok".into()),
+            domain: Some("example.com".into()),
+            tunnel_name: None,
+        };
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap(&sys, &opts, &mut rep).await;
+
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        let calls = sys.calls();
+        assert!(
+            !calls.iter().any(|c| c.contains("restart")),
+            "adoption must not restart any service: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("enable")),
+            "adoption must not enable the cloudflared user service: {calls:?}"
+        );
+        let writes = sys.writes.lock().unwrap();
+        assert!(
+            writes.iter().all(|(p, _)| p != CLOUDFLARED_UNIT_PATH),
+            "adoption must not (re)write the cloudflared unit file: {writes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn adoption_resolves_tunnel_name_via_api() {
+        use pi_domain::contracts::{MockCloudflareApi, TunnelCreds};
+        let mut sys = adoption_sys(
+            "tunnel: myboard\ncredentials-file: /var/lib/rpi/cloudflared/creds.json\ningress:\n  - service: http_status:404\n",
+        );
+        sys.paths
+            .insert("/var/lib/rpi/cloudflared/creds.json".into());
+        let mut cf = MockCloudflareApi::new();
+        cf.expect_find_or_create_tunnel()
+            .withf(|name| name == "myboard")
+            .returning(|name| {
+                Ok(TunnelCreds {
+                    account_tag: "acc".into(),
+                    tunnel_id: "resolved-tid".into(),
+                    tunnel_name: name.to_string(),
+                    tunnel_secret: String::new(), // adopted
+                })
+            });
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap_full(&sys, &cf, &adoption_opts(), false, &mut rep).await;
+        let writes = sys.writes.lock().unwrap();
+        let (_, toml) = writes
+            .iter()
+            .find(|(p, _)| p == AGENT_TOML_PATH)
+            .expect("agent.toml written");
+        assert!(toml.contains("tunnel_id = \"resolved-tid\""));
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    }
+
+    #[tokio::test]
+    async fn adoption_missing_credentials_is_an_error_with_zero_writes() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let sys = adoption_sys(MANUAL_CONFIG_UUID); // creds path NOT in sys.paths
+        let cf = MockCloudflareApi::new();
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap_full(&sys, &cf, &adoption_opts(), false, &mut rep).await;
+        assert!(
+            rep.errors.iter().any(|e| e.contains("creds.json")),
+            "{:?}",
+            rep.errors
+        );
+        assert!(
+            sys.writes.lock().unwrap().is_empty(),
+            "zero writes on error"
+        );
+    }
+
+    #[tokio::test]
+    async fn adoption_unparseable_config_is_an_error_with_zero_writes() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let sys = adoption_sys("- just\n- a list\n"); // no `tunnel:` mapping
+        let cf = MockCloudflareApi::new();
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap_full(&sys, &cf, &adoption_opts(), false, &mut rep).await;
+        assert!(
+            rep.errors
+                .iter()
+                .any(|e| e.contains("move it aside") || e.contains("not a usable")),
+            "{:?}",
+            rep.errors
+        );
+        assert!(
+            sys.writes.lock().unwrap().is_empty(),
+            "zero writes on error"
+        );
+    }
+
+    #[tokio::test]
+    async fn adoption_validate_failure_is_a_warning_not_an_error() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let mut sys = adoption_sys(MANUAL_CONFIG_UUID);
+        sys.paths
+            .insert("/var/lib/rpi/cloudflared/creds.json".into());
+        sys.err.insert(FakeSys::key(
+            "cloudflared",
+            &[
+                "tunnel",
+                "--config",
+                CLOUDFLARED_CONFIG_PATH,
+                "ingress",
+                "validate",
+            ],
+        ));
+        let cf = MockCloudflareApi::new();
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap_full(&sys, &cf, &adoption_opts(), false, &mut rep).await;
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert!(
+            !rep.warnings.is_empty(),
+            "validate failure surfaces as warning"
+        );
+        assert!(
+            sys.writes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(p, _)| p == AGENT_TOML_PATH),
+            "agent.toml still written"
+        );
+    }
+
+    #[tokio::test]
+    async fn adoption_default_creds_path_is_derived_from_tunnel_id() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let mut sys = adoption_sys(
+            "tunnel: bc15c4e2-1111-2222-3333-444455556666\ningress:\n  - service: http_status:404\n",
+        );
+        sys.paths
+            .insert("/var/lib/rpi/cloudflared/bc15c4e2-1111-2222-3333-444455556666.json".into());
+        let cf = MockCloudflareApi::new();
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap_full(&sys, &cf, &adoption_opts(), false, &mut rep).await;
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    }
+
+    #[tokio::test]
+    async fn adoption_dry_run_reports_would_adopt_and_writes_nothing() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let sys = adoption_sys(MANUAL_CONFIG_UUID);
+        let cf = MockCloudflareApi::new();
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap_full(&sys, &cf, &adoption_opts(), true, &mut rep).await;
+        assert!(sys.writes.lock().unwrap().is_empty());
+        assert!(
+            rep.skipped.iter().any(|s| s.contains("would adopt")),
+            "{:?}",
+            rep.skipped
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_adoption_is_a_pure_skip() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let mut sys = adoption_sys(MANUAL_CONFIG_UUID);
+        sys.paths
+            .insert("/var/lib/rpi/cloudflared/creds.json".into());
+        // agent.toml already carries the sections from the first run
+        sys.files.insert(
+            AGENT_TOML_PATH.into(),
+            "[cloudflared]\nconfig = \"/var/lib/rpi/cloudflared/config.yml\"\n".into(),
+        );
+        let cf = MockCloudflareApi::new();
+        let mut rep = SetupReport::default();
+        cloudflared_bootstrap_full(&sys, &cf, &adoption_opts(), false, &mut rep).await;
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert!(
+            sys.writes.lock().unwrap().is_empty(),
+            "second run must not write anything"
+        );
+        assert!(
+            rep.skipped.iter().any(|s| s.contains("agent.toml")),
+            "{:?}",
+            rep.skipped
+        );
+    }
+
+    #[test]
+    fn tunnel_id_shape_detection() {
+        assert!(looks_like_tunnel_id("bc15c4e2-1111-2222-3333-444455556666"));
+        assert!(!looks_like_tunnel_id("myboard"));
+        assert!(!looks_like_tunnel_id("bc15c4e2-1111-2222-3333-44445555666")); // 35 chars
+        assert!(!looks_like_tunnel_id(
+            "gc15c4e2-1111-2222-3333-444455556666"
+        )); // non-hex
+        assert!(!looks_like_tunnel_id(
+            "BC15C4E2-1111-2222-3333-444455556666"
+        )); // uppercase hex
     }
 }
