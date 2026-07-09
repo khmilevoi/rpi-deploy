@@ -865,6 +865,26 @@ Omitting `--cf-token`/`--domain` is backward compatible: `--with-cloudflared`
 falls back to today's behavior — it scaffolds linger and the user unit and
 prints the manual completion steps below.
 
+### Adopting an existing tunnel
+
+If `/var/lib/rpi/cloudflared/config.yml` already exists (a hand-built tunnel),
+`rpi agent setup --with-cloudflared --cf-token <token> --domain <zone>` adopts it
+instead of recreating anything:
+
+- the existing `config.yml` is **never rewritten** and cloudflared is **not
+  restarted** — hand-written routes and uptime are preserved;
+- the tunnel id is taken from the `tunnel:` key (a name is resolved via the
+  Cloudflare API); credentials are checked at the `credentials-file:` path;
+- `[cloudflare]`/`[cloudflared]` are appended to `/etc/rpi/agent.toml`, after
+  which every deploy manages routes and DNS by itself.
+
+Token scopes: `Zone:Zone:Read` + `Zone:DNS:Edit` are enough when `tunnel:` holds
+the tunnel id (UUID). `Account:Cloudflare Tunnel:Edit` is additionally needed for
+fresh installs and for adoption when `tunnel:` holds a name.
+
+If a project declares `[ingress] hostname` while the agent has no ingress
+configured, the deploy summary and `rpi doctor` now say so explicitly.
+
 ### Manual Setup
 
 Without a token, configure `cloudflared` locally instead. A typical locally
