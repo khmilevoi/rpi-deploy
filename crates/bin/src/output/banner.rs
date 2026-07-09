@@ -71,6 +71,10 @@ pub fn stderr_is_tty() -> bool {
     console::Term::stderr().is_term()
 }
 
+pub fn stdout_is_tty() -> bool {
+    console::Term::stdout().is_term()
+}
+
 /// Assemble the banner. `unicode=false` degrades to a one-line wordmark.
 /// `line1` sits beside triangle row 1, `line2` row 2, `line3` (optional) row 3.
 fn render_banner_inner(unicode: bool, line1: &str, line2: &str, line3: Option<&str>) -> String {
@@ -235,6 +239,21 @@ mod tests {
             !ascii.contains('→'),
             "no arrow when url is absent: {ascii:?}"
         );
+    }
+
+    #[test]
+    fn stdout_and_stderr_tty_checks_are_independent() {
+        // Regression for the --version bug: the decision of whether to print
+        // the coloured banner must be gated on stdout (the stream the
+        // `--version` output is actually written to), not stderr. Under the
+        // captured test harness neither stream is a TTY, but the two checks
+        // must be backed by distinct `console::Term` instances (stdout vs
+        // stderr) rather than one function accidentally delegating to the
+        // other — asserting both here pins that `stdout_is_tty` reflects
+        // `Term::stdout()` and cannot silently become an alias for
+        // `stderr_is_tty`.
+        assert_eq!(stdout_is_tty(), console::Term::stdout().is_term());
+        assert_eq!(stderr_is_tty(), console::Term::stderr().is_term());
     }
 
     #[test]

@@ -276,7 +276,7 @@ async fn run() -> anyhow::Result<()> {
 
     if cli.version {
         let v = env!("CARGO_PKG_VERSION");
-        if output::stderr_is_tty() {
+        if output::stdout_is_tty() {
             println!("{}", output::brand_banner(v));
         } else {
             println!("rpi {v}");
