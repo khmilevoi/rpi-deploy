@@ -1,6 +1,8 @@
 use super::migrate::{self, Migration};
 use super::self_install::{self, SelfInstallAction};
 use async_trait::async_trait;
+use pi_domain::contracts::CloudflareApi;
+use pi_infrastructure::cloudflare::credentials_json;
 use std::path::{Path, PathBuf};
 
 /// All OS effects setup needs, behind a trait so logic is testable off-Linux.
@@ -534,6 +536,155 @@ pub(crate) async fn ensure_cloudflared_binary(sys: &dyn Sys, dry: bool, rep: &mu
         Err(e) => rep.errors.push(format!(
             "downloaded {CLOUDFLARED_BIN} but failed to chmod +x ({e}); it is not executable — fix manually"
         )),
+    }
+}
+
+/// Minimal locally-managed cloudflared config: spaces only, catch-all last.
+/// Per-hostname ingress rules are added later at deploy time by CloudflaredIngress.
+pub(crate) fn render_config_yml(tunnel_id: &str, creds_path: &str) -> String {
+    format!(
+        "tunnel: {tunnel_id}\n\
+         credentials-file: {creds_path}\n\
+         \n\
+         ingress:\n\
+         \x20\x20- service: http_status:404\n"
+    )
+}
+
+#[allow(dead_code)] // wired in Task 10
+pub struct CloudflaredBootstrap {
+    pub tunnel_name: String,
+    pub zone: String,
+}
+
+/// Create (or adopt) the tunnel via the Cloudflare API, write its credentials
+/// JSON + a validated config.yml, and append [cloudflare]/[cloudflared] to
+/// agent.toml. The credentials JSON carries the tunnel secret, so a failed
+/// chown/chmod on it (or on config.yml) is surfaced as an error rather than
+/// swallowed — otherwise setup could report success while leaving a secret
+/// world-readable.
+#[allow(dead_code)] // wired in Task 10
+pub(crate) async fn cloudflared_bootstrap_full(
+    sys: &dyn Sys,
+    cf: &dyn CloudflareApi,
+    opts: &CloudflaredBootstrap,
+    dry: bool,
+    rep: &mut SetupReport,
+) {
+    ensure_cloudflared_binary(sys, dry, rep).await;
+    let _ = sys
+        .run(
+            "install",
+            &[
+                "-d",
+                "-o",
+                "rpi-agent",
+                "-g",
+                "rpi-agent",
+                "/var/lib/rpi/cloudflared",
+            ],
+        )
+        .await;
+
+    if dry {
+        rep.created.push("cloudflared tunnel (dry run)".into());
+        return;
+    }
+
+    let creds = match cf.find_or_create_tunnel(&opts.tunnel_name).await {
+        Ok(c) => c,
+        Err(e) => {
+            rep.errors.push(format!("create tunnel: {e}"));
+            return;
+        }
+    };
+    let creds_path = format!("/var/lib/rpi/cloudflared/{}.json", creds.tunnel_id);
+    // Only (re)write creds when we hold a secret (freshly created). An adopted
+    // tunnel (empty secret) must already have its creds file on disk.
+    if !creds.tunnel_secret.is_empty() {
+        if let Err(e) = sys.write(Path::new(&creds_path), &credentials_json(&creds)) {
+            rep.errors.push(format!("write creds: {e}"));
+            return;
+        }
+        let chown = sys
+            .run("chown", &["rpi-agent:rpi-agent", &creds_path])
+            .await;
+        let chmod = sys.run("chmod", &["640", &creds_path]).await;
+        if chown.is_ok() && chmod.is_ok() {
+            rep.created.push(creds_path.clone());
+        } else {
+            rep.errors.push(format!(
+                "wrote {creds_path} but failed to set rpi-agent:rpi-agent/0640 — the tunnel \
+                 credentials may be world-readable; fix manually"
+            ));
+        }
+    } else if !sys.exists(Path::new(&creds_path)) {
+        rep.errors.push(format!(
+            "adopted tunnel {} but no credentials at {creds_path}; re-create the tunnel or restore its JSON",
+            creds.tunnel_id
+        ));
+        return;
+    }
+
+    let config = render_config_yml(&creds.tunnel_id, &creds_path);
+    if let Err(e) = sys.write(Path::new(CLOUDFLARED_CONFIG_PATH), &config) {
+        rep.errors.push(format!("write config.yml: {e}"));
+        return;
+    }
+    let chown = sys
+        .run("chown", &["rpi-agent:rpi-agent", CLOUDFLARED_CONFIG_PATH])
+        .await;
+    let chmod = sys.run("chmod", &["640", CLOUDFLARED_CONFIG_PATH]).await;
+    if !(chown.is_ok() && chmod.is_ok()) {
+        rep.errors.push(format!(
+            "wrote {CLOUDFLARED_CONFIG_PATH} but failed to set rpi-agent:rpi-agent/0640 — fix manually"
+        ));
+    }
+
+    match sys
+        .run(
+            "cloudflared",
+            &[
+                "tunnel",
+                "--config",
+                CLOUDFLARED_CONFIG_PATH,
+                "ingress",
+                "validate",
+            ],
+        )
+        .await
+    {
+        Ok(_) => rep.created.push(CLOUDFLARED_CONFIG_PATH.into()),
+        Err(e) => rep
+            .errors
+            .push(format!("cloudflared ingress validate: {e}")),
+    }
+
+    upsert_cloudflared_agent_toml(sys, &creds.tunnel_id, &opts.zone, rep);
+}
+
+/// Append [cloudflare] + [cloudflared] to /etc/rpi/agent.toml only when absent.
+#[allow(dead_code)] // wired in Task 10
+fn upsert_cloudflared_agent_toml(
+    sys: &dyn Sys,
+    tunnel_id: &str,
+    zone: &str,
+    rep: &mut SetupReport,
+) {
+    let existing = sys.read(Path::new(AGENT_TOML_PATH)).unwrap_or_default();
+    if existing.contains("[cloudflared]") {
+        rep.skipped.push("agent.toml [cloudflared]".into());
+        return;
+    }
+    let block = format!(
+        "\n[cloudflare]\nzone = \"{zone}\"\ntoken_file = \"{CLOUDFLARE_TOKEN_PATH}\"\n\n\
+         [cloudflared]\nconfig = \"{CLOUDFLARED_CONFIG_PATH}\"\ntunnel = \"{tunnel_id}\"\ntunnel_id = \"{tunnel_id}\"\n"
+    );
+    match sys.write(Path::new(AGENT_TOML_PATH), &format!("{existing}{block}")) {
+        Ok(_) => rep
+            .created
+            .push("agent.toml [cloudflare]/[cloudflared]".into()),
+        Err(e) => rep.errors.push(format!("write agent.toml sections: {e}")),
     }
 }
 
@@ -1667,6 +1818,55 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c.contains("chmod") && c.contains("/usr/local/bin/cloudflared")));
+    }
+
+    #[test]
+    fn config_yml_uses_spaces_and_keeps_catch_all() {
+        let yml = render_config_yml("tid", "/var/lib/rpi/cloudflared/tid.json");
+        assert!(!yml.contains('\t'), "no tabs allowed in cloudflared config");
+        assert!(yml.contains("tunnel: tid"));
+        assert!(yml.contains("credentials-file: /var/lib/rpi/cloudflared/tid.json"));
+        assert!(
+            yml.trim_end().ends_with("service: http_status:404"),
+            "catch-all last"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_writes_creds_config_and_validates() {
+        use pi_domain::contracts::{MockCloudflareApi, TunnelCreds};
+        let mut sys = fresh_sys();
+        sys.ok
+            .insert(FakeSys::key("uname", &["-m"]), "aarch64".into());
+        sys.err.insert(FakeSys::key("cloudflared", &["--version"])); // triggers install path
+        let mut cf = MockCloudflareApi::new();
+        cf.expect_find_or_create_tunnel().returning(|name| {
+            Ok(TunnelCreds {
+                account_tag: "acc".into(),
+                tunnel_id: "tid".into(),
+                tunnel_name: name.to_string(),
+                tunnel_secret: "c2VjcmV0".into(),
+            })
+        });
+        let mut rep = SetupReport::default();
+        let opts = CloudflaredBootstrap {
+            tunnel_name: "myboard".into(),
+            zone: "example.com".into(),
+        };
+        cloudflared_bootstrap_full(&sys, &cf, &opts, false, &mut rep).await;
+        let writes = sys.writes.lock().unwrap();
+        assert!(
+            writes
+                .iter()
+                .any(|(p, _)| p == "/var/lib/rpi/cloudflared/tid.json"),
+            "creds json"
+        );
+        assert!(writes
+            .iter()
+            .any(|(p, c)| p == "/var/lib/rpi/cloudflared/config.yml" && !c.contains('\t')));
+        drop(writes);
+        assert!(sys.calls().iter().any(|c| c.contains("ingress validate")));
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
     }
 
     #[tokio::test]
