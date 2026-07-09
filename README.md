@@ -8,7 +8,7 @@ containers.
 
 Website: https://rpi.iiskelo.com
 
-Status: v0.13 (Cloudflare Tunnel auto-bootstrap + `rpi agent migrate`) —
+Status: v0.14 (branded console theme + `PI_THEME`) —
 everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
@@ -37,7 +37,11 @@ adopts the tunnel and DNS record entirely through the Cloudflare API — no
 start when the token is missing or misconfigured) plus a unified
 `rpi agent migrate` framework (detects pending internal migrations, tracks
 applied ones in a ledger in `state.db`; the existing `pi`-to-`rpi` rename now
-runs through it).
+runs through it), and v0.14 a themed console layer (a single theme object now
+drives every colour and marker glyph in `rpi`'s output — messages, tables,
+the spinner, and the log pane; the default `raspberry` theme brands every
+message line with a raspberry `▸` marker and the site's green/amber palette,
+switchable to the pre-brand `classic` look via `PI_THEME=classic`).
 
 Supported features:
 
