@@ -130,8 +130,11 @@
 - **`deploy.rs`/`commands.rs`:** `Skipped` + hostname → `warning: …` последней
   строкой `log_tail`; `Applied` → без warning. В CLI — юнит-тест выделения
   `warning: `-префикса (`deploy_warning`). proto.rs не меняется.
-- **doctor:** hostname + `disabled` → warn; `cloudflared` или нет hostname'ов →
-  тишина; status без поля ingress → чек скипается.
+- **doctor:** юнит-тесты `probe.rs` покрывают `HostSystemProbe::diagnostics()` с
+  `MockProjectRepository`/`MockDiskProbe`: (а) отключённый ingress + проект с
+  hostname'ом → чек `ingress routing` падает, detail перечисляет hostname'ы, hint
+  содержит команду включения; (б) активный ingress или нет hostname'ов → такой чек
+  отсутствует.
 - **Интеграционно на Pi (чеклист, руками):** setup с токеном → `config.yml`
   побайтово не изменился (сверить хеш до/после), board отвечает всё время; секции в
   `agent.toml` с верным tunnel_id; `rpi deploy` rpi-deploy-site → роут в config.yml +

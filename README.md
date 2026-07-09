@@ -868,7 +868,7 @@ prints the manual completion steps below.
 ### Adopting an existing tunnel
 
 If `/var/lib/rpi/cloudflared/config.yml` already exists (a hand-built tunnel),
-`rpi agent setup --with-cloudflared --cf-token <token> --domain <zone>` adopts it
+`sudo rpi agent setup --with-cloudflared --cf-token <token> --domain <zone>` adopts it
 instead of recreating anything:
 
 - the existing `config.yml` is **never rewritten** and cloudflared is **not
