@@ -40,6 +40,14 @@ fn migrations() -> Migrations<'static> {
         ALTER TABLE projects ADD COLUMN command_timeout_secs INTEGER;
         "#,
         ),
+        M::up(
+            r#"
+        CREATE TABLE applied_migrations (
+            id         TEXT PRIMARY KEY,
+            applied_at INTEGER NOT NULL
+        );
+        "#,
+        ),
     ])
 }
 
