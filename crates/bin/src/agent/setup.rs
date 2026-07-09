@@ -515,8 +515,10 @@ pub(crate) async fn ensure_cloudflared_binary(sys: &dyn Sys, dry: bool, rep: &mu
         }
     };
     let Some(asset) = cloudflared_asset(arch.trim()) else {
-        rep.errors
-            .push(format!("unsupported architecture for cloudflared: {arch}"));
+        rep.errors.push(format!(
+            "unsupported architecture for cloudflared: {}",
+            arch.trim()
+        ));
         return;
     };
     let url = format!("https://github.com/cloudflare/cloudflared/releases/latest/download/{asset}");
@@ -527,8 +529,12 @@ pub(crate) async fn ensure_cloudflared_binary(sys: &dyn Sys, dry: bool, rep: &mu
         rep.errors.push(format!("download cloudflared: {e}"));
         return;
     }
-    let _ = sys.run("chmod", &["0755", CLOUDFLARED_BIN]).await;
-    rep.created.push(CLOUDFLARED_BIN.into());
+    match sys.run("chmod", &["0755", CLOUDFLARED_BIN]).await {
+        Ok(_) => rep.created.push(CLOUDFLARED_BIN.into()),
+        Err(e) => rep.errors.push(format!(
+            "downloaded {CLOUDFLARED_BIN} but failed to chmod +x ({e}); it is not executable — fix manually"
+        )),
+    }
 }
 
 const CLOUDFLARED_UNIT: &str = "\
@@ -1661,5 +1667,26 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c.contains("chmod") && c.contains("/usr/local/bin/cloudflared")));
+    }
+
+    #[tokio::test]
+    async fn cloudflared_chmod_failure_is_surfaced() {
+        let mut sys = fresh_sys();
+        sys.ok
+            .insert(FakeSys::key("uname", &["-m"]), "aarch64".into());
+        sys.err.insert(FakeSys::key("cloudflared", &["--version"]));
+        sys.err.insert(FakeSys::key(
+            "chmod",
+            &["0755", "/usr/local/bin/cloudflared"],
+        ));
+        let mut rep = SetupReport::default();
+        ensure_cloudflared_binary(&sys, false, &mut rep).await;
+        assert!(!rep.errors.is_empty(), "chmod failure should be surfaced");
+        assert!(
+            !rep.created
+                .iter()
+                .any(|c| c == "/usr/local/bin/cloudflared"),
+            "binary must not be reported as successfully created"
+        );
     }
 }
