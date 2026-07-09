@@ -35,7 +35,6 @@ pub struct AgentConfig {
     pub logs: LogsSection,
     #[serde(default = "default_schema")]
     pub schema: u32,
-    #[allow(dead_code)]
     pub cloudflare: Option<CloudflareSection>,
 }
 
@@ -66,7 +65,10 @@ impl Default for GcSection {
 pub struct CloudflaredSection {
     /// Path to the locally-managed cloudflared config.yml (§11).
     pub config: PathBuf,
-    /// Tunnel name for `cloudflared tunnel route dns`.
+    /// Tunnel name/id recorded in config.yml's `tunnel:` key. Not read by
+    /// Rust code (DNS routing uses `tunnel_id`); required in agent.toml so
+    /// the section documents which tunnel this agent manages.
+    #[allow(dead_code)]
     pub tunnel: String,
     /// Command applying the config; no sudo needed under linger (§11).
     #[serde(default = "default_restart")]
@@ -78,7 +80,6 @@ pub struct CloudflaredSection {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct CloudflareSection {
     pub zone: String,
     pub token_file: PathBuf,

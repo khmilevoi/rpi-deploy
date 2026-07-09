@@ -93,7 +93,6 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
             let tunnel_id = cf_local.tunnel_id.clone().unwrap_or_default();
             CloudflaredIngress::new(
                 cf_local.config.clone(),
-                cf_local.tunnel.clone(),
                 tunnel_id,
                 cf_acct.zone.clone(),
                 cf_local.restart.clone(),

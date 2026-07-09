@@ -85,10 +85,6 @@ pub(crate) fn remove_ingress_rule(
 /// route, restarts the unit without sudo — and only when the config changed.
 pub struct CloudflaredIngress {
     config_path: PathBuf,
-    /// Tunnel name; kept for config.yml semantics even though DNS routing
-    /// now uses `tunnel_id` via the Cloudflare API.
-    #[allow(dead_code)]
-    tunnel: String,
     tunnel_id: String,
     zone: String,
     restart: Vec<String>,
@@ -98,7 +94,6 @@ pub struct CloudflaredIngress {
 impl CloudflaredIngress {
     pub fn new(
         config_path: PathBuf,
-        tunnel: String,
         tunnel_id: String,
         zone: String,
         restart: Vec<String>,
@@ -106,7 +101,6 @@ impl CloudflaredIngress {
     ) -> Arc<CloudflaredIngress> {
         Arc::new(CloudflaredIngress {
             config_path,
-            tunnel,
             tunnel_id,
             zone,
             restart,
@@ -345,7 +339,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ingress = CloudflaredIngress::new(
             dir.path().join("config.yml"),
-            "home".into(),
             "tid".into(),
             "example.com".into(),
             vec!["whatever".into()],
@@ -372,7 +365,6 @@ mod tests {
         // mock has no expectations set, so any call would panic.
         let ingress = CloudflaredIngress::new(
             path.clone(),
-            "home".into(),
             "tid".into(),
             "example.com".into(),
             vec!["pi-test-no-such-binary".into()],
@@ -404,7 +396,6 @@ mod tests {
 
         let ingress = CloudflaredIngress::new(
             path.clone(),
-            "home".into(),
             "tid".into(),
             "example.com".into(),
             vec!["pi-test-no-such-binary".into()],
@@ -452,7 +443,6 @@ mod tests {
 
         let ingress = CloudflaredIngress::new(
             path.clone(),
-            "home".into(),
             "tid".into(),
             "example.com".into(),
             vec!["true".into()], // restart command that succeeds
