@@ -6,7 +6,7 @@ machine or in CI. The CLI connects to the agent through an SSH tunnel; the
 agent clones the Git repository, builds the Compose stack, and starts the
 containers.
 
-Status: v0.11.1 (colorful console output) — everything from v0.1–v0.6 (deploy/secrets/
+Status: v0.12 (semantic console colours) — everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
 `npm install -g rpi-deploy` for both roles), v0.7 prebuilt binaries
@@ -21,7 +21,12 @@ entries can target a different Compose service than the project default),
 and v0.11 colorful console output (colored semantic messages, tables for
 `rpi ls`/`status`/`stats`, spinners, and a bordered scrolling log pane for
 `rpi deploy`/`rpi command` streaming output, with v0.11.1 fixing a log pane
-flicker and preserving streamed color).
+flicker and preserving streamed color), and v0.12 semantic console colours
+(a shared palette drives message markers, cyan table headers with
+status/usage-colored cells, the spinner glyph, and the log-pane frame — grey
+while streaming, red with a full-log dump on failure — and `rpi command` now
+keeps its streamed output on screen after a successful run instead of
+clearing it).
 
 Supported features:
 
