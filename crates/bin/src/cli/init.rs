@@ -213,14 +213,14 @@ pub async fn run(flags: InitFlags) -> anyhow::Result<()> {
         let overwrite = flags.yes
             || prompter.confirm("rpi.toml exists — overwrite? (a .bak is kept)", false)?;
         if !overwrite {
-            println!("aborted: rpi.toml left unchanged");
+            crate::output::info("aborted: rpi.toml left unchanged");
             return Ok(());
         }
         backup_existing_rpi_toml(&path)?;
     }
     std::fs::write(&path, &text)?;
     crate::output::success(format!("wrote {}", path.display()));
-    println!("next: `rpi secrets send` (if you use secrets), then `rpi deploy`");
+    crate::output::info("next: `rpi secrets send` (if you use secrets), then `rpi deploy`");
     Ok(())
 }
 

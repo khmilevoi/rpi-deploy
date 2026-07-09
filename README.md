@@ -489,7 +489,7 @@ rpi ls
 If no projects have been deployed yet, the expected output is:
 
 ```text
-no projects deployed yet
+▸ no projects deployed yet
 ```
 
 For CI or a one-off command, you can skip the config file:
@@ -505,6 +505,13 @@ Select a specific profile:
 rpi ls --server home
 PI_SERVER=home rpi ls
 ```
+
+### Console theme
+
+`rpi` output uses the brand theme: a raspberry `▸` marker on every message
+line, site green/amber for success/warn. Set `PI_THEME=classic` for the
+pre-brand look (cyan accent, `●` marker). `NO_COLOR`, piping, and non-TTY
+output disable styling entirely, as before.
 
 ## Prepare A Project For Deployment
 
