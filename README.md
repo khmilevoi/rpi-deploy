@@ -6,6 +6,8 @@ machine or in CI. The CLI connects to the agent through an SSH tunnel; the
 agent clones the Git repository, builds the Compose stack, and starts the
 containers.
 
+Website: https://rpi.iiskelo.com
+
 Status: v0.12 (semantic console colours) — everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,

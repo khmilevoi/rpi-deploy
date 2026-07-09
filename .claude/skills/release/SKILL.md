@@ -16,6 +16,7 @@ The version lives in three files that must agree, plus the tag: `Cargo.toml` (`[
 3. **Update docs — this is part of the release commit, not optional polish**:
    - `README.md` "Status: vX.Y (...)" line near the top: new version + one-phrase feature summary, and fold the shipped features into the surrounding status paragraph / Supported features list (see how v0.7 prebuilt binaries is described there).
    - If the release changes behavior users must migrate through, add `docs/migration-*.md` (precedent: `migration-v0.5-to-v0.6.md`).
+   - **Post-release, separate repo**: check whether this release changed anything the landing page shows (feature list, quick start, install instructions, CLI output look). If yes, update `rpi-deploy-site` (`https://github.com/khmilevoi/rpi-deploy-site`) and redeploy it (`rpi deploy` from that repo's root). It's a separate repository, so this is a post-release follow-up, not part of the release commit — the npm version badge on the page updates itself and needs no action.
 4. **Local gate** (mirrors CI's `check` job and `ci.yml`; catch it here, not in CI):
    ```
    node scripts/check-version.js        # must print: check-version: ok (X.Y.Z)
