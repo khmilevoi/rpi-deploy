@@ -19,8 +19,6 @@ pub(crate) fn parse_duration_secs(s: &str) -> Result<u64, String> {
 
 /// Wall-clock elapsed time for the deploy stamp. Under a minute: one decimal
 /// second (`12.4s`). A minute or more: `1m03s` (seconds zero-padded).
-// Allow removed in Task 4 once `deploy_stamp` calls this from the live deploy path.
-#[allow(dead_code)]
 pub(crate) fn format_elapsed(d: std::time::Duration) -> String {
     let secs = d.as_secs_f64();
     if secs < 60.0 {

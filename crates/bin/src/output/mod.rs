@@ -10,6 +10,7 @@ mod logpane;
 pub use logpane::LogPane;
 
 mod banner;
+pub use banner::{deploy_stamp, StampOutcome};
 mod theme;
 
 fn no_color_requested() -> bool {
@@ -141,6 +142,14 @@ fn status_line(msg: &str) -> String {
 
 pub fn status(msg: impl std::fmt::Display) {
     eprintln!("{}", status_line(&msg.to_string()));
+}
+
+/// Print the deploy logo banner to stderr, but only on an interactive
+/// terminal — under a pipe, file, or CI it is skipped so logs stay clean.
+pub fn show_deploy_banner(project: &str) {
+    if banner::stderr_is_tty() {
+        eprintln!("{}", banner::deploy_banner(project));
+    }
 }
 
 /// Pure, string-returning variants for callers that build up a `String`

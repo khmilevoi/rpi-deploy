@@ -15,6 +15,7 @@ use crate::proto::{DeployRequest, DiagnosticCheckDto};
 pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Result<()> {
     let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
     let project = rpitoml.to_project_config();
+    output::show_deploy_banner(&rpitoml.project.name);
 
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
@@ -30,6 +31,7 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
         project: (&project).into(),
         git_ref,
     };
+    let started = std::time::Instant::now();
     let accepted = api.deploy(&req).await?;
     if accepted.queued {
         output::status(format!(
@@ -53,13 +55,29 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
             pane.push_line(line)
         })
         .await?;
+    let elapsed = started.elapsed();
+    let name = &rpitoml.project.name;
+    let url = rpitoml.ingress.hostname.as_deref();
     match status.as_str() {
-        "success" => pane.finish_ok(&format!("deploy finished: {status}")),
-        "superseded" => pane.finish_neutral(
-            "deploy finished: superseded (a newer deploy request replaced this one - not an error)",
-        ),
+        "success" => pane.finish_ok(&output::deploy_stamp(
+            output::StampOutcome::Success,
+            name,
+            url,
+            elapsed,
+        )),
+        "superseded" => pane.finish_neutral(&output::deploy_stamp(
+            output::StampOutcome::Superseded,
+            name,
+            url,
+            elapsed,
+        )),
         _ => {
-            pane.finish_err(&format!("deploy finished: {status}"));
+            pane.finish_err(&output::deploy_stamp(
+                output::StampOutcome::Failed,
+                name,
+                url,
+                elapsed,
+            ));
             for w in &warnings {
                 output::warn(w);
             }
