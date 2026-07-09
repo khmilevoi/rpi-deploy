@@ -936,6 +936,9 @@ async fn resolve_npm_dist_binary(sys: &dyn Sys, login_user: &str) -> Option<Path
 pub async fn run_cmd(
     user: Option<String>,
     with_cloudflared: bool,
+    cf_token: Option<String>,
+    domain: Option<String>,
+    tunnel: Option<String>,
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let login_user = user
@@ -944,13 +947,14 @@ pub async fn run_cmd(
         .ok_or_else(|| anyhow::anyhow!(
             "cannot determine the SSH login user; run via `sudo rpi agent setup` or pass --user <name>"
         ))?;
+    let cf_token = cf_token.or_else(|| std::env::var("CLOUDFLARE_API_TOKEN").ok());
     let opts = SetupOpts {
         login_user,
         with_cloudflared,
         dry_run,
-        cf_token: None,
-        domain: None,
-        tunnel_name: None,
+        cf_token,
+        domain,
+        tunnel_name: tunnel,
     };
 
     let current = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;

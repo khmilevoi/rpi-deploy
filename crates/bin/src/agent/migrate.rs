@@ -6,11 +6,21 @@ use async_trait::async_trait;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationState {
     Applicable,
+    // Part of the `Migration::detect` contract for a migration whose own host
+    // check can tell it's already applied without consulting the ledger
+    // (distinct from `NotApplicable`, which means "not needed here"). The
+    // only migration registered so far (`PiToRpi`) never needs to report
+    // this; a future Phase-2 migration is expected to.
+    #[allow(dead_code)]
     Done,
     NotApplicable,
 }
 
 pub struct MigrationOutcome {
+    // Part of the `Migration::apply` contract; not yet consumed by any
+    // caller (`apply_one` only reads `note`). Reserved for a future
+    // no-op-vs-real-change distinction in reporting.
+    #[allow(dead_code)]
     pub changed: bool,
     pub note: String,
 }
@@ -134,6 +144,48 @@ impl Migration for PiToRpi {
 
 pub fn registry() -> Vec<Box<dyn Migration>> {
     vec![Box::new(PiToRpi)]
+}
+
+/// CLI entrypoint: `rpi agent migrate`. Opens the agent's state DB, runs the
+/// requested migrations (or lists them), and prints a report.
+pub async fn run_cmd(
+    list: bool,
+    dry_run: bool,
+    run: Vec<String>,
+    all: bool,
+    yes: bool,
+) -> anyhow::Result<()> {
+    use super::setup::HostSys;
+    let config = super::config::AgentConfig::load(None)?;
+    let db = pi_infrastructure::sqlite::Db::open(&config.data_dir.join("state.db"))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ledger = super::migrate_ledger::DbLedger::new(
+        pi_infrastructure::migrations::MigrationLedger::new(db),
+    );
+    let registry = registry();
+    let mut rep = SetupReport::default();
+    let sys = HostSys;
+
+    if list {
+        for m in &registry {
+            let applied = ledger.is_applied(m.id()).await;
+            println!("{}\t{}\tapplied={applied}", m.id(), m.description());
+        }
+        return Ok(());
+    }
+    if !run.is_empty() {
+        run_explicit(&sys, &ledger, &registry, &run, dry_run, &mut rep).await;
+    } else if all && yes {
+        let ids: Vec<String> = registry.iter().map(|m| m.id().to_string()).collect();
+        run_explicit(&sys, &ledger, &registry, &ids, dry_run, &mut rep).await;
+    } else {
+        run_auto(&sys, &ledger, &registry, dry_run, &mut rep).await;
+    }
+    rep.print();
+    if !rep.errors.is_empty() {
+        anyhow::bail!("migrate completed with {} error(s)", rep.errors.len());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

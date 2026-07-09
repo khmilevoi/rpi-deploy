@@ -216,9 +216,35 @@ enum AgentCmd {
         /// Also bootstrap cloudflared (linger + user unit)
         #[arg(long)]
         with_cloudflared: bool,
+        /// Cloudflare API token (or env CLOUDFLARE_API_TOKEN); enables full auto-bootstrap
+        #[arg(long)]
+        cf_token: Option<String>,
+        /// Base zone, e.g. example.com
+        #[arg(long)]
+        domain: Option<String>,
+        /// Tunnel name (default: derived)
+        #[arg(long)]
+        tunnel: Option<String>,
         /// Print the plan without changing anything
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Run host migrations uniformly (idempotent; detect-oriented)
+    Migrate {
+        /// List all migrations and their status
+        #[arg(long)]
+        list: bool,
+        /// Show the plan without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Apply a specific migration by id (repeatable; needed for disruptive ones)
+        #[arg(long)]
+        run: Vec<String>,
+        /// Apply every applicable migration (with --yes for disruptive ones)
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        yes: bool,
     },
     /// Remove the agent (keeps data unless --purge)
     Uninstall {
@@ -362,9 +388,22 @@ async fn run() -> anyhow::Result<()> {
                 AgentCmd::Setup {
                     user,
                     with_cloudflared,
+                    cf_token,
+                    domain,
+                    tunnel,
                     dry_run,
                 },
-        } => agent::setup::run_cmd(user, with_cloudflared, dry_run).await,
+        } => agent::setup::run_cmd(user, with_cloudflared, cf_token, domain, tunnel, dry_run).await,
+        Cmd::Agent {
+            cmd:
+                AgentCmd::Migrate {
+                    list,
+                    dry_run,
+                    run,
+                    all,
+                    yes,
+                },
+        } => agent::migrate::run_cmd(list, dry_run, run, all, yes).await,
         Cmd::Agent {
             cmd: AgentCmd::Uninstall { purge, yes },
         } => agent::uninstall::run_cmd(purge, yes).await,
@@ -492,11 +531,59 @@ mod tests {
                         user,
                         with_cloudflared,
                         dry_run,
+                        ..
                     },
             } => {
                 assert_eq!(user.as_deref(), Some("piuser"));
                 assert!(!with_cloudflared);
                 assert!(dry_run);
+            }
+            _ => panic!("expected agent setup"),
+        }
+    }
+
+    #[test]
+    fn parses_agent_migrate() {
+        let cli =
+            Cli::try_parse_from(["rpi", "agent", "migrate", "--run", "nginx-to-caddy"]).unwrap();
+        match cli.cmd {
+            Cmd::Agent {
+                cmd: AgentCmd::Migrate { run, .. },
+            } => {
+                assert_eq!(run, vec!["nginx-to-caddy".to_string()]);
+            }
+            _ => panic!("expected agent migrate"),
+        }
+    }
+
+    #[test]
+    fn parses_agent_setup_cloudflare_flags() {
+        let cli = Cli::try_parse_from([
+            "rpi",
+            "agent",
+            "setup",
+            "--user",
+            "piuser",
+            "--with-cloudflared",
+            "--cf-token",
+            "t",
+            "--domain",
+            "example.com",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Agent {
+                cmd:
+                    AgentCmd::Setup {
+                        with_cloudflared,
+                        cf_token,
+                        domain,
+                        ..
+                    },
+            } => {
+                assert!(with_cloudflared);
+                assert_eq!(cf_token.as_deref(), Some("t"));
+                assert_eq!(domain.as_deref(), Some("example.com"));
             }
             _ => panic!("expected agent setup"),
         }
