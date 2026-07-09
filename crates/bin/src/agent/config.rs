@@ -4,6 +4,12 @@ use crate::duration::parse_duration_secs;
 use pi_domain::entities::StageTimeouts;
 use serde::Deserialize;
 
+pub const CURRENT_SCHEMA: u32 = 1;
+
+fn default_schema() -> u32 {
+    CURRENT_SCHEMA
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AgentConfig {
     #[serde(default = "default_data_dir")]
@@ -27,6 +33,10 @@ pub struct AgentConfig {
     pub gc: GcSection,
     #[serde(default)]
     pub logs: LogsSection,
+    #[serde(default = "default_schema")]
+    pub schema: u32,
+    #[allow(dead_code)]
+    pub cloudflare: Option<CloudflareSection>,
 }
 
 /// [timeouts] in agent.toml — agent-wide stage timeout defaults (§8.1).
@@ -61,6 +71,15 @@ pub struct CloudflaredSection {
     /// Command applying the config; no sudo needed under linger (§11).
     #[serde(default = "default_restart")]
     pub restart: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct CloudflareSection {
+    pub zone: String,
+    pub token_file: PathBuf,
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +136,13 @@ fn default_log_retention_days() -> u64 {
 impl AgentConfig {
     pub fn parse(text: &str) -> anyhow::Result<AgentConfig> {
         let config: AgentConfig = toml::from_str(text)?;
+        if config.schema > CURRENT_SCHEMA {
+            anyhow::bail!(
+                "unsupported agent.toml schema {} (this rpi supports schema {})",
+                config.schema,
+                CURRENT_SCHEMA
+            );
+        }
         config.stage_timeouts()?;
         Ok(config)
     }
@@ -243,5 +269,28 @@ mod tests {
             AgentConfig::parse("[logs]\ndir = \"/tmp/pi-logs\"\nretention_days = 7").unwrap();
         assert_eq!(config.logs.dir, PathBuf::from("/tmp/pi-logs"));
         assert_eq!(config.logs.retention_days, 7);
+    }
+
+    #[test]
+    fn schema_defaults_to_current_when_absent() {
+        let config = AgentConfig::parse("").unwrap();
+        assert_eq!(config.schema, 1);
+    }
+
+    #[test]
+    fn rejects_future_schema() {
+        let err = AgentConfig::parse("schema = 2").unwrap_err().to_string();
+        assert!(err.contains("schema"), "got: {err}");
+    }
+
+    #[test]
+    fn cloudflare_section_parses() {
+        let cfg = AgentConfig::parse(
+            "[cloudflare]\nzone = \"example.com\"\ntoken_file = \"/var/lib/rpi/cloudflare/token\"",
+        )
+        .unwrap();
+        let cf = cfg.cloudflare.unwrap();
+        assert_eq!(cf.zone, "example.com");
+        assert_eq!(cf.account_id, None);
     }
 }
