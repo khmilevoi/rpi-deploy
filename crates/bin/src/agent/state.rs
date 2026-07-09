@@ -74,11 +74,33 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     let secrets = EncryptedFileStore::open(&config.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
     let secrets_writer: Arc<dyn pi_domain::contracts::SecretsWriter> = FsSecretsWriter::new();
     let health = HybridHealthGate::new(runtime.clone());
-    let ingress: Arc<dyn Ingress> = match &config.cloudflared {
-        Some(cf) => {
-            CloudflaredIngress::new(cf.config.clone(), cf.tunnel.clone(), cf.restart.clone())
+    let ingress: Arc<dyn Ingress> = match (&config.cloudflared, &config.cloudflare) {
+        (Some(cf_local), Some(cf_acct)) => {
+            let token = std::fs::read_to_string(&cf_acct.token_file)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "read cloudflare token {}: {e}",
+                        cf_acct.token_file.display()
+                    )
+                })?
+                .trim()
+                .to_string();
+            let api: Arc<dyn pi_domain::contracts::CloudflareApi> =
+                Arc::new(pi_infrastructure::cloudflare::HttpCloudflare::new(
+                    token,
+                    cf_acct.account_id.clone(),
+                ));
+            let tunnel_id = cf_local.tunnel_id.clone().unwrap_or_default();
+            CloudflaredIngress::new(
+                cf_local.config.clone(),
+                cf_local.tunnel.clone(),
+                tunnel_id,
+                cf_acct.zone.clone(),
+                cf_local.restart.clone(),
+                api,
+            )
         }
-        None => DisabledIngress::new(),
+        _ => DisabledIngress::new(),
     };
 
     let host_network: Arc<dyn HostNetwork> = Arc::new(UdpHostNetwork::new());

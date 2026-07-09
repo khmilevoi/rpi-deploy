@@ -71,6 +71,10 @@ pub struct CloudflaredSection {
     /// Command applying the config; no sudo needed under linger (§11).
     #[serde(default = "default_restart")]
     pub restart: Vec<String>,
+    /// Tunnel id, persisted after bootstrap creates/adopts the tunnel via
+    /// the Cloudflare API (Task 9). Required for DNS-via-API routing.
+    #[serde(default)]
+    pub tunnel_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

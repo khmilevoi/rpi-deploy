@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_domain::contracts::{Ingress, LogSink};
+use pi_domain::contracts::{CloudflareApi, Ingress, LogSink};
 use pi_domain::error::DomainError;
 use tokio::process::Command;
 
@@ -81,30 +81,36 @@ pub(crate) fn remove_ingress_rule(
     Ok(true)
 }
 
-/// `cloudflared tunnel route dns` fails when the record exists — tolerated.
-pub(crate) fn is_already_exists(stderr: &str) -> bool {
-    let s = stderr.to_lowercase();
-    s.contains("already exists") || s.contains("already configured")
-}
-
 /// Locally-managed cloudflared (§11): edits config.yml, creates the DNS
 /// route, restarts the unit without sudo — and only when the config changed.
 pub struct CloudflaredIngress {
     config_path: PathBuf,
+    /// Tunnel name; kept for config.yml semantics even though DNS routing
+    /// now uses `tunnel_id` via the Cloudflare API.
+    #[allow(dead_code)]
     tunnel: String,
+    tunnel_id: String,
+    zone: String,
     restart: Vec<String>,
+    cf: Arc<dyn CloudflareApi>,
 }
 
 impl CloudflaredIngress {
     pub fn new(
         config_path: PathBuf,
         tunnel: String,
+        tunnel_id: String,
+        zone: String,
         restart: Vec<String>,
+        cf: Arc<dyn CloudflareApi>,
     ) -> Arc<CloudflaredIngress> {
         Arc::new(CloudflaredIngress {
             config_path,
             tunnel,
+            tunnel_id,
+            zone,
             restart,
+            cf,
         })
     }
 }
@@ -208,15 +214,12 @@ impl CloudflaredIngress {
         hostname: &str,
         log: &Arc<dyn LogSink>,
     ) -> Result<(), DomainError> {
-        let mut dns = Command::new("cloudflared");
-        dns.args(["tunnel", "route", "dns", &self.tunnel, hostname]);
-        match run_capture(dns).await {
-            Ok(_) => log.line(&format!("ingress: DNS record created for {hostname}")),
-            Err(err) if is_already_exists(&err) => {
-                log.line(&format!(
-                    "ingress: DNS for {hostname} already exists; leaving as is"
-                ));
-            }
+        match self
+            .cf
+            .put_tunnel_cname(&self.zone, hostname, &self.tunnel_id)
+            .await
+        {
+            Ok(_) => log.line(&format!("ingress: DNS record ensured for {hostname}")),
             Err(err) => return Err(ingress_err(format!("route dns: {err}"))),
         }
 
@@ -335,24 +338,18 @@ mod tests {
         assert!(upsert_ingress_rule(&mut d, "a.example.com", "x").is_err());
     }
 
-    #[test]
-    fn already_exists_detection() {
-        assert!(is_already_exists(
-            "... record with that host already exists ..."
-        ));
-        assert!(is_already_exists(
-            "Already configured CNAME for this hostname"
-        ));
-        assert!(!is_already_exists("connection refused"));
-    }
-
     #[tokio::test]
     async fn missing_config_file_gives_actionable_error() {
+        use pi_domain::contracts::MockCloudflareApi;
+
         let dir = tempfile::tempdir().unwrap();
         let ingress = CloudflaredIngress::new(
             dir.path().join("config.yml"),
             "home".into(),
+            "tid".into(),
+            "example.com".into(),
             vec!["whatever".into()],
+            std::sync::Arc::new(MockCloudflareApi::new()),
         );
         let err = ingress
             .upsert("a.example.com", 8000, CollectSink::new())
@@ -366,14 +363,20 @@ mod tests {
 
     #[tokio::test]
     async fn no_diff_skips_dns_and_restart_entirely() {
+        use pi_domain::contracts::MockCloudflareApi;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yml");
         std::fs::write(&path, BASE).unwrap();
-        // commands would fail if executed: binaries do not exist
+        // commands would fail if executed: binaries do not exist; the cf
+        // mock has no expectations set, so any call would panic.
         let ingress = CloudflaredIngress::new(
             path.clone(),
             "home".into(),
+            "tid".into(),
+            "example.com".into(),
             vec!["pi-test-no-such-binary".into()],
+            std::sync::Arc::new(MockCloudflareApi::new()),
         );
         ingress
             .upsert("old.example.com", 8001, CollectSink::new())
@@ -388,15 +391,26 @@ mod tests {
 
     #[tokio::test]
     async fn failed_dns_restores_config_so_redeploy_retries() {
+        use pi_domain::contracts::MockCloudflareApi;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yml");
         std::fs::write(&path, BASE).unwrap();
+
+        let mut cf = MockCloudflareApi::new();
+        cf.expect_put_tunnel_cname()
+            .times(2)
+            .returning(|_, _, _| Err(DomainError::Ingress("boom".into())));
+
         let ingress = CloudflaredIngress::new(
             path.clone(),
             "home".into(),
+            "tid".into(),
+            "example.com".into(),
             vec!["pi-test-no-such-binary".into()],
+            std::sync::Arc::new(cf),
         );
-        // `cloudflared` is not on PATH in tests -> route dns fails -> Err.
+        // the cf mock fails put_tunnel_cname -> route dns fails -> Err.
         // The config write must be rolled back: otherwise the next deploy
         // sees no diff and never retries dns/restart for this hostname.
         let err = ingress
@@ -415,5 +429,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Ingress(_)), "retry re-runs dns");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn upsert_routes_dns_via_api_not_shell() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(
+            &path,
+            "tunnel: home\ningress:\n  - service: http_status:404\n",
+        )
+        .unwrap();
+
+        let mut cf = MockCloudflareApi::new();
+        cf.expect_put_tunnel_cname()
+            .withf(|zone, name, tid| {
+                zone == "example.com" && name == "a.example.com" && tid == "tid"
+            })
+            .returning(|_, _, _| Ok(()));
+
+        let ingress = CloudflaredIngress::new(
+            path.clone(),
+            "home".into(),
+            "tid".into(),
+            "example.com".into(),
+            vec!["true".into()], // restart command that succeeds
+            std::sync::Arc::new(cf),
+        );
+        ingress
+            .upsert("a.example.com", 8002, CollectSink::new())
+            .await
+            .unwrap();
     }
 }
