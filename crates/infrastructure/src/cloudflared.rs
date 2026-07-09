@@ -81,6 +81,34 @@ pub(crate) fn remove_ingress_rule(
     Ok(true)
 }
 
+/// `systemctl --user` needs XDG_RUNTIME_DIR to reach the user manager; the
+/// rpi-agent unit does not set it. Compute the variable to add to the restart
+/// command when the agent's own environment lacks it.
+fn restart_extra_env(current: Option<&str>, uid: u32) -> Option<(&'static str, String)> {
+    match current {
+        Some(_) => None,
+        None => Some(("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))),
+    }
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u32 {
+    0
+}
+
+fn apply_restart_env(cmd: &mut Command) {
+    let current = std::env::var("XDG_RUNTIME_DIR").ok();
+    if let Some((k, v)) = restart_extra_env(current.as_deref(), current_uid()) {
+        cmd.env(k, v);
+    }
+}
+
 /// Locally-managed cloudflared (§11): edits config.yml, creates the DNS
 /// route, restarts the unit without sudo — and only when the config changed.
 pub struct CloudflaredIngress {
@@ -188,6 +216,7 @@ impl Ingress for CloudflaredIngress {
             .ok_or_else(|| ingress_err("empty cloudflared restart command"))?;
         let mut restart_cmd = Command::new(program);
         restart_cmd.args(args);
+        apply_restart_env(&mut restart_cmd);
         if let Err(err) = run_capture(restart_cmd).await {
             if let Err(restore) = tokio::fs::write(&self.config_path, &text).await {
                 return Err(ingress_err(format!(
@@ -223,6 +252,7 @@ impl CloudflaredIngress {
             .ok_or_else(|| ingress_err("empty cloudflared restart command"))?;
         let mut restart_cmd = Command::new(program);
         restart_cmd.args(args);
+        apply_restart_env(&mut restart_cmd);
         run_capture(restart_cmd)
             .await
             .map_err(|e| ingress_err(format!("restart cloudflared: {e}")))?;
@@ -431,6 +461,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Ingress(_)), "retry re-runs dns");
+    }
+
+    #[test]
+    fn restart_env_added_only_when_missing() {
+        assert_eq!(
+            restart_extra_env(None, 999),
+            Some(("XDG_RUNTIME_DIR", "/run/user/999".into()))
+        );
+        assert_eq!(restart_extra_env(Some("/run/user/1000"), 999), None);
     }
 
     #[cfg(unix)]
