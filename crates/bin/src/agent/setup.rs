@@ -128,6 +128,9 @@ pub struct SetupOpts {
     pub login_user: String,
     pub with_cloudflared: bool,
     pub dry_run: bool,
+    pub cf_token: Option<String>,
+    pub domain: Option<String>,
+    pub tunnel_name: Option<String>,
 }
 
 #[derive(Default)]
@@ -439,9 +442,9 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
         }
     }
 
-    // 9. cloudflared (opt-in) — implemented in Task 13.
+    // 9. cloudflared (opt-in)
     if opts.with_cloudflared {
-        cloudflared_bootstrap(sys, dry, &mut rep).await;
+        cloudflared_bootstrap(sys, opts, &mut rep).await;
     }
 
     // 10. dependency checks (warn, never fail)
@@ -485,7 +488,6 @@ pub(crate) const CLOUDFLARED_UNIT_PATH: &str =
 /// Canonical cloudflared config the setup flow instructs operators to write.
 pub(crate) const CLOUDFLARED_CONFIG_PATH: &str = "/var/lib/rpi/cloudflared/config.yml";
 
-#[allow(dead_code)]
 pub(crate) const CLOUDFLARE_TOKEN_PATH: &str = "/var/lib/rpi/cloudflare/token";
 
 pub(crate) const CLOUDFLARED_BIN: &str = "/usr/local/bin/cloudflared";
@@ -499,7 +501,6 @@ pub(crate) fn cloudflared_asset(uname_m: &str) -> Option<&'static str> {
     }
 }
 
-#[allow(dead_code)] // wired in Task 9
 pub(crate) async fn ensure_cloudflared_binary(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
     if sys.run("cloudflared", &["--version"]).await.is_ok() {
         rep.skipped.push(CLOUDFLARED_BIN.into());
@@ -551,7 +552,6 @@ pub(crate) fn render_config_yml(tunnel_id: &str, creds_path: &str) -> String {
     )
 }
 
-#[allow(dead_code)] // wired in Task 10
 pub struct CloudflaredBootstrap {
     pub tunnel_name: String,
     pub zone: String,
@@ -563,7 +563,6 @@ pub struct CloudflaredBootstrap {
 /// chown/chmod on it (or on config.yml) is surfaced as an error rather than
 /// swallowed — otherwise setup could report success while leaving a secret
 /// world-readable.
-#[allow(dead_code)] // wired in Task 10
 pub(crate) async fn cloudflared_bootstrap_full(
     sys: &dyn Sys,
     cf: &dyn CloudflareApi,
@@ -666,7 +665,6 @@ pub(crate) async fn cloudflared_bootstrap_full(
 }
 
 /// Append [cloudflare] + [cloudflared] to /etc/rpi/agent.toml only when absent.
-#[allow(dead_code)] // wired in Task 10
 fn upsert_cloudflared_agent_toml(
     sys: &dyn Sys,
     tunnel_id: &str,
@@ -703,9 +701,38 @@ Restart=on-failure
 WantedBy=default.target
 ";
 
-/// Opt-in cloudflared scaffolding: enable linger and write the user unit.
-/// The interactive `cloudflared tunnel login` step is left to the operator.
-async fn cloudflared_bootstrap(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
+/// Resolve the tunnel name to use for the full auto-bootstrap path: the
+/// operator-supplied `--tunnel-name`, or (falling back) the machine's
+/// hostname, or (if that fails/blank) the literal `"rpi"`.
+async fn resolve_tunnel_name(sys: &dyn Sys, opts: &SetupOpts) -> String {
+    if let Some(name) = &opts.tunnel_name {
+        return name.clone();
+    }
+    match sys.run("hostname", &[]).await {
+        Ok(h) if !h.trim().is_empty() => h.trim().to_string(),
+        _ => "rpi".to_string(),
+    }
+}
+
+/// Opt-in cloudflared bootstrap. When a Cloudflare API token and domain are
+/// both supplied, runs the full automated flow: write the token, create/adopt
+/// the tunnel via the API, write its config, and enable the systemd --user
+/// service. Otherwise falls back to the original scaffold-and-warn behavior,
+/// leaving `cloudflared tunnel login` and friends to the operator.
+async fn cloudflared_bootstrap(sys: &dyn Sys, opts: &SetupOpts, rep: &mut SetupReport) {
+    let dry = opts.dry_run;
+    if let (Some(token), Some(domain)) = (&opts.cf_token, &opts.domain) {
+        ensure_cloudflare_token(sys, token, dry, rep).await;
+        let api = pi_infrastructure::cloudflare::HttpCloudflare::new(token.clone(), None);
+        let bopts = CloudflaredBootstrap {
+            tunnel_name: resolve_tunnel_name(sys, opts).await,
+            zone: domain.clone(),
+        };
+        cloudflared_bootstrap_full(sys, &api, &bopts, dry, rep).await;
+        cloudflared_user_service(sys, dry, rep).await;
+        return;
+    }
+
     if !dry {
         let _ = sys.run("loginctl", &["enable-linger", "rpi-agent"]).await;
     }
@@ -740,7 +767,75 @@ async fn cloudflared_bootstrap(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) 
     );
 }
 
-#[allow(dead_code)]
+/// Fix the systemd `--user` manager for `rpi-agent` so it honors
+/// `/var/lib/rpi/.config` (not the default home) via a drop-in on
+/// `user@<uid>.service`, then enable linger + the cloudflared user unit.
+pub(crate) async fn cloudflared_user_service(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
+    let uid = match sys.run("id", &["-u", "rpi-agent"]).await {
+        Ok(u) => u.trim().to_string(),
+        Err(e) => {
+            rep.errors.push(format!("id -u rpi-agent: {e}"));
+            return;
+        }
+    };
+    let dropin_dir = format!("/etc/systemd/system/user@{uid}.service.d");
+    let dropin = format!("{dropin_dir}/override.conf");
+    let dropin_body =
+        "[Service]\nEnvironment=XDG_CONFIG_HOME=/var/lib/rpi/.config\nEnvironment=HOME=/var/lib/rpi\n";
+
+    if dry {
+        rep.created.push(dropin.clone());
+        return;
+    }
+
+    let _ = sys.run("install", &["-d", &dropin_dir]).await;
+    if let Err(e) = sys.write(Path::new(&dropin), dropin_body) {
+        rep.errors.push(format!("write {dropin}: {e}"));
+        return;
+    }
+    rep.created.push(dropin);
+
+    // ensure the user unit exists (existing scaffold path)
+    let _ = sys
+        .run(
+            "install",
+            &[
+                "-d",
+                "-o",
+                "rpi-agent",
+                "-g",
+                "rpi-agent",
+                "/var/lib/rpi/.config/systemd/user",
+            ],
+        )
+        .await;
+    let _ = sys.write(Path::new(CLOUDFLARED_UNIT_PATH), CLOUDFLARED_UNIT);
+
+    let _ = sys.run("systemctl", &["daemon-reload"]).await;
+    let _ = sys
+        .run("systemctl", &["restart", &format!("user@{uid}.service")])
+        .await;
+    let _ = sys.run("loginctl", &["enable-linger", "rpi-agent"]).await;
+    let runtime = format!("XDG_RUNTIME_DIR=/run/user/{uid}");
+    // enable+start the user unit as rpi-agent with the runtime dir set
+    let _ = sys
+        .run(
+            "sudo",
+            &[
+                "-u",
+                "rpi-agent",
+                &runtime,
+                "systemctl",
+                "--user",
+                "enable",
+                "--now",
+                "cloudflared",
+            ],
+        )
+        .await;
+    rep.created.push("cloudflared user service enabled".into());
+}
+
 pub(crate) async fn ensure_cloudflare_token(
     sys: &dyn Sys,
     token: &str,
@@ -847,6 +942,9 @@ pub async fn run_cmd(
         login_user,
         with_cloudflared,
         dry_run,
+        cf_token: None,
+        domain: None,
+        tunnel_name: None,
     };
 
     let current = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
@@ -1320,6 +1418,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let _ = setup(&sys, &opts).await;
         let calls = sys.calls();
@@ -1347,6 +1448,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let report = setup(&sys, &opts).await;
         let calls = sys.calls();
@@ -1402,6 +1506,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let report = setup(&sys, &opts).await;
         let calls = sys.calls();
@@ -1450,6 +1557,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let report = setup(&sys, &opts).await;
         let calls = sys.calls();
@@ -1484,6 +1594,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let report = setup(&sys, &opts).await;
         let calls = sys.calls();
@@ -1501,6 +1614,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: true,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let _ = setup(&sys, &opts).await;
         let calls = sys.calls();
@@ -1528,6 +1644,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let report = setup(&sys, &opts).await;
         let w = report
@@ -1548,6 +1667,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: true,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let report = setup(&sys, &opts).await;
         let calls = sys.calls();
@@ -1565,12 +1687,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_service_writes_dropin_and_enables() {
+        let mut sys = fresh_sys();
+        // fresh_sys() seeds `id -u rpi-agent` to fail (no such user yet); override
+        // it to succeed since this function assumes the user already exists.
+        sys.err.remove(&FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.ok
+            .insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+        let mut rep = SetupReport::default();
+        cloudflared_user_service(&sys, false, &mut rep).await;
+        let writes = sys.writes.lock().unwrap();
+        assert!(
+            writes
+                .iter()
+                .any(|(p, c)| p.contains("user@999.service.d/override.conf")
+                    && c.contains("XDG_CONFIG_HOME=/var/lib/rpi/.config")),
+            "drop-in written for uid 999"
+        );
+        drop(writes);
+        let calls = sys.calls();
+        assert!(calls.iter().any(|c| c == "systemctl daemon-reload"));
+        assert!(calls
+            .iter()
+            .any(|c| c == "systemctl restart user@999.service"));
+        assert!(calls
+            .iter()
+            .any(|c| c == "loginctl enable-linger rpi-agent"));
+    }
+
+    #[tokio::test]
     async fn without_cloudflared_does_not_touch_linger() {
         let sys = fresh_sys();
         let opts = SetupOpts {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let _ = setup(&sys, &opts).await;
         assert!(!sys.calls().iter().any(|c| c.contains("enable-linger")));
@@ -1601,6 +1755,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let report = setup(&sys, &opts).await;
         assert!(
@@ -1624,6 +1781,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let report = setup(&sys, &opts).await;
         assert!(
@@ -1650,6 +1810,9 @@ mod tests {
             login_user: "piuser".into(),
             with_cloudflared: false,
             dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
         };
         let res = run_with(&sys, &opts).await;
         assert!(res.is_err(), "non-zero exit when privileged step fails");
