@@ -524,6 +524,13 @@ line, site green/amber for success/warn. Set `PI_THEME=classic` for the
 pre-brand look (cyan accent, `●` marker). `NO_COLOR`, piping, and non-TTY
 output disable styling entirely, as before.
 
+`rpi deploy`, bare `rpi`, and `rpi --version` show a raspberry triangle logo
+with a vertical gradient. The banner appears only on an interactive terminal —
+piped or CI output stays plain, and `rpi --version | cat` prints just
+`rpi <version>`. On truecolor terminals (`COLORTERM=truecolor`) the logo and
+table colours render as the exact brand `#C51A4A`; elsewhere they use the
+nearest 256-colour. The logo is always raspberry, independent of `PI_THEME`.
+
 ## Prepare A Project For Deployment
 
 Add `rpi.toml` to the root of the project you want to deploy.
