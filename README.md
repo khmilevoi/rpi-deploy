@@ -8,7 +8,7 @@ containers.
 
 Website: https://rpi.iiskelo.com
 
-Status: v0.15 (adopt existing cloudflared tunnels + loud manual-ingress warnings) —
+Status: v0.16 (raspberry triangle brand banner + deploy result stamp) —
 everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
@@ -48,7 +48,14 @@ outside `rpi` without rewriting them or causing downtime; deploys and
 `rpi doctor` now warn loudly when a project declares a public hostname but
 ingress is disabled, so a manually-managed route is never silently
 mismatched; and the agent sets `XDG_RUNTIME_DIR` before restarting
-`cloudflared` so the restart no longer fails on systems that need it).
+`cloudflared` so the restart no longer fails on systems that need it), and
+v0.16 a raspberry triangle brand banner (a pink-to-raspberry gradient logo on
+`rpi deploy`, bare `rpi`, and `rpi --version`, gated to interactive terminals
+and degrading cleanly under `NO_COLOR`/non-unicode/piped output; `rpi deploy`
+now ends with a result stamp showing status, project, ingress URL, and
+elapsed time; and table cells render the exact brand colour on
+`COLORTERM=truecolor`/`24bit` terminals instead of the nearest 256-colour
+approximation).
 
 Supported features:
 
