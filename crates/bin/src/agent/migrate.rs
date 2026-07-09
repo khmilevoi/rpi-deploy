@@ -1,3 +1,4 @@
+use super::setup;
 use super::setup::{SetupReport, Sys};
 use crate::agent::migrate_ledger::LedgerHandle;
 use async_trait::async_trait;
@@ -91,6 +92,48 @@ async fn apply_one(
         }
         Err(e) => rep.errors.push(format!("migration {} failed: {e}", m.id())),
     }
+}
+
+/// Rename a legacy `pi-agent` install to `rpi-agent` in place (user, group,
+/// /var/lib, /etc, /var/log). Non-disruptive: no operator confirmation needed
+/// since it only affects a legacy install path, never a fresh one.
+pub struct PiToRpi;
+
+#[async_trait]
+impl Migration for PiToRpi {
+    fn id(&self) -> &str {
+        "pi-to-rpi"
+    }
+    fn description(&self) -> &str {
+        "rename legacy pi-agent install to rpi-agent (user, group, /var/lib, /etc, /var/log)"
+    }
+    fn disruptive(&self) -> bool {
+        false
+    }
+    async fn detect(&self, sys: &dyn Sys) -> MigrationState {
+        if setup::user_exists(sys, "rpi-agent").await {
+            MigrationState::NotApplicable // already migrated / fresh
+        } else if setup::user_exists(sys, "pi-agent").await {
+            MigrationState::Applicable
+        } else {
+            MigrationState::NotApplicable
+        }
+    }
+    async fn apply(&self, sys: &dyn Sys, dry_run: bool) -> Result<MigrationOutcome, String> {
+        let mut rep = SetupReport::default();
+        setup::migrate_pi_agent(sys, dry_run, &mut rep).await;
+        if let Some(e) = rep.errors.first() {
+            return Err(e.clone());
+        }
+        Ok(MigrationOutcome {
+            changed: true,
+            note: "pi-agent -> rpi-agent".into(),
+        })
+    }
+}
+
+pub fn registry() -> Vec<Box<dyn Migration>> {
+    vec![Box::new(PiToRpi)]
 }
 
 #[cfg(test)]
@@ -343,5 +386,42 @@ mod tests {
         assert!(rep.repaired.is_empty());
         assert!(rep.warnings.is_empty());
         assert!(rep.errors.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod pi_to_rpi_tests {
+    use super::super::setup::fake::FakeSys;
+    use super::*;
+
+    fn legacy() -> FakeSys {
+        let mut sys = FakeSys::default();
+        sys.err.insert(FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.ok
+            .insert(FakeSys::key("id", &["-u", "pi-agent"]), "999".into());
+        sys
+    }
+
+    #[tokio::test]
+    async fn detects_legacy_install() {
+        assert_eq!(PiToRpi.detect(&legacy()).await, MigrationState::Applicable);
+    }
+
+    #[tokio::test]
+    async fn fresh_install_not_applicable() {
+        let mut sys = FakeSys::default();
+        sys.err.insert(FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.err.insert(FakeSys::key("id", &["-u", "pi-agent"]));
+        assert_eq!(PiToRpi.detect(&sys).await, MigrationState::NotApplicable);
+    }
+
+    #[tokio::test]
+    async fn already_migrated_not_applicable() {
+        // rpi-agent already exists -> guard must report NotApplicable, even
+        // though pi-agent might still linger (already-migrated / fresh install).
+        let mut sys = FakeSys::default();
+        sys.ok
+            .insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+        assert_eq!(PiToRpi.detect(&sys).await, MigrationState::NotApplicable);
     }
 }

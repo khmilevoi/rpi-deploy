@@ -1,3 +1,4 @@
+use super::migrate::{self, Migration};
 use super::self_install::{self, SelfInstallAction};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -211,7 +212,7 @@ async fn ensure_dir(
 
 /// Old (pre-v0.6.x) unit path — used only to detect and migrate a pi-agent
 /// install to rpi-agent. Never written to after migration.
-const OLD_UNIT_PATH: &str = "/etc/systemd/system/pi-agent.service";
+pub(crate) const OLD_UNIT_PATH: &str = "/etc/systemd/system/pi-agent.service";
 
 /// The pi-agent owned path prefixes, paired with their rpi-agent names. Used
 /// both to move the directories and to rewrite the absolute paths baked into
@@ -227,7 +228,7 @@ const OWNED_PATH_RENAMES: [(&str, &str); 4] = [
 /// migrated config/unit file, in place. No-op when the file is absent or has no
 /// old paths left. The four prefixes are disjoint and none is a substring of
 /// another's replacement, so a repeated run is idempotent.
-fn rewrite_owned_paths(sys: &dyn Sys, path: &Path, rep: &mut SetupReport) {
+pub(crate) fn rewrite_owned_paths(sys: &dyn Sys, path: &Path, rep: &mut SetupReport) {
     let Some(text) = sys.read(path) else { return };
     let mut rewritten = text.clone();
     for (old, new) in OWNED_PATH_RENAMES {
@@ -250,15 +251,9 @@ fn rewrite_owned_paths(sys: &dyn Sys, path: &Path, rep: &mut SetupReport) {
 /// move the three owned directories to their new names, rewrite the old
 /// absolute paths baked into the moved config/unit files (agent.toml's
 /// data_dir/socket, the cloudflared unit + config), and back up the old unit
-/// file. No-op when `rpi-agent` already exists (fresh install or already
-/// migrated) or `pi-agent` does not (fresh install, nothing to migrate).
-async fn migrate_pi_agent_if_present(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
-    if user_exists(sys, "rpi-agent").await {
-        return;
-    }
-    if !user_exists(sys, "pi-agent").await {
-        return;
-    }
+/// file. Callers must guard with `migrate::PiToRpi::detect` first — this body
+/// no longer checks whether `rpi-agent`/`pi-agent` exist.
+pub(crate) async fn migrate_pi_agent(sys: &dyn Sys, dry: bool, rep: &mut SetupReport) {
     if dry {
         rep.repaired
             .push("migrate: pi-agent -> rpi-agent (dry run)".into());
@@ -335,7 +330,9 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
     let dry = opts.dry_run;
 
     // 0. migrate an existing pi-agent install in place, if present.
-    migrate_pi_agent_if_present(sys, dry, &mut rep).await;
+    if migrate::PiToRpi.detect(sys).await == migrate::MigrationState::Applicable {
+        migrate_pi_agent(sys, dry, &mut rep).await;
+    }
 
     // 1. service user
     if user_exists(sys, "rpi-agent").await {
@@ -480,10 +477,11 @@ pub async fn restart_agent_if_active(sys: &dyn Sys) -> Option<String> {
     }
 }
 
-const CLOUDFLARED_UNIT_PATH: &str = "/var/lib/rpi/.config/systemd/user/cloudflared.service";
+pub(crate) const CLOUDFLARED_UNIT_PATH: &str =
+    "/var/lib/rpi/.config/systemd/user/cloudflared.service";
 
 /// Canonical cloudflared config the setup flow instructs operators to write.
-const CLOUDFLARED_CONFIG_PATH: &str = "/var/lib/rpi/cloudflared/config.yml";
+pub(crate) const CLOUDFLARED_CONFIG_PATH: &str = "/var/lib/rpi/cloudflared/config.yml";
 
 const CLOUDFLARED_UNIT: &str = "\
 [Unit]
@@ -835,7 +833,7 @@ mod tests {
     async fn migrates_existing_pi_agent_install_in_place() {
         let sys = legacy_sys();
         let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        migrate_pi_agent(&sys, false, &mut rep).await;
         let calls = sys.calls();
         assert!(
             calls
@@ -867,7 +865,7 @@ mod tests {
         // cloudflared user manager), so the session must be dropped first.
         let sys = legacy_sys();
         let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        migrate_pi_agent(&sys, false, &mut rep).await;
         let calls = sys.calls();
         let disable = calls
             .iter()
@@ -900,7 +898,7 @@ mod tests {
             "data_dir = \"/var/lib/pi\"\nsocket = \"/run/pi/agent.sock\"\nport_min = 9000\n".into(),
         );
         let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        migrate_pi_agent(&sys, false, &mut rep).await;
         let writes = sys.writes.lock().unwrap();
         let (_, content) = writes
             .iter()
@@ -941,7 +939,7 @@ mod tests {
             "credentials-file: /var/lib/pi/cloudflared/home.json\n".into(),
         );
         let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        migrate_pi_agent(&sys, false, &mut rep).await;
         let writes = sys.writes.lock().unwrap();
         let unit = &writes
             .iter()
@@ -986,7 +984,7 @@ mod tests {
         let mut sys = legacy_sys();
         sys.paths.remove("/etc/pi"); // e.g. never had /etc/pi for some reason
         let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        migrate_pi_agent(&sys, false, &mut rep).await;
         assert!(
             !sys.calls().iter().any(|c| c.starts_with("mv /etc/pi")),
             "nothing to move"
@@ -1002,50 +1000,26 @@ mod tests {
             "".into(),
         );
         let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        migrate_pi_agent(&sys, false, &mut rep).await;
         assert!(sys
             .calls()
             .iter()
             .any(|c| c == "loginctl enable-linger rpi-agent"));
     }
 
-    #[tokio::test]
-    async fn migration_is_noop_when_already_rpi_agent() {
-        let mut sys = fresh_sys();
-        sys.err.remove(&FakeSys::key("id", &["-u", "rpi-agent"]));
-        sys.ok
-            .insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
-        let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
-        assert!(
-            sys.calls().len() == 1,
-            "only the rpi-agent probe ran: {:?}",
-            sys.calls()
-        );
-        assert!(rep.repaired.is_empty());
-    }
-
-    #[tokio::test]
-    async fn migration_is_noop_when_no_legacy_install() {
-        let sys = fresh_sys(); // both rpi-agent and pi-agent absent
-        let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
-        assert!(
-            sys.calls().iter().all(|c| c.starts_with("id ")),
-            "only the two probes ran: {:?}",
-            sys.calls()
-        );
-        assert!(rep.repaired.is_empty());
-    }
+    // migration_is_noop_when_already_rpi_agent and migration_is_noop_when_no_legacy_install
+    // asserted the two guard early-returns that used to live in this function. Those guards
+    // moved to `migrate::PiToRpi::detect`; the equivalent coverage now lives in
+    // `migrate::pi_to_rpi_tests` (`already_migrated_not_applicable`, `fresh_install_not_applicable`).
 
     #[tokio::test]
     async fn migration_dry_run_reports_but_makes_no_changes() {
         let sys = legacy_sys();
         let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, true, &mut rep).await;
+        migrate_pi_agent(&sys, true, &mut rep).await;
         assert!(
-            sys.calls().iter().all(|c| c.starts_with("id ")),
-            "only the two probes ran: {:?}",
+            sys.calls().is_empty(),
+            "dry run makes no sys calls at all: {:?}",
             sys.calls()
         );
         assert!(rep.repaired.iter().any(|r| r.contains("dry run")));
@@ -1059,7 +1033,7 @@ mod tests {
         sys.err
             .insert(FakeSys::key("groupmod", &["-n", "rpi-agent", "pi-agent"]));
         let mut rep = SetupReport::default();
-        migrate_pi_agent_if_present(&sys, false, &mut rep).await;
+        migrate_pi_agent(&sys, false, &mut rep).await;
         assert!(
             !sys.calls().iter().any(|c| c.starts_with("mv ")),
             "no directories touched after groupmod failure"
