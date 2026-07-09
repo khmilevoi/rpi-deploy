@@ -806,7 +806,46 @@ Cloudflare Tunnel is only needed when the service must be reachable from the
 internet. Services that only use outbound connections usually do not need public
 ingress.
 
-A typical locally managed `cloudflared` config:
+### Automatic Setup (recommended)
+
+With a Cloudflare API token and a domain, the whole tunnel is bootstrapped by
+one command:
+
+```bash
+sudo rpi agent setup --with-cloudflared --cf-token <token> --domain <zone>
+```
+
+This is fully automatic: it installs the `cloudflared` binary for the host's
+CPU architecture, creates (or adopts) the tunnel through the Cloudflare API,
+writes the credentials JSON and a validated `config.yml`, writes the
+`[cloudflare]`/`[cloudflared]` sections into `/etc/rpi/agent.toml`, and enables
+the `cloudflared` systemd `--user` service.
+
+No interactive `cloudflared tunnel login` and no `cert.pem` are needed — the
+running tunnel only uses the credentials JSON this command writes. Tunnel
+management and DNS records both go through the Cloudflare REST API using the
+token, not the `cloudflared` CLI.
+
+- `--cf-token` can be omitted if the `CLOUDFLARE_API_TOKEN` environment
+  variable is set.
+- `--tunnel <name>` overrides the tunnel name. By default it is derived from
+  the machine's hostname, falling back to `rpi` if that can't be read.
+- The Cloudflare account id is derived automatically from the token — there
+  is no account flag.
+- The token needs these scopes: `Zone:DNS:Edit`, `Zone:Zone:Read`,
+  `Account:Cloudflare Tunnel:Edit`.
+- The token is stored at `/var/lib/rpi/cloudflare/token`, owned
+  `root:rpi-secrets` with mode `0640`. `rpi-agent` reads it through the
+  `rpi-secrets` group.
+
+Omitting `--cf-token`/`--domain` is backward compatible: `--with-cloudflared`
+falls back to today's behavior — it scaffolds linger and the user unit and
+prints the manual completion steps below.
+
+### Manual Setup
+
+Without a token, configure `cloudflared` locally instead. A typical locally
+managed `cloudflared` config:
 
 ```yaml
 tunnel: <tunnel-id-or-name>
@@ -850,12 +889,35 @@ restart = ["systemctl", "--user", "restart", "cloudflared"]
 `rpi-agent` must be allowed to:
 
 - read and write the configured `config.yml`;
-- run `cloudflared tunnel route dns`;
 - run the `restart` command without an interactive password prompt.
+
+DNS records (proxied CNAMEs to `<tunnel-id>.cfargotunnel.com`) are created
+through the Cloudflare API using the stored token — `rpi-agent` does not need
+permission to run `cloudflared tunnel route dns`.
 
 If `cloudflared` runs as a system-wide service, it is usually simpler to keep
 ingress manual or configure the smallest necessary restart permission
 separately.
+
+## Migrations
+
+Host-level upgrades (for example, renaming a legacy install) are handled by
+`rpi agent migrate`:
+
+```bash
+rpi agent migrate [--list] [--dry-run] [--run <id>] [--all --yes]
+```
+
+- Migrations run uniformly and idempotently; each applied migration is
+  recorded so it is never re-applied.
+- `--list` shows every registered migration and whether it has been applied.
+- Non-disruptive migrations run automatically during `rpi agent setup`.
+  Disruptive ones are only reported there and must be applied explicitly with
+  `--run <id>` (or `--all --yes` to apply every pending migration).
+- `--dry-run` shows the plan without changing anything.
+
+The only migration currently registered is `pi-to-rpi`, which renames a
+legacy `pi-agent` install to `rpi-agent`.
 
 ## Development
 
