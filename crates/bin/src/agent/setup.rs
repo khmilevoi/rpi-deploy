@@ -335,6 +335,13 @@ pub async fn setup(sys: &dyn Sys, opts: &SetupOpts) -> SetupReport {
     let dry = opts.dry_run;
 
     // 0. migrate an existing pi-agent install in place, if present.
+    //
+    // Deliberate Phase-1 choice: setup() runs only the self-detecting
+    // pi-to-rpi migration directly, with no ledger handle available here, so
+    // the migration ledger is NOT updated by setup. A future non-self-detecting
+    // migration that needs to auto-run during setup must wire `run_auto` with a
+    // `DbLedger` (the DB lives at `data_dir/state.db`) instead of calling
+    // `detect`/the migration function directly like this.
     if migrate::PiToRpi.detect(sys).await == migrate::MigrationState::Applicable {
         migrate_pi_agent(sys, dry, &mut rep).await;
     }
@@ -571,6 +578,12 @@ pub(crate) async fn cloudflared_bootstrap_full(
     rep: &mut SetupReport,
 ) {
     ensure_cloudflared_binary(sys, dry, rep).await;
+
+    if dry {
+        rep.created.push("cloudflared tunnel (dry run)".into());
+        return;
+    }
+
     let _ = sys
         .run(
             "install",
@@ -584,11 +597,6 @@ pub(crate) async fn cloudflared_bootstrap_full(
             ],
         )
         .await;
-
-    if dry {
-        rep.created.push("cloudflared tunnel (dry run)".into());
-        return;
-    }
 
     let creds = match cf.find_or_create_tunnel(&opts.tunnel_name).await {
         Ok(c) => c,
@@ -2182,6 +2190,30 @@ mod tests {
                 .iter()
                 .any(|(p, _)| p == "/var/lib/rpi/cloudflared/tid.json"),
             "no creds file should be written for an adopted tunnel with no secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_dry_run_makes_no_changes() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let mut sys = fresh_sys();
+        sys.err.insert(FakeSys::key("cloudflared", &["--version"])); // triggers dry path in binary step
+        let cf = MockCloudflareApi::new(); // no expectations: API must not be touched on dry run
+        let mut rep = SetupReport::default();
+        let opts = CloudflaredBootstrap {
+            tunnel_name: "myboard".into(),
+            zone: "example.com".into(),
+        };
+        cloudflared_bootstrap_full(&sys, &cf, &opts, true, &mut rep).await;
+        assert!(
+            sys.writes.lock().unwrap().is_empty(),
+            "dry run must not write any files"
+        );
+        assert!(
+            !sys.calls()
+                .iter()
+                .any(|c| c.contains("install") && c.contains("/var/lib/rpi/cloudflared")),
+            "dry run must not create /var/lib/rpi/cloudflared"
         );
     }
 }

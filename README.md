@@ -876,7 +876,8 @@ rpi ls
 
 ### Automatic Ingress
 
-To let the agent edit a local `cloudflared` config, add this to
+To let the agent edit a local `cloudflared` config and manage DNS records for
+you, add both a `[cloudflared]` and a `[cloudflare]` section to
 `/etc/rpi/agent.toml`:
 
 ```toml
@@ -884,16 +885,27 @@ To let the agent edit a local `cloudflared` config, add this to
 config = "/var/lib/rpi/cloudflared/config.yml"
 tunnel = "home"
 restart = ["systemctl", "--user", "restart", "cloudflared"]
+
+[cloudflare]
+zone = "example.com"
+token_file = "/var/lib/rpi/cloudflare/token"
 ```
 
 `rpi-agent` must be allowed to:
 
 - read and write the configured `config.yml`;
-- run the `restart` command without an interactive password prompt.
+- run the `restart` command without an interactive password prompt;
+- read `token_file` (a Cloudflare API token scoped to DNS edit + tunnel read
+  on the zone).
 
 DNS records (proxied CNAMEs to `<tunnel-id>.cfargotunnel.com`) are created
 through the Cloudflare API using the stored token — `rpi-agent` does not need
 permission to run `cloudflared tunnel route dns`.
+
+Both sections are required for automatic DNS: `[cloudflared]` alone is not
+enough. If `[cloudflare]` is missing, or its `token_file` cannot be read,
+ingress falls back to manual — deploys still succeed, but the agent logs a
+warning and you must route hostnames yourself as described above.
 
 If `cloudflared` runs as a system-wide service, it is usually simpler to keep
 ingress manual or configure the smallest necessary restart permission

@@ -75,29 +75,36 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     let secrets_writer: Arc<dyn pi_domain::contracts::SecretsWriter> = FsSecretsWriter::new();
     let health = HybridHealthGate::new(runtime.clone());
     let ingress: Arc<dyn Ingress> = match (&config.cloudflared, &config.cloudflare) {
-        (Some(cf_local), Some(cf_acct)) => {
-            let token = std::fs::read_to_string(&cf_acct.token_file)
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "read cloudflare token {}: {e}",
-                        cf_acct.token_file.display()
-                    )
-                })?
-                .trim()
-                .to_string();
-            let api: Arc<dyn pi_domain::contracts::CloudflareApi> =
-                Arc::new(pi_infrastructure::cloudflare::HttpCloudflare::new(
-                    token,
-                    cf_acct.account_id.clone(),
-                ));
-            let tunnel_id = cf_local.tunnel_id.clone().unwrap_or_default();
-            CloudflaredIngress::new(
-                cf_local.config.clone(),
-                tunnel_id,
-                cf_acct.zone.clone(),
-                cf_local.restart.clone(),
-                api,
-            )
+        (Some(cf_local), Some(cf_acct)) => match std::fs::read_to_string(&cf_acct.token_file) {
+            Ok(raw) => {
+                let token = raw.trim().to_string();
+                let api: Arc<dyn pi_domain::contracts::CloudflareApi> =
+                    Arc::new(pi_infrastructure::cloudflare::HttpCloudflare::new(
+                        token,
+                        cf_acct.account_id.clone(),
+                    ));
+                let tunnel_id = cf_local.tunnel_id.clone().unwrap_or_default();
+                CloudflaredIngress::new(
+                    cf_local.config.clone(),
+                    tunnel_id,
+                    cf_acct.zone.clone(),
+                    cf_local.restart.clone(),
+                    api,
+                )
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "cloudflare token unreadable at {}: {e}; automatic ingress disabled (deploys continue, route manually)",
+                    cf_acct.token_file.display()
+                );
+                DisabledIngress::new()
+            }
+        },
+        (Some(_), None) => {
+            tracing::warn!(
+                "[cloudflared] is set in agent.toml but [cloudflare] (zone + token_file) is missing; automatic DNS now requires both, so ingress is disabled — add a [cloudflare] section or route manually"
+            );
+            DisabledIngress::new()
         }
         _ => DisabledIngress::new(),
     };
