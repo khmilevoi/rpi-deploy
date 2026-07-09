@@ -8,7 +8,7 @@ containers.
 
 Website: https://rpi.iiskelo.com
 
-Status: v0.14 (branded console theme + `PI_THEME`) —
+Status: v0.15 (adopt existing cloudflared tunnels + loud manual-ingress warnings) —
 everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
@@ -41,7 +41,14 @@ runs through it), and v0.14 a themed console layer (a single theme object now
 drives every colour and marker glyph in `rpi`'s output — messages, tables,
 the spinner, and the log pane; the default `raspberry` theme brands every
 message line with a raspberry `▸` marker and the site's green/amber palette,
-switchable to the pre-brand `classic` look via `PI_THEME=classic`).
+switchable to the pre-brand `classic` look via `PI_THEME=classic`), and v0.15
+adoption of hand-built cloudflared tunnels plus loud manual-ingress signals
+(`rpi agent setup` can now adopt a tunnel and `config.yml` that were created
+outside `rpi` without rewriting them or causing downtime; deploys and
+`rpi doctor` now warn loudly when a project declares a public hostname but
+ingress is disabled, so a manually-managed route is never silently
+mismatched; and the agent sets `XDG_RUNTIME_DIR` before restarting
+`cloudflared` so the restart no longer fails on systems that need it).
 
 Supported features:
 
