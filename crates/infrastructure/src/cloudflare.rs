@@ -56,6 +56,8 @@ impl CloudflareApi for HttpCloudflare {
             .send()
             .await
             .map_err(api_err)?
+            .error_for_status()
+            .map_err(api_err)?
             .json()
             .await
             .map_err(api_err)?;
@@ -81,6 +83,8 @@ impl CloudflareApi for HttpCloudflare {
             .send()
             .await
             .map_err(api_err)?
+            .error_for_status()
+            .map_err(api_err)?
             .json()
             .await
             .map_err(api_err)?;
@@ -102,6 +106,8 @@ impl CloudflareApi for HttpCloudflare {
             .json(&serde_json::json!({ "name": name, "tunnel_secret": secret }))
             .send()
             .await
+            .map_err(api_err)?
+            .error_for_status()
             .map_err(api_err)?
             .json()
             .await
@@ -135,6 +141,8 @@ impl CloudflareApi for HttpCloudflare {
             .bearer_auth(&self.token)
             .send()
             .await
+            .map_err(api_err)?
+            .error_for_status()
             .map_err(api_err)?
             .json()
             .await

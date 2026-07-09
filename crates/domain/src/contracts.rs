@@ -207,7 +207,10 @@ pub struct TunnelCreds {
     pub account_tag: String,
     pub tunnel_id: String,
     pub tunnel_name: String,
-    pub tunnel_secret: String, // base64
+    /// base64. EMPTY when an existing tunnel was adopted rather than created
+    /// (the secret can't be recovered from the API) — callers must not
+    /// overwrite an existing credentials file with an empty secret.
+    pub tunnel_secret: String,
 }
 
 /// Cloudflare REST API: tunnel create/adopt + DNS CNAME writes (§6, §11).
