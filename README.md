@@ -8,7 +8,7 @@ containers.
 
 Website: https://rpi.iiskelo.com
 
-Status: v0.14 (branded console theme + `PI_THEME`) —
+Status: v0.15 (adopt existing cloudflared tunnels + loud manual-ingress warnings) —
 everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
@@ -41,7 +41,14 @@ runs through it), and v0.14 a themed console layer (a single theme object now
 drives every colour and marker glyph in `rpi`'s output — messages, tables,
 the spinner, and the log pane; the default `raspberry` theme brands every
 message line with a raspberry `▸` marker and the site's green/amber palette,
-switchable to the pre-brand `classic` look via `PI_THEME=classic`).
+switchable to the pre-brand `classic` look via `PI_THEME=classic`), and v0.15
+adoption of hand-built cloudflared tunnels plus loud manual-ingress signals
+(`rpi agent setup` can now adopt a tunnel and `config.yml` that were created
+outside `rpi` without rewriting them or causing downtime; deploys and
+`rpi doctor` now warn loudly when a project declares a public hostname but
+ingress is disabled, so a manually-managed route is never silently
+mismatched; and the agent sets `XDG_RUNTIME_DIR` before restarting
+`cloudflared` so the restart no longer fails on systems that need it).
 
 Supported features:
 
@@ -864,6 +871,26 @@ token, not the `cloudflared` CLI.
 Omitting `--cf-token`/`--domain` is backward compatible: `--with-cloudflared`
 falls back to today's behavior — it scaffolds linger and the user unit and
 prints the manual completion steps below.
+
+### Adopting an existing tunnel
+
+If `/var/lib/rpi/cloudflared/config.yml` already exists (a hand-built tunnel),
+`sudo rpi agent setup --with-cloudflared --cf-token <token> --domain <zone>` adopts it
+instead of recreating anything:
+
+- the existing `config.yml` is **never rewritten** and cloudflared is **not
+  restarted** — hand-written routes and uptime are preserved;
+- the tunnel id is taken from the `tunnel:` key (a name is resolved via the
+  Cloudflare API); credentials are checked at the `credentials-file:` path;
+- `[cloudflare]`/`[cloudflared]` are appended to `/etc/rpi/agent.toml`, after
+  which every deploy manages routes and DNS by itself.
+
+Token scopes: `Zone:Zone:Read` + `Zone:DNS:Edit` are enough when `tunnel:` holds
+the tunnel id (UUID). `Account:Cloudflare Tunnel:Edit` is additionally needed for
+fresh installs and for adoption when `tunnel:` holds a name.
+
+If a project declares `[ingress] hostname` while the agent has no ingress
+configured, the deploy summary and `rpi doctor` now say so explicitly.
 
 ### Manual Setup
 

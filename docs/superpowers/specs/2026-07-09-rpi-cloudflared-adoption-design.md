@@ -101,16 +101,20 @@
 
 - **Итог деплоя.** `Ingress::upsert` возвращает `IngressOutcome::{Applied, Skipped}`
   вместо `()`; `DisabledIngress` возвращает `Skipped` (текущая строка в логе
-  остаётся). `DeployProject` превращает `Skipped` при объявленном hostname в warning
-  деплой-результата; итоговый DTO получает `#[serde(default)] warnings: Vec<String>`
-  (старый агент поля не шлёт — CLI молчит, обратная совместимость). CLI печатает
-  warnings в итоговой сводке жёлтым, с командой включения:
+  остаётся). `DeployProject` при `Skipped` пишет `warning: …`-строку последней в деплой-лог
+  (SSE-событие `finished` несёт только статус-строку, менять его формат
+  несовместимо); CLI собирает строки с префиксом `warning: ` из стрима и
+  повторяет их через `output::warn` рядом с итоговой сводкой. Старый CLI просто
+  видит строку в конце лога, старый агент warning-строк не шлёт — совместимость
+  в обе стороны. Команда включения в тексте warning'а:
   `sudo rpi agent setup --with-cloudflared --cf-token … --domain …`.
-- **`rpi doctor`.** Агентский status-DTO получает `#[serde(default)]` поле
-  `ingress: "cloudflared" | "disabled"` (значение фиксируется при сборке ingress в
-  `agent/state.rs`). Doctor добавляет чек: есть зарегистрированные проекты с
-  `hostname` при `ingress = "disabled"` → warn со списком hostname'ов и той же
-  командой включения. Старый агент без поля → чек скипается молча.
+- **`rpi doctor`.** Диагностика выполняется на агенте (`/v1/doctor` →
+  `RunDiagnostics` → `HostSystemProbe`), поэтому wire менять не нужно:
+  `HostSystemProbe` получает флаг `ingress_active` (вычисляется при сборке
+  ingress в `agent/state.rs`) и добавляет провальный чек `ingress routing`,
+  когда есть зарегистрированные проекты с `hostname` при выключенном ingress —
+  detail перечисляет hostname'ы, hint содержит команду включения. Generic
+  `DiagnosticCheckDto` совместим со старым CLI.
 
 ## 6. Тесты
 
@@ -123,10 +127,14 @@
   нет → существующие тесты свежего пути проходят без правок.
 - **`cloudflared.rs`:** чистая функция env-инъекции: добавляет `XDG_RUNTIME_DIR`,
   когда его нет в env процесса; не перетирает уже установленный.
-- **`deploy.rs`/`proto.rs`:** `Skipped` + hostname → warning в результате; roundtrip
-  warnings через DTO; payload без поля → пусто. `Applied` → без warning.
-- **doctor:** hostname + `disabled` → warn; `cloudflared` или нет hostname'ов →
-  тишина; status без поля ingress → чек скипается.
+- **`deploy.rs`/`commands.rs`:** `Skipped` + hostname → `warning: …` последней
+  строкой `log_tail`; `Applied` → без warning. В CLI — юнит-тест выделения
+  `warning: `-префикса (`deploy_warning`). proto.rs не меняется.
+- **doctor:** юнит-тесты `probe.rs` покрывают `HostSystemProbe::diagnostics()` с
+  `MockProjectRepository`/`MockDiskProbe`: (а) отключённый ingress + проект с
+  hostname'ом → чек `ingress routing` падает, detail перечисляет hostname'ы, hint
+  содержит команду включения; (б) активный ingress или нет hostname'ов → такой чек
+  отсутствует.
 - **Интеграционно на Pi (чеклист, руками):** setup с токеном → `config.yml`
   побайтово не изменился (сверить хеш до/после), board отвечает всё время; секции в
   `agent.toml` с верным tunnel_id; `rpi deploy` rpi-deploy-site → роут в config.yml +

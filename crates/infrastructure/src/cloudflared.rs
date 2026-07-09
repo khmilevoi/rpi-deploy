@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_domain::contracts::{CloudflareApi, Ingress, LogSink};
+use pi_domain::contracts::{CloudflareApi, Ingress, IngressOutcome, LogSink};
 use pi_domain::error::DomainError;
 use tokio::process::Command;
 
@@ -81,6 +81,34 @@ pub(crate) fn remove_ingress_rule(
     Ok(true)
 }
 
+/// `systemctl --user` needs XDG_RUNTIME_DIR to reach the user manager; the
+/// rpi-agent unit does not set it. Compute the variable to add to the restart
+/// command when the agent's own environment lacks it.
+fn restart_extra_env(current: Option<&str>, uid: u32) -> Option<(&'static str, String)> {
+    match current {
+        Some(v) if !v.is_empty() => None,
+        _ => Some(("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))),
+    }
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u32 {
+    0
+}
+
+fn apply_restart_env(cmd: &mut Command) {
+    let current = std::env::var("XDG_RUNTIME_DIR").ok();
+    if let Some((k, v)) = restart_extra_env(current.as_deref(), current_uid()) {
+        cmd.env(k, v);
+    }
+}
+
 /// Locally-managed cloudflared (§11): edits config.yml, creates the DNS
 /// route, restarts the unit without sudo — and only when the config changed.
 pub struct CloudflaredIngress {
@@ -116,7 +144,7 @@ impl Ingress for CloudflaredIngress {
         hostname: &str,
         host_port: u16,
         log: Arc<dyn LogSink>,
-    ) -> Result<(), DomainError> {
+    ) -> Result<IngressOutcome, DomainError> {
         let text = tokio::fs::read_to_string(&self.config_path)
             .await
             .map_err(|e| {
@@ -132,7 +160,7 @@ impl Ingress for CloudflaredIngress {
             log.line(&format!(
                 "ingress: {hostname} -> {service} already routed; cloudflared untouched"
             ));
-            return Ok(());
+            return Ok(IngressOutcome::Applied);
         }
         let updated = serde_yaml::to_string(&doc).map_err(ingress_err)?;
         tokio::fs::write(&self.config_path, updated)
@@ -151,7 +179,7 @@ impl Ingress for CloudflaredIngress {
             }
             return Err(err);
         }
-        Ok(())
+        Ok(IngressOutcome::Applied)
     }
 
     async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
@@ -188,6 +216,7 @@ impl Ingress for CloudflaredIngress {
             .ok_or_else(|| ingress_err("empty cloudflared restart command"))?;
         let mut restart_cmd = Command::new(program);
         restart_cmd.args(args);
+        apply_restart_env(&mut restart_cmd);
         if let Err(err) = run_capture(restart_cmd).await {
             if let Err(restore) = tokio::fs::write(&self.config_path, &text).await {
                 return Err(ingress_err(format!(
@@ -223,6 +252,7 @@ impl CloudflaredIngress {
             .ok_or_else(|| ingress_err("empty cloudflared restart command"))?;
         let mut restart_cmd = Command::new(program);
         restart_cmd.args(args);
+        apply_restart_env(&mut restart_cmd);
         run_capture(restart_cmd)
             .await
             .map_err(|e| ingress_err(format!("restart cloudflared: {e}")))?;
@@ -247,12 +277,12 @@ impl Ingress for DisabledIngress {
         hostname: &str,
         host_port: u16,
         log: Arc<dyn LogSink>,
-    ) -> Result<(), DomainError> {
+    ) -> Result<IngressOutcome, DomainError> {
         log.line(&format!(
             "ingress: [cloudflared] is not configured in agent.toml; \
              route {hostname} -> http://127.0.0.1:{host_port} manually"
         ));
-        Ok(())
+        Ok(IngressOutcome::Skipped)
     }
 
     async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
@@ -370,15 +400,26 @@ mod tests {
             vec!["pi-test-no-such-binary".into()],
             std::sync::Arc::new(MockCloudflareApi::new()),
         );
-        ingress
+        let outcome = ingress
             .upsert("old.example.com", 8001, CollectSink::new())
             .await
             .unwrap();
+        assert_eq!(outcome, IngressOutcome::Applied);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             BASE,
             "file untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn disabled_ingress_upsert_reports_skipped() {
+        let ingress = DisabledIngress::new();
+        let outcome = ingress
+            .upsert("a.example.com", 8000, CollectSink::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, IngressOutcome::Skipped);
     }
 
     #[tokio::test]
@@ -420,6 +461,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Ingress(_)), "retry re-runs dns");
+    }
+
+    #[test]
+    fn restart_env_added_only_when_missing() {
+        assert_eq!(
+            restart_extra_env(None, 999),
+            Some(("XDG_RUNTIME_DIR", "/run/user/999".into()))
+        );
+        assert_eq!(restart_extra_env(Some("/run/user/1000"), 999), None);
+        assert_eq!(
+            restart_extra_env(Some(""), 999),
+            Some(("XDG_RUNTIME_DIR", "/run/user/999".into()))
+        );
     }
 
     #[cfg(unix)]

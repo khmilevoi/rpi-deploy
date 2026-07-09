@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use pi_domain::contracts::{
-    Clock, ContainerRuntime, DeploymentHistory, HealthGate, HostNetwork, Ingress, LogSink,
-    OverrideStore, ProjectRepository, SecretStore, SecretsWriter, Source,
+    Clock, ContainerRuntime, DeploymentHistory, HealthGate, HostNetwork, Ingress, IngressOutcome,
+    LogSink, OverrideStore, ProjectRepository, SecretStore, SecretsWriter, Source,
 };
 use pi_domain::entities::{
     ComposeStack, DeployRef, Deployment, DeploymentStatus, ExposeMode, ProjectConfig, StageTimeouts,
@@ -298,14 +298,31 @@ impl DeployProject {
         }
 
         // §11: route hostname only when configured
+        let mut ingress_warning: Option<String> = None;
         if let Some(hostname) = &config.hostname {
-            self.ingress
+            match self
+                .ingress
                 .upsert(hostname, project.host_port, log.clone())
-                .await?;
+                .await?
+            {
+                IngressOutcome::Applied => {}
+                IngressOutcome::Skipped => {
+                    ingress_warning = Some(format!(
+                        "warning: hostname {hostname} is declared but ingress is disabled \
+                         on the agent; the app is not publicly reachable — enable it with: \
+                         sudo rpi agent setup --with-cloudflared --cf-token <token> --domain <zone>"
+                    ));
+                }
+            }
         }
 
         if let Err(err) = staged("gc", GC_TIMEOUT_SECS, self.gc.execute(log.clone())).await {
             log.line(&format!("gc skipped: {err}"));
+        }
+
+        // Emitted last so it sits next to the final summary, not mid-stream.
+        if let Some(w) = &ingress_warning {
+            log.line(w);
         }
 
         Ok(fetched.commit_sha)
@@ -333,9 +350,9 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
-        MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe, MockHealthGate,
-        MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository, MockSecretStore,
-        MockSecretsWriter, MockSource,
+        IngressOutcome, MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe,
+        MockHealthGate, MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository,
+        MockSecretStore, MockSecretsWriter, MockSource,
     };
     use pi_domain::entities::{
         DeployRef, DeploymentStatus, ExposeMode, FetchedSource, HealthcheckConfig, Project,
@@ -511,7 +528,7 @@ mod tests {
             .times(1)
             .returning(move |_, _, _| {
                 stage_order.lock().unwrap().push("ingress");
-                Ok(())
+                Ok(IngressOutcome::Applied)
             });
         m.gc_runtime.checkpoint();
         let stage_order = Arc::clone(&order);
@@ -946,7 +963,9 @@ mod tests {
         });
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
-        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .returning(|_, _, _| Ok(IngressOutcome::Applied));
 
         let deploy = build(m);
         let sink = CollectSink::new();
@@ -1045,6 +1064,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.status, DeploymentStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn skipped_ingress_emits_final_warning_line() {
+        let mut m = mocks();
+        let cfg = sample_config(); // hostname = rateme.isskelo.com
+
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+            })
+        });
+        m.source.expect_fetch().returning(|_, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/w"),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/o.yml")));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .times(1)
+            .returning(|_, _, _| Ok(IngressOutcome::Skipped));
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let deploy = build(m);
+        let result = deploy
+            .execute(
+                "dep-w".into(),
+                cfg,
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        let last = result.log_tail.lines().last().unwrap_or_default();
+        assert!(
+            last.starts_with("warning: hostname rateme.isskelo.com"),
+            "warning must be the last log line, got: {last}"
+        );
+        assert!(last.contains("sudo rpi agent setup --with-cloudflared"));
     }
 
     #[tokio::test]
@@ -1258,7 +1334,9 @@ mod tests {
             .expect_write()
             .returning(|p, _, _, _, _| Ok(PathBuf::from("/ov").join(p)));
         m.health.expect_check().returning(|_, _, _| Ok(()));
-        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .returning(|_, _, _| Ok(IngressOutcome::Applied));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -1329,7 +1407,9 @@ mod tests {
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
-        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .returning(|_, _, _| Ok(IngressOutcome::Applied));
         m.gc_runtime.checkpoint();
         m.gc_runtime
             .expect_prune_images()
