@@ -1,6 +1,3 @@
-// Removed in Task 5 once every entry point has a real caller.
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 use super::theme;

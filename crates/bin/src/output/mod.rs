@@ -10,7 +10,7 @@ mod logpane;
 pub use logpane::LogPane;
 
 mod banner;
-pub use banner::{deploy_stamp, StampOutcome};
+pub use banner::{brand_banner, deploy_stamp, stderr_is_tty, StampOutcome};
 mod theme;
 
 fn no_color_requested() -> bool {

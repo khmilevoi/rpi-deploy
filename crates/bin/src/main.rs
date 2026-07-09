@@ -11,12 +11,15 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "rpi",
-    version,
-    about = "deploy tool for Raspberry Pi (CLI + agent)"
+    about = "deploy tool for Raspberry Pi (CLI + agent)",
+    disable_version_flag = true
 )]
 struct Cli {
+    /// Print version (with the brand banner on a terminal)
+    #[arg(short = 'V', long = "version")]
+    version: bool,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(clap::Args)]
@@ -270,13 +273,35 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if cli.version {
+        let v = env!("CARGO_PKG_VERSION");
+        if output::stderr_is_tty() {
+            println!("{}", output::brand_banner(v));
+        } else {
+            println!("rpi {v}");
+        }
+        return Ok(());
+    }
+
+    let cmd = match cli.cmd {
+        Some(cmd) => cmd,
+        None => {
+            if output::stderr_is_tty() {
+                eprintln!("{}", output::brand_banner(env!("CARGO_PKG_VERSION")));
+            }
+            eprintln!("run `rpi --help` to see available commands");
+            return Ok(());
+        }
+    };
+
     if matches!(
-        cli.cmd,
+        cmd,
         Cmd::Agent {
             cmd: AgentCmd::Run { .. }
         }
     ) {
-        return match cli.cmd {
+        return match cmd {
             Cmd::Agent {
                 cmd: AgentCmd::Run { config },
             } => agent::run::run(config).await,
@@ -291,7 +316,7 @@ async fn run() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    match cli.cmd {
+    match cmd {
         Cmd::Deploy {
             git_ref,
             cancel,
@@ -433,7 +458,7 @@ mod tests {
             "./k",
         ])
         .unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Deploy { connect, .. } => {
                 assert_eq!(connect.host.as_deref(), Some("203.0.113.7"));
                 assert_eq!(connect.user.as_deref(), Some("pi"));
@@ -461,7 +486,7 @@ mod tests {
     #[test]
     fn agent_logs_flags_parse() {
         let cli = Cli::try_parse_from(["pi", "agent", "logs", "-f", "--since", "2h"]).unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Agent {
                 cmd:
                     AgentCmd::Logs {
@@ -485,7 +510,7 @@ mod tests {
             "pi", "init", "--name", "rateme", "--port", "3000", "--expose", "lan", "--yes",
         ])
         .unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Init(args) => {
                 assert_eq!(args.name.as_deref(), Some("rateme"));
                 assert_eq!(args.port, Some(3000));
@@ -510,7 +535,7 @@ mod tests {
             "--yes",
         ])
         .unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Setup(a) => {
                 assert_eq!(a.host.as_deref(), Some("pihost.local"));
                 assert_eq!(a.user.as_deref(), Some("piuser"));
@@ -524,7 +549,7 @@ mod tests {
     fn agent_setup_flags_parse() {
         let cli =
             Cli::try_parse_from(["pi", "agent", "setup", "--user", "piuser", "--dry-run"]).unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Agent {
                 cmd:
                     AgentCmd::Setup {
@@ -546,7 +571,7 @@ mod tests {
     fn parses_agent_migrate() {
         let cli =
             Cli::try_parse_from(["rpi", "agent", "migrate", "--run", "nginx-to-caddy"]).unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Agent {
                 cmd: AgentCmd::Migrate { run, .. },
             } => {
@@ -571,7 +596,7 @@ mod tests {
             "example.com",
         ])
         .unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Agent {
                 cmd:
                     AgentCmd::Setup {
@@ -592,7 +617,7 @@ mod tests {
     #[test]
     fn agent_uninstall_flags_parse() {
         let cli = Cli::try_parse_from(["pi", "agent", "uninstall", "--purge", "--yes"]).unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Agent {
                 cmd: AgentCmd::Uninstall { purge, yes },
             } => {
@@ -606,7 +631,7 @@ mod tests {
     #[test]
     fn secrets_commands_parse_and_env_is_gone() {
         let cli = Cli::try_parse_from(["pi", "secrets", "send", "--apply"]).unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Secrets {
                 cmd: SecretsCmd::Send { apply, .. },
             } => assert!(apply),
@@ -624,7 +649,7 @@ mod tests {
         let cli =
             Cli::try_parse_from(["pi", "command", "create-invite", "--", "--email", "x@y.com"])
                 .unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Command { name, args, .. } => {
                 assert_eq!(name.as_deref(), Some("create-invite"));
                 assert_eq!(args, vec!["--email".to_string(), "x@y.com".into()]);
@@ -636,12 +661,27 @@ mod tests {
     #[test]
     fn bare_command_means_list_mode() {
         let cli = Cli::try_parse_from(["pi", "command"]).unwrap();
-        match cli.cmd {
+        match cli.cmd.unwrap() {
             Cmd::Command { name, args, .. } => {
                 assert_eq!(name, None);
                 assert!(args.is_empty());
             }
             _ => panic!("expected command"),
         }
+    }
+
+    #[test]
+    fn bare_rpi_parses_with_no_subcommand() {
+        let cli = Cli::try_parse_from(["rpi"]).unwrap();
+        assert!(cli.cmd.is_none());
+        assert!(!cli.version);
+    }
+
+    #[test]
+    fn version_flag_parses() {
+        let cli = Cli::try_parse_from(["rpi", "--version"]).unwrap();
+        assert!(cli.version);
+        let short = Cli::try_parse_from(["rpi", "-V"]).unwrap();
+        assert!(short.version);
     }
 }
