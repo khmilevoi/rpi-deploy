@@ -822,6 +822,7 @@ mod tests {
             env!("CARGO_PKG_VERSION").to_string(),
             85,
             false,
+            false,
             100,
         );
         let diagnostics = RunDiagnostics::new(probe.clone());

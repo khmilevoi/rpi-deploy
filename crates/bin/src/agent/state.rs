@@ -74,6 +74,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     let secrets = EncryptedFileStore::open(&config.data_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
     let secrets_writer: Arc<dyn pi_domain::contracts::SecretsWriter> = FsSecretsWriter::new();
     let health = HybridHealthGate::new(runtime.clone());
+    let mut ingress_active = false;
     let ingress: Arc<dyn Ingress> = match (&config.cloudflared, &config.cloudflare) {
         (Some(cf_local), Some(cf_acct)) => match std::fs::read_to_string(&cf_acct.token_file) {
             Ok(raw) => {
@@ -84,6 +85,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
                         cf_acct.account_id.clone(),
                     ));
                 let tunnel_id = cf_local.tunnel_id.clone().unwrap_or_default();
+                ingress_active = true;
                 CloudflaredIngress::new(
                     cf_local.config.clone(),
                     tunnel_id,
@@ -168,6 +170,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         env!("CARGO_PKG_VERSION").to_string(),
         config.gc.disk_threshold_percent,
         config.cloudflared.is_some(),
+        ingress_active,
         now,
     );
     let diagnostics = RunDiagnostics::new(probe.clone());
