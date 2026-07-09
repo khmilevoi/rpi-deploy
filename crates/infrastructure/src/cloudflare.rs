@@ -44,6 +44,33 @@ impl HttpCloudflare {
             base: API.to_string(),
         }
     }
+
+    /// The account id to operate under: the configured one, else derived from
+    /// the token via GET /accounts (first account). Errors if the token has no
+    /// listable account.
+    async fn resolve_account_id(&self) -> Result<String, DomainError> {
+        if let Some(id) = &self.account_id {
+            return Ok(id.clone());
+        }
+        let v: serde_json::Value = self
+            .client
+            .get(format!("{}/accounts", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(api_err)?
+            .error_for_status()
+            .map_err(api_err)?
+            .json()
+            .await
+            .map_err(api_err)?;
+        v["result"][0]["id"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| {
+                api_err("no account found for this API token (needs the Account:Cloudflare Tunnel:Edit scope)")
+            })
+    }
 }
 
 #[async_trait]
@@ -68,10 +95,7 @@ impl CloudflareApi for HttpCloudflare {
     }
 
     async fn find_or_create_tunnel(&self, name: &str) -> Result<TunnelCreds, DomainError> {
-        let account = self
-            .account_id
-            .clone()
-            .ok_or_else(|| api_err("account_id required"))?;
+        let account = self.resolve_account_id().await?;
         // adopt existing by name
         let list: serde_json::Value = self
             .client
