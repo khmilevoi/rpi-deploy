@@ -635,9 +635,10 @@ pub(crate) async fn cloudflared_bootstrap_full(
         .run("chown", &["rpi-agent:rpi-agent", CLOUDFLARED_CONFIG_PATH])
         .await;
     let chmod = sys.run("chmod", &["640", CLOUDFLARED_CONFIG_PATH]).await;
-    if !(chown.is_ok() && chmod.is_ok()) {
+    let perms_ok = chown.is_ok() && chmod.is_ok();
+    if !perms_ok {
         rep.errors.push(format!(
-            "wrote {CLOUDFLARED_CONFIG_PATH} but failed to set rpi-agent:rpi-agent/0640 — fix manually"
+            "wrote {CLOUDFLARED_CONFIG_PATH} but failed to set rpi-agent:rpi-agent/0640 — fix ownership/permissions manually"
         ));
     }
 
@@ -654,7 +655,8 @@ pub(crate) async fn cloudflared_bootstrap_full(
         )
         .await
     {
-        Ok(_) => rep.created.push(CLOUDFLARED_CONFIG_PATH.into()),
+        Ok(_) if perms_ok => rep.created.push(CLOUDFLARED_CONFIG_PATH.into()),
+        Ok(_) => {} // validate ok but perms failed → error already pushed; do not also report created
         Err(e) => rep
             .errors
             .push(format!("cloudflared ingress validate: {e}")),
@@ -1887,6 +1889,77 @@ mod tests {
                 .iter()
                 .any(|c| c == "/usr/local/bin/cloudflared"),
             "binary must not be reported as successfully created"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_creds_chmod_failure_is_surfaced() {
+        use pi_domain::contracts::{MockCloudflareApi, TunnelCreds};
+        let mut sys = fresh_sys();
+        sys.ok
+            .insert(FakeSys::key("uname", &["-m"]), "aarch64".into());
+        sys.err.insert(FakeSys::key("cloudflared", &["--version"])); // triggers install path
+        sys.err.insert(FakeSys::key(
+            "chmod",
+            &["640", "/var/lib/rpi/cloudflared/tid.json"],
+        ));
+        let mut cf = MockCloudflareApi::new();
+        cf.expect_find_or_create_tunnel().returning(|name| {
+            Ok(TunnelCreds {
+                account_tag: "acc".into(),
+                tunnel_id: "tid".into(),
+                tunnel_name: name.to_string(),
+                tunnel_secret: "c2VjcmV0".into(),
+            })
+        });
+        let mut rep = SetupReport::default();
+        let opts = CloudflaredBootstrap {
+            tunnel_name: "myboard".into(),
+            zone: "example.com".into(),
+        };
+        cloudflared_bootstrap_full(&sys, &cf, &opts, false, &mut rep).await;
+        assert!(!rep.errors.is_empty(), "chmod failure should be surfaced");
+        assert!(
+            !rep.created
+                .iter()
+                .any(|c| c == "/var/lib/rpi/cloudflared/tid.json"),
+            "creds must not be reported as successfully created"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_adopted_tunnel_without_creds_errors() {
+        use pi_domain::contracts::{MockCloudflareApi, TunnelCreds};
+        let sys = fresh_sys();
+        let mut cf = MockCloudflareApi::new();
+        cf.expect_find_or_create_tunnel().returning(|name| {
+            Ok(TunnelCreds {
+                account_tag: "acc".into(),
+                tunnel_id: "tid".into(),
+                tunnel_name: name.to_string(),
+                tunnel_secret: String::new(), // adopted: no secret held locally
+            })
+        });
+        let mut rep = SetupReport::default();
+        let opts = CloudflaredBootstrap {
+            tunnel_name: "myboard".into(),
+            zone: "example.com".into(),
+        };
+        cloudflared_bootstrap_full(&sys, &cf, &opts, false, &mut rep).await;
+        assert!(
+            rep.errors
+                .iter()
+                .any(|e| e.contains("adopted tunnel") && e.contains("credentials")),
+            "missing creds on adopted tunnel should be surfaced: {:?}",
+            rep.errors
+        );
+        assert!(
+            !sys.writes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(p, _)| p == "/var/lib/rpi/cloudflared/tid.json"),
+            "no creds file should be written for an adopted tunnel with no secret"
         );
     }
 }
