@@ -722,6 +722,7 @@ async fn resolve_tunnel_name(sys: &dyn Sys, opts: &SetupOpts) -> String {
 async fn cloudflared_bootstrap(sys: &dyn Sys, opts: &SetupOpts, rep: &mut SetupReport) {
     let dry = opts.dry_run;
     if let (Some(token), Some(domain)) = (&opts.cf_token, &opts.domain) {
+        let errs_before = rep.errors.len();
         ensure_cloudflare_token(sys, token, dry, rep).await;
         let api = pi_infrastructure::cloudflare::HttpCloudflare::new(token.clone(), None);
         let bopts = CloudflaredBootstrap {
@@ -729,6 +730,11 @@ async fn cloudflared_bootstrap(sys: &dyn Sys, opts: &SetupOpts, rep: &mut SetupR
             zone: domain.clone(),
         };
         cloudflared_bootstrap_full(sys, &api, &bopts, dry, rep).await;
+        if rep.errors.len() > errs_before {
+            // token write or tunnel bootstrap failed; do NOT enable a user
+            // service that would respawn against a missing/broken config.yml
+            return;
+        }
         cloudflared_user_service(sys, dry, rep).await;
         return;
     }
@@ -1995,6 +2001,55 @@ mod tests {
             yml.trim_end().ends_with("service: http_status:404"),
             "catch-all last"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_tunnel_name_prefers_flag_then_hostname_then_fallback() {
+        // 1. explicit --tunnel-name wins and hostname is never consulted.
+        let sys = fresh_sys();
+        let opts = SetupOpts {
+            login_user: "piuser".into(),
+            with_cloudflared: true,
+            dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: Some("myboard".into()),
+        };
+        let name = resolve_tunnel_name(&sys, &opts).await;
+        assert_eq!(name, "myboard");
+        assert!(
+            !sys.calls().iter().any(|c| c.starts_with("hostname")),
+            "must not call hostname when --tunnel-name is set: {:?}",
+            sys.calls()
+        );
+
+        // 2. no flag, hostname succeeds -> use it.
+        let mut sys = fresh_sys();
+        sys.ok.insert(FakeSys::key("hostname", &[]), "mypi".into());
+        let opts = SetupOpts {
+            login_user: "piuser".into(),
+            with_cloudflared: true,
+            dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
+        };
+        let name = resolve_tunnel_name(&sys, &opts).await;
+        assert_eq!(name, "mypi");
+
+        // 3. no flag, hostname fails -> fall back to "rpi".
+        let mut sys = fresh_sys();
+        sys.err.insert(FakeSys::key("hostname", &[]));
+        let opts = SetupOpts {
+            login_user: "piuser".into(),
+            with_cloudflared: true,
+            dry_run: false,
+            cf_token: None,
+            domain: None,
+            tunnel_name: None,
+        };
+        let name = resolve_tunnel_name(&sys, &opts).await;
+        assert_eq!(name, "rpi");
     }
 
     #[tokio::test]
