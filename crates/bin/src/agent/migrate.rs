@@ -17,10 +17,6 @@ pub enum MigrationState {
 }
 
 pub struct MigrationOutcome {
-    // Part of the `Migration::apply` contract; not yet consumed by any
-    // caller (`apply_one` only reads `note`). Reserved for a future
-    // no-op-vs-real-change distinction in reporting.
-    #[allow(dead_code)]
     pub changed: bool,
     pub note: String,
 }
@@ -97,8 +93,12 @@ async fn apply_one(
             if !dry {
                 ledger.mark_applied(m.id()).await;
             }
-            rep.repaired
-                .push(format!("migration {}: {}", m.id(), out.note));
+            let msg = format!("migration {}: {}", m.id(), out.note);
+            if out.changed {
+                rep.repaired.push(msg);
+            } else {
+                rep.skipped.push(msg);
+            }
         }
         Err(e) => rep.errors.push(format!("migration {} failed: {e}", m.id())),
     }
@@ -157,6 +157,7 @@ pub async fn run_cmd(
 ) -> anyhow::Result<()> {
     use super::setup::HostSys;
     let config = super::config::AgentConfig::load(None)?;
+    std::fs::create_dir_all(&config.data_dir)?;
     let db = pi_infrastructure::sqlite::Db::open(&config.data_dir.join("state.db"))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let ledger = super::migrate_ledger::DbLedger::new(
@@ -422,6 +423,43 @@ mod tests {
         )
         .await;
         assert!(rep.skipped.iter().any(|s| s.contains("not applicable")));
+    }
+
+    struct NoopStub;
+    #[async_trait]
+    impl Migration for NoopStub {
+        fn id(&self) -> &str {
+            "noop"
+        }
+        fn description(&self) -> &str {
+            "noop stub"
+        }
+        fn disruptive(&self) -> bool {
+            false
+        }
+        async fn detect(&self, _sys: &dyn Sys) -> MigrationState {
+            MigrationState::Applicable
+        }
+        async fn apply(&self, _sys: &dyn Sys, _dry: bool) -> Result<MigrationOutcome, String> {
+            Ok(MigrationOutcome {
+                changed: false,
+                note: "nothing to do".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_apply_lands_in_skipped() {
+        let reg: Vec<Box<dyn Migration>> = vec![Box::new(NoopStub)];
+        let ledger = FakeLedger::default();
+        let mut rep = SetupReport::default();
+        run_auto(&FakeSys::default(), &ledger, &reg, false, &mut rep).await;
+        assert!(rep.skipped.iter().any(|s| s.contains("migration noop")));
+        assert!(rep.repaired.is_empty());
+        assert!(
+            ledger.is_applied("noop").await,
+            "still marked applied even when unchanged"
+        );
     }
 
     #[tokio::test]
