@@ -211,4 +211,137 @@ mod tests {
         .await;
         assert!(rep.errors.iter().any(|e| e.contains("unknown migration")));
     }
+
+    #[tokio::test]
+    async fn dry_run_does_not_mark_ledger() {
+        let reg: Vec<Box<dyn Migration>> = vec![Box::new(Stub {
+            id: "safe",
+            disruptive: false,
+            state: MigrationState::Applicable,
+        })];
+        let ledger = FakeLedger::default();
+        let mut rep = SetupReport::default();
+        run_auto(&FakeSys::default(), &ledger, &reg, true, &mut rep).await;
+        assert!(rep.repaired.iter().any(|r| r.contains("migration safe")));
+        assert!(
+            !ledger.is_applied("safe").await,
+            "dry run must not record to the ledger"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_explicit_does_not_mark_ledger() {
+        let reg: Vec<Box<dyn Migration>> = vec![Box::new(Stub {
+            id: "nginx-to-caddy",
+            disruptive: true,
+            state: MigrationState::Applicable,
+        })];
+        let ledger = FakeLedger::default();
+        let mut rep = SetupReport::default();
+        run_explicit(
+            &FakeSys::default(),
+            &ledger,
+            &reg,
+            &["nginx-to-caddy".to_string()],
+            true,
+            &mut rep,
+        )
+        .await;
+        assert!(rep
+            .repaired
+            .iter()
+            .any(|r| r.contains("migration nginx-to-caddy")));
+        assert!(
+            !ledger.is_applied("nginx-to-caddy").await,
+            "dry run must not record to the ledger"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_noop_on_done() {
+        let reg: Vec<Box<dyn Migration>> = vec![Box::new(Stub {
+            id: "done-one",
+            disruptive: false,
+            state: MigrationState::Done,
+        })];
+        let ledger = FakeLedger::default();
+        let mut rep = SetupReport::default();
+        run_auto(&FakeSys::default(), &ledger, &reg, false, &mut rep).await;
+        assert!(rep.repaired.is_empty());
+        assert!(rep.warnings.is_empty());
+        assert!(!ledger.is_applied("done-one").await);
+    }
+
+    #[tokio::test]
+    async fn auto_noop_on_not_applicable() {
+        let reg: Vec<Box<dyn Migration>> = vec![Box::new(Stub {
+            id: "na-one",
+            disruptive: false,
+            state: MigrationState::NotApplicable,
+        })];
+        let ledger = FakeLedger::default();
+        let mut rep = SetupReport::default();
+        run_auto(&FakeSys::default(), &ledger, &reg, false, &mut rep).await;
+        assert!(rep.repaired.is_empty());
+        assert!(rep.warnings.is_empty());
+        assert!(!ledger.is_applied("na-one").await);
+    }
+
+    #[tokio::test]
+    async fn explicit_skips_done_with_message() {
+        let reg: Vec<Box<dyn Migration>> = vec![Box::new(Stub {
+            id: "done-one",
+            disruptive: false,
+            state: MigrationState::Done,
+        })];
+        let ledger = FakeLedger::default();
+        let mut rep = SetupReport::default();
+        run_explicit(
+            &FakeSys::default(),
+            &ledger,
+            &reg,
+            &["done-one".to_string()],
+            false,
+            &mut rep,
+        )
+        .await;
+        assert!(rep.skipped.iter().any(|s| s.contains("already done")));
+    }
+
+    #[tokio::test]
+    async fn explicit_skips_not_applicable_with_message() {
+        let reg: Vec<Box<dyn Migration>> = vec![Box::new(Stub {
+            id: "na-one",
+            disruptive: false,
+            state: MigrationState::NotApplicable,
+        })];
+        let ledger = FakeLedger::default();
+        let mut rep = SetupReport::default();
+        run_explicit(
+            &FakeSys::default(),
+            &ledger,
+            &reg,
+            &["na-one".to_string()],
+            false,
+            &mut rep,
+        )
+        .await;
+        assert!(rep.skipped.iter().any(|s| s.contains("not applicable")));
+    }
+
+    #[tokio::test]
+    async fn auto_skips_already_ledgered_without_detect() {
+        let reg: Vec<Box<dyn Migration>> = vec![Box::new(Stub {
+            id: "safe",
+            disruptive: false,
+            state: MigrationState::Applicable,
+        })];
+        let ledger = FakeLedger::default();
+        ledger.mark_applied("safe").await;
+        let mut rep = SetupReport::default();
+        run_auto(&FakeSys::default(), &ledger, &reg, false, &mut rep).await;
+        assert!(rep.repaired.is_empty());
+        assert!(rep.warnings.is_empty());
+        assert!(rep.errors.is_empty());
+    }
 }
