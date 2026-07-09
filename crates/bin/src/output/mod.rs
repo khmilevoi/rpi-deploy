@@ -26,9 +26,13 @@ pub fn init_colors() {
     }
 }
 
-/// Marker glyph for semantic messages; degrades to `*` on terminals without
-/// unicode/emoji support.
-const MARKER: Emoji<'_, '_> = Emoji("●", "*");
+/// Marker glyph for message lines. The glyph pair comes from the active
+/// theme; `console::Emoji` degrades to the ASCII form on terminals without
+/// unicode support.
+fn marker() -> Emoji<'static, 'static> {
+    let t = theme::theme();
+    Emoji(t.marker.0, t.marker.1)
+}
 
 /// Semantic role — the single source of truth for what a colour *means*.
 /// Rendered to `console::Style` here and to `comfy_table::Color` in `table.rs`,
@@ -46,25 +50,35 @@ pub enum Sem {
 
 /// Role -> terminal style for `console`-rendered output (messages, pane).
 pub(crate) fn console_style(sem: Sem) -> Style {
+    let t = theme::theme();
     let s = Style::new();
     match sem {
-        Sem::Success => s.green(),
-        Sem::Error => s.red(),
-        Sem::Warn => s.yellow(),
-        Sem::Accent => s.cyan(),
+        Sem::Success => t.success.console(),
+        Sem::Error => t.error.console(),
+        Sem::Warn => t.warn.console(),
+        Sem::Accent => t.accent.console(),
         Sem::Muted => s.dim(),
         Sem::Neutral => s,
         Sem::Frame => s.black().bright(),
     }
 }
 
-/// One stderr status line: a bold coloured marker + colour-tinted text.
+/// One stderr status line: a bold marker + colour-tinted text. Under a
+/// `marker_accent` theme the marker is always accent (the brand mark);
+/// otherwise it follows the line's own semantic colour.
 fn stderr_line(sem: Sem, msg: &str) -> String {
-    let base = console_style(sem).for_stderr();
+    let marker_sem = if theme::theme().marker_accent {
+        Sem::Accent
+    } else {
+        sem
+    };
     format!(
         "{} {}",
-        base.clone().bold().apply_to(MARKER),
-        base.apply_to(msg)
+        console_style(marker_sem)
+            .for_stderr()
+            .bold()
+            .apply_to(marker()),
+        console_style(sem).for_stderr().apply_to(msg)
     )
 }
 
@@ -82,7 +96,11 @@ pub fn warn(msg: impl std::fmt::Display) {
 
 pub fn note(msg: impl std::fmt::Display) {
     eprintln!(
-        "{}",
+        "{} {}",
+        console_style(Sem::Accent)
+            .for_stderr()
+            .bold()
+            .apply_to(marker()),
         console_style(Sem::Muted)
             .for_stderr()
             .apply_to(format!("note: {msg}"))
@@ -90,7 +108,42 @@ pub fn note(msg: impl std::fmt::Display) {
 }
 
 pub fn heading(msg: impl std::fmt::Display) {
-    println!("{}", console_style(Sem::Accent).bold().apply_to(msg));
+    let s = console_style(Sem::Accent).bold();
+    println!("{} {}", s.clone().apply_to(marker()), s.apply_to(msg));
+}
+
+/// Informational stdout line (answer content, not a status verdict):
+/// accent bold marker + untinted text.
+#[allow(dead_code)] // no caller until Task 4 wires `info` into CLI/agent call sites
+fn info_line(msg: &str) -> String {
+    format!(
+        "{} {}",
+        console_style(Sem::Accent).bold().apply_to(marker()),
+        msg
+    )
+}
+
+#[allow(dead_code)] // no caller until Task 4 wires `info` into CLI/agent call sites
+pub fn info(msg: impl std::fmt::Display) {
+    println!("{}", info_line(&msg.to_string()));
+}
+
+/// Progress/status stderr line: accent bold marker + untinted text.
+#[allow(dead_code)] // no caller until Task 4 wires `status` into CLI/agent call sites
+fn status_line(msg: &str) -> String {
+    format!(
+        "{} {}",
+        console_style(Sem::Accent)
+            .for_stderr()
+            .bold()
+            .apply_to(marker()),
+        msg
+    )
+}
+
+#[allow(dead_code)] // no caller until Task 4 wires `status` into CLI/agent call sites
+pub fn status(msg: impl std::fmt::Display) {
+    eprintln!("{}", status_line(&msg.to_string()));
 }
 
 /// Pure, string-returning variants for callers that build up a `String`
@@ -202,5 +255,23 @@ mod tests {
         assert_eq!(services_sem(&["running", "restarting"]), Sem::Warn);
         assert_eq!(services_sem(&["running", "exited"]), Sem::Error);
         assert_eq!(services_sem(&[]), Sem::Neutral);
+    }
+
+    #[test]
+    fn info_and_status_lines_carry_text_and_no_ansi_when_disabled() {
+        // Captured test output is not a TTY, so console styling is off.
+        let line = info_line("hello world");
+        assert!(line.contains("hello world"), "{line:?}");
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+        let line = status_line("working...");
+        assert!(line.contains("working..."), "{line:?}");
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+    }
+
+    #[test]
+    fn marker_renders_one_of_the_active_theme_glyphs() {
+        let t = theme::theme();
+        let s = marker().to_string();
+        assert!(s == t.marker.0 || s == t.marker.1, "{s:?}");
     }
 }

@@ -6,8 +6,8 @@ use console::Style;
 /// index so `console` (which has no truecolor support) and `comfy-table`
 /// render the identical colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // no caller until Task 2 (console/theme) / Task 3 (table/template_token)
 pub enum Paint {
+    #[allow(dead_code)] // no theme constructs this yet; reserved for a future default/no-op role
     Default,
     Cyan,
     Green,
@@ -16,7 +16,6 @@ pub enum Paint {
     Rgb(u8, u8, u8),
 }
 
-#[allow(dead_code)] // console()/theme() gain a caller in Task 2, table()/template_token() in Task 3
 impl Paint {
     /// Base `console` style (no modifiers) for this paint.
     pub fn console(self) -> Style {
@@ -32,6 +31,7 @@ impl Paint {
     }
 
     /// Foreground colour for `comfy-table` cells; `None` = uncoloured.
+    #[allow(dead_code)] // no caller until Task 3 (table)
     pub fn table(self) -> Option<comfy_table::Color> {
         use comfy_table::Color;
         match self {
@@ -47,6 +47,7 @@ impl Paint {
     /// Colour token for an `indicatif` template (`{spinner:.<token>}`).
     /// `indicatif` parses it with `console::Style::from_dotted_str`, which
     /// accepts ANSI names and numeric `0-255` tokens. `None` = no colour.
+    #[allow(dead_code)] // no caller until Task 3 (template_token)
     pub fn template_token(self) -> Option<String> {
         match self {
             Paint::Default => None,
@@ -61,7 +62,6 @@ impl Paint {
 
 /// Nearest xterm-256 index for an RGB colour: the best of the 6x6x6 cube
 /// (16..232) and the grey ramp (232..256) by squared RGB distance.
-#[allow(dead_code)] // only test-exercised until Paint::console/table/template_token gain callers
 pub fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
     const LEVELS: [i32; 6] = [0, 95, 135, 175, 215, 255];
     fn nearest_level(v: u8) -> usize {
@@ -92,7 +92,6 @@ pub fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
 
 /// A theme controls palette and glyphs only — structural output decisions
 /// (which lines get a marker, streams, prefixes) are theme-independent.
-#[allow(dead_code)] // constructed and read starting with Task 2's `theme()` caller
 pub struct Theme {
     pub accent: Paint,
     pub success: Paint,
@@ -105,7 +104,6 @@ pub struct Theme {
     pub marker_accent: bool,
 }
 
-#[allow(dead_code)] // raspberry()/classic() gain a caller via from_env_value() in Task 2
 impl Theme {
     /// Brand theme from rpi-deploy-site: raspberry accent + triangle logo
     /// marker, site green/amber for success/warn.
@@ -142,11 +140,9 @@ impl Theme {
     }
 }
 
-#[allow(dead_code)] // no caller until Task 2 wires `theme()` into mod.rs
 static ACTIVE: OnceLock<Theme> = OnceLock::new();
 
 /// The process-wide theme, chosen once from `PI_THEME` on first use.
-#[allow(dead_code)] // no caller until Task 2 wires `theme()` into mod.rs
 pub fn theme() -> &'static Theme {
     ACTIVE.get_or_init(|| Theme::from_env_value(std::env::var("PI_THEME").ok().as_deref()))
 }
