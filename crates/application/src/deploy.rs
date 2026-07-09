@@ -333,9 +333,9 @@ mod tests {
     use super::*;
     use crate::test_support::CollectSink;
     use pi_domain::contracts::{
-        MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe, MockHealthGate,
-        MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository, MockSecretStore,
-        MockSecretsWriter, MockSource,
+        IngressOutcome, MockClock, MockContainerRuntime, MockDeploymentHistory, MockDiskProbe,
+        MockHealthGate, MockHostNetwork, MockIngress, MockOverrideStore, MockProjectRepository,
+        MockSecretStore, MockSecretsWriter, MockSource,
     };
     use pi_domain::entities::{
         DeployRef, DeploymentStatus, ExposeMode, FetchedSource, HealthcheckConfig, Project,
@@ -511,7 +511,7 @@ mod tests {
             .times(1)
             .returning(move |_, _, _| {
                 stage_order.lock().unwrap().push("ingress");
-                Ok(())
+                Ok(IngressOutcome::Applied)
             });
         m.gc_runtime.checkpoint();
         let stage_order = Arc::clone(&order);
@@ -946,7 +946,9 @@ mod tests {
         });
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
-        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .returning(|_, _, _| Ok(IngressOutcome::Applied));
 
         let deploy = build(m);
         let sink = CollectSink::new();
@@ -1258,7 +1260,9 @@ mod tests {
             .expect_write()
             .returning(|p, _, _, _, _| Ok(PathBuf::from("/ov").join(p)));
         m.health.expect_check().returning(|_, _, _| Ok(()));
-        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .returning(|_, _, _| Ok(IngressOutcome::Applied));
         m.history.expect_mark_running().returning(|_, _| Ok(()));
         m.history
             .expect_record_finished()
@@ -1329,7 +1333,9 @@ mod tests {
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
         m.health.expect_check().returning(|_, _, _| Ok(()));
-        m.ingress.expect_upsert().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .returning(|_, _, _| Ok(IngressOutcome::Applied));
         m.gc_runtime.checkpoint();
         m.gc_runtime
             .expect_prune_images()

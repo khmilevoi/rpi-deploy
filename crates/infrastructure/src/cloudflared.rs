@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_domain::contracts::{CloudflareApi, Ingress, LogSink};
+use pi_domain::contracts::{CloudflareApi, Ingress, IngressOutcome, LogSink};
 use pi_domain::error::DomainError;
 use tokio::process::Command;
 
@@ -116,7 +116,7 @@ impl Ingress for CloudflaredIngress {
         hostname: &str,
         host_port: u16,
         log: Arc<dyn LogSink>,
-    ) -> Result<(), DomainError> {
+    ) -> Result<IngressOutcome, DomainError> {
         let text = tokio::fs::read_to_string(&self.config_path)
             .await
             .map_err(|e| {
@@ -132,7 +132,7 @@ impl Ingress for CloudflaredIngress {
             log.line(&format!(
                 "ingress: {hostname} -> {service} already routed; cloudflared untouched"
             ));
-            return Ok(());
+            return Ok(IngressOutcome::Applied);
         }
         let updated = serde_yaml::to_string(&doc).map_err(ingress_err)?;
         tokio::fs::write(&self.config_path, updated)
@@ -151,7 +151,7 @@ impl Ingress for CloudflaredIngress {
             }
             return Err(err);
         }
-        Ok(())
+        Ok(IngressOutcome::Applied)
     }
 
     async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
@@ -247,12 +247,12 @@ impl Ingress for DisabledIngress {
         hostname: &str,
         host_port: u16,
         log: Arc<dyn LogSink>,
-    ) -> Result<(), DomainError> {
+    ) -> Result<IngressOutcome, DomainError> {
         log.line(&format!(
             "ingress: [cloudflared] is not configured in agent.toml; \
              route {hostname} -> http://127.0.0.1:{host_port} manually"
         ));
-        Ok(())
+        Ok(IngressOutcome::Skipped)
     }
 
     async fn remove(&self, hostname: &str, log: Arc<dyn LogSink>) -> Result<(), DomainError> {
@@ -370,15 +370,26 @@ mod tests {
             vec!["pi-test-no-such-binary".into()],
             std::sync::Arc::new(MockCloudflareApi::new()),
         );
-        ingress
+        let outcome = ingress
             .upsert("old.example.com", 8001, CollectSink::new())
             .await
             .unwrap();
+        assert_eq!(outcome, IngressOutcome::Applied);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             BASE,
             "file untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn disabled_ingress_upsert_reports_skipped() {
+        let ingress = DisabledIngress::new();
+        let outcome = ingress
+            .upsert("a.example.com", 8000, CollectSink::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, IngressOutcome::Skipped);
     }
 
     #[tokio::test]
