@@ -9,6 +9,7 @@ pub use spinner::spinner;
 mod logpane;
 pub use logpane::LogPane;
 
+mod banner;
 mod theme;
 
 fn no_color_requested() -> bool {
