@@ -144,9 +144,10 @@ caddy_admin = "127.0.0.1:2019"
 ```
 
 Токен — единственный секрет, лежит одним файлом `/var/lib/rpi/cloudflare/token`,
-mode `0640`, владелец `root:rpi-agent`; `caddy`-сервис читает его как член группы
-`rpi-agent` (или через `EnvironmentFile` своего юнита). Никогда не инлайнится в
-`agent.toml`. Хранение/чтение — через существующий `secretpath`/`secretsfile`.
+владелец `root`, группа **`rpi-secrets`** (только этот файл; члены — `rpi-agent` и
+`caddy`), mode `0640`. Его читают агент (CNAME туннеля + LAN A-запись) и Caddy (ACME
+DNS-01) — это **единственный** общий ресурс двух сервисов. Никогда не инлайнится в
+`agent.toml`; хранение/чтение — через существующий `secretpath`/`secretsfile`.
 
 `agent.toml` до этого спека версии не имел — добавляем `schema` (u32), как в `rpi.toml`.
 Агент его валидирует (текущее — ок; будущее — ошибка; старое → config-migration через
@@ -251,8 +252,9 @@ rpi agent setup \
 7. Install кастомный `caddy` (с `caddy-dns/cloudflare`) по arch →
    `/usr/local/bin/caddy` (через Caddy download API `?p=github.com/caddy-dns/cloudflare`
    или прибандленный build; skip если есть и с нужным модулем — проверяем
-   `caddy list-modules | grep dns.providers.cloudflare`). Создаём service-user
-   `caddy` (или переиспользуем `rpi-agent`), каталог `/etc/rpi/caddy` + data-dir.
+   `caddy list-modules | grep dns.providers.cloudflare`). Создаём **отдельного**
+   service-user `caddy` (**не** в группе `docker`), группу `rpi-secrets`
+   (`rpi-agent`+`caddy`) на токен-файл, каталог `/etc/rpi/caddy` + data-dir (owner `caddy`).
 8. Базовый Caddy-конфиг (JSON): admin `127.0.0.1:2019`; глобальная TLS-автоматизация с
    `subjects: ["*.<label>.<zone>"]` и issuer `acme` + DNS-01 provider `cloudflare`
    (токен из секрет-файла), `email`; HTTP-сервер с авто-редиректом на HTTPS. Плюс
@@ -527,17 +529,13 @@ note: обнаружен nginx на 80/443 и certbot-серт *.lan.example.com
 
 ---
 
-## 12. Открытые пункты для ревью
+## 12. Принятые решения (ревью пройдено)
 
-1. **Нейминг `lan` vs `expose`.** Оставлен `lan_hostname`/`lan` рядом с существующим
-   `expose = "lan"`. Слово «lan» в двух ролях. Альтернатива — назвать HTTPS-поле
-   иначе (`https_host`, `lan_tls_host`), но тогда теряется симметрия с `hostname`.
-   Решение по умолчанию — `lan_hostname`; готов сменить.
-2. **Service-user для Caddy.** Отдельный `caddy` (изоляция) vs переиспользовать
-   `rpi-agent` (меньше сущностей, проще доступ к токену). Дефолт — отдельный `caddy`
-   в группе `rpi-agent` для чтения токена.
-3. **Вход миграций.** Выбрана подкоманда `rpi agent migrate` (а не флаг `--migrate` на
-   `setup`); разрушающие — только по явному `--run <id>`, авто их не запускаем. Если
-   хочешь буквально `setup --migrate` как алиас — скажу, добавлю.
-4. **Ledger миграций.** Таблица в `state.db` (выбрано) vs отдельный
-   `/var/lib/rpi/state/migrations.json`. Дефолт — `state.db` (одно место состояния).
+1. **Нейминг:** `lan_hostname` (+ сахар `lan`), рядом с существующим `expose` —
+   ортогональная ось (bind-адрес vs HTTPS-ingress); разница фиксируется в README.
+2. **Service-user Caddy:** **отдельный `caddy`**, **не** в группе `docker` (изоляция
+   сетевого TLS-терминатора от root-эквивалентного `rpi-agent`); единственный общий
+   ресурс — токен, через группу `rpi-secrets` на один файл.
+3. **Вход миграций:** подкоманда `rpi agent migrate` (без флага-алиаса на `setup`);
+   разрушающие — только по явному `--run <id>`.
+4. **Ledger миграций:** таблица в `state.db` (одно место состояния).
