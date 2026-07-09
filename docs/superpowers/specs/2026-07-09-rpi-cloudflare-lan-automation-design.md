@@ -37,7 +37,11 @@ Cloudflare API-токеном и доменом настраивает end-to-en
 - Единый Cloudflare API-токен как **единственный секрет** для туннеля, DNS и ACME.
 - Новые поверхности: секции `[cloudflare]`/`[lan]` в `agent.toml`; поле
   `lan_hostname`/`lan` в `[ingress]` `rpi.toml`; флаги `rpi agent setup`.
-- Staged-reversible миграция host-nginx → Caddy на 80/443 по явному `--migrate-proxy`.
+- Версия `schema` в `agent.toml` (как в `rpi.toml`) + унифицированный фреймворк
+  системных миграций `rpi agent migrate` (детект + ledger применённого): существующая
+  `pi-to-rpi` рефакторится в него, `nginx-to-caddy` (staged/reversible) — новая запись.
+- Migration-гайд `docs/migration-nginx-to-caddy.md` и подсказка оператору при
+  обнаружении до-тульного сетапа (nginx на 80/443 / ручной cloudflared / certbot-серт).
 
 **НЕ входит (YAGNI):**
 
@@ -119,6 +123,8 @@ Cloudflare API-токеном и доменом настраивает end-to-en
 ### 4.1. `agent.toml` (хост/аккаунт-уровень)
 
 ```toml
+schema = 1                                       # НОВОЕ: версия формата agent.toml (как в rpi.toml)
+
 [cloudflare]                                     # новое, фундамент Phase 1
 zone = "example.com"
 token_file = "/var/lib/rpi/cloudflare/token"     # секрет по ссылке, не инлайном
@@ -141,6 +147,10 @@ caddy_admin = "127.0.0.1:2019"
 mode `0640`, владелец `root:rpi-agent`; `caddy`-сервис читает его как член группы
 `rpi-agent` (или через `EnvironmentFile` своего юнита). Никогда не инлайнится в
 `agent.toml`. Хранение/чтение — через существующий `secretpath`/`secretsfile`.
+
+`agent.toml` до этого спека версии не имел — добавляем `schema` (u32), как в `rpi.toml`.
+Агент его валидирует (текущее — ок; будущее — ошибка; старое → config-migration через
+общий фреймворк §7).
 
 ### 4.2. `rpi.toml` (на проект) — LAN-HTTPS ingress
 
@@ -190,7 +200,6 @@ rpi agent setup \
   --with-lan \                # Phase 2: Caddy + LAN-HTTPS
   --tunnel myboard \          # имя туннеля (дефолт деривится, напр. из hostname)
   --lan-ip 192.168.1.180 \    # override автодетекта HostNetwork
-  --migrate-proxy \           # явно забрать 80/443 у nginx (см. §7)
   --dry-run
 ```
 
@@ -201,6 +210,9 @@ rpi agent setup \
 
 Токен-скоупы (документируем в README): `Zone:DNS:Edit` + `Zone:Zone:Read` (для
 резолва zone-id) + `Account:Cloudflare Tunnel:Edit`.
+
+Миграции вынесены в отдельную унифицированную подкоманду `rpi agent migrate` (§7), а не
+во флаг `setup` — так все миграции запускаются одинаково.
 
 ---
 
@@ -246,8 +258,8 @@ rpi agent setup \
    (токен из секрет-файла), `email`; HTTP-сервер с авто-редиректом на HTTPS. Плюс
    system-юнит `caddy.service` (`AmbientCapabilities=CAP_NET_BIND_SERVICE` для 80/443).
 9. **Проверка портов 80/443:** свободны → `enable --now caddy`. Заняты (nginx) →
-   **не трогаем**, warning + требование `--migrate-proxy` (см. §7). Без флага Caddy
-   ставится/конфигурируется, но порты не отбирает.
+   **не трогаем**, печатаем подсказку про `rpi agent migrate --run nginx-to-caddy`
+   (§7.6). Без миграции Caddy ставится/конфигурируется, но порты не отбирает.
 10. Cloudflare API: `put_dns` `*.<label>.<zone>` A → `HostNetwork.primary_ipv4()` (или
     `[lan].ip`), proxied=false (grey/DNS-only). Adopt если запись уже есть.
 11. Прогреть wildcard-серт: дёрнуть Caddy (admin API/loopback), чтобы он выпустил
@@ -275,50 +287,125 @@ teardown):
 
 ---
 
-## 7. Миграция host-nginx → Caddy (`--migrate-proxy`, staged + reversible)
+## 7. Миграции — унифицированный фреймворк (`rpi agent migrate`)
 
-Ключ бесшовности: **DNS-01 не требует порта** — Caddy выпускает `*.<label>`-серт,
-пока nginx ещё держит 80/443. Существующий certbot-серт при этом **не переиспользуется
-для отдачи** (иначе renew остался бы на certbot, что противоречит цели), а играет
-роль «старого сервера до cutover» и кнопки отката.
+Все системные миграции (identity/пути/юниты/прокси/формат конфига) идут через **один
+детект-ориентированный фреймворк** и **один вход** `rpi agent migrate`, а не через
+одноразовые флаги. Добавление будущей миграции не плодит флаги; оператор запускает их
+всегда одинаково.
+
+### 7.1. Три слоя версий/миграций — не смешиваем
+
+- **Формат конфига (`agent.toml`):** поле `schema` (u32), как у `rpi.toml`. Агент
+  валидирует; при `schema` ниже текущего — **config-migration** (переписать старый
+  формат в новый). До этого спека `agent.toml` версии не имел — добавляем `schema = 1`.
+- **Данные (`state.db`):** numbered-миграции в `sqlite.rs`, применяются
+  **автоматически** на старте агента (напр. `ADD COLUMN lan_host`). Оператор не трогает.
+- **Хост (system):** identity/юниты/пути/прокси — `pi-to-rpi`, `nginx-to-caddy`.
+  Их унифицируем в фреймворке ниже; config-migration тоже идёт через него
+  (её `detect` = `schema < N`).
+
+### 7.2. Модель
+
+```rust
+#[async_trait]
+trait Migration {
+    fn id(&self) -> &str;              // slug: "pi-to-rpi", "nginx-to-caddy", "agent-toml-v2"
+    fn description(&self) -> &str;
+    fn disruptive(&self) -> bool;      // true => явный opt-in, возможен downtime
+    async fn detect(&self, sys: &dyn Sys) -> MigrationState; // Applicable|Done|NotApplicable
+    async fn apply(&self, sys: &dyn Sys, dry_run: bool) -> MigrationOutcome;
+}
+```
+
+- **Реестр** — упорядоченный список всех миграций.
+- **Ledger** применённого (id + timestamp): таблица в `state.db`. Это «текущая версия»
+  хоста в терминах выполненных миграций → идемпотентность и статус «сделано / ждёт».
+- **Детект-ориентированность:** применимость берётся из фактического состояния
+  (`detect`), не только из номера версии — `nginx-to-caddy` срабатывает по факту (nginx
+  на 80/443), config-migration — по `schema`. Ledger лишь фиксирует сделанное.
+
+### 7.3. Поведение `rpi agent migrate` (root)
+
+CLI: `rpi agent migrate [--list] [--dry-run] [--run <id>]... [--all --yes]`
+(`main.rs` `AgentCmd::Migrate`). Флага `--migrate-proxy` нет — proxy-переезд это
+миграция `nginx-to-caddy` в реестре.
+
+- `detect()` по каждой; печать унифицированного плана/отчёта.
+- **Неразрушающие + применимые** (`disruptive=false`: `pi-to-rpi`, config-migration) —
+  применяются автоматически; их же зовёт обычный `setup` (шаг 0) и старт агента, чтобы
+  апгрейд был zero-touch. **Та же** зарегистрированная миграция — без дублирования логики.
+- **Разрушающие + применимые** (`disruptive=true`: `nginx-to-caddy`) — по умолчанию
+  только **репортятся** подсказкой; применяются лишь по явному `--run <id>`
+  (или `--all --yes`).
+- `--dry-run` — план без изменений; `--list` — все миграции и их статус из ledger.
+
+### 7.4. Миграция `pi-to-rpi` (неразрушающая, авто)
+
+Существующий `setup.rs::migrate_pi_agent_if_present` рефакторится в реализацию
+`Migration` (id `pi-to-rpi`). Логика без изменений (stop old unit → quiesce session →
+group/usermod rename → move dirs → rewrite paths → backup unit); детект = «есть
+`pi-agent`, нет `rpi-agent`»; по завершении — запись в ledger. Продолжает вызываться из
+`setup` автоматически.
+
+### 7.5. Миграция `nginx-to-caddy` (разрушающая, staged + reversible)
+
+Ключ бесшовности: **DNS-01 не требует порта** — Caddy выпускает `*.<label>`-серт, пока
+nginx ещё держит 80/443. Существующий certbot-серт **не переиспользуется для отдачи**
+(иначе renew остался бы на certbot, против цели), а играет роль «старого сервера до
+cutover» и кнопки отката.
 
 **Фаза A — подготовка (nginx жив, downtime = 0):**
-1. Ставим Caddy + юнит, но HTTP/HTTPS-серверы на **временных портах** 8080/8443;
-   80/443 не трогаем; admin на `127.0.0.1:2019`.
+1. Ставим Caddy + юнит, HTTP/HTTPS-серверы на **временных портах** 8080/8443; 80/443 не
+   трогаем; admin `127.0.0.1:2019`.
 2. Caddy через DNS-01 выпускает `*.<label>.<zone>`-серт в своё хранилище; проверяем.
-3. **Сеем роуты из задеплоенных проектов** (канонический источник — реестр
-   проектов/`state.db`, не парсинг nginx): для каждого проекта с LAN-ingress — роут
-   в Caddy через admin API.
+3. **Сеем роуты из задеплоенных проектов** (источник — реестр/`state.db`, не парсинг
+   nginx): для каждого проекта с LAN-ingress — роут в Caddy через admin API.
 4. **Паритет на временных портах:** `curl --resolve <host>:8443:127.0.0.1
    https://<host>:8443/` → тот же ответ, `server: caddy`.
 
 **Фаза B — cutover (downtime ~ доли секунды):**
 5. `systemctl stop nginx` — освобождаем 80/443.
-6. Через admin API перекидываем Caddy-серверы с 8080/8443 на 80/443 (rebind — мс).
-7. Верификация на реальных портах: `curl -I https://<host>/` → 2xx/4xx как раньше,
-   `server: caddy`.
+6. Через admin API перекидываем Caddy-серверы на 80/443 (rebind — мс).
+7. Верификация: `curl -I https://<host>/` → как раньше, `server: caddy`.
 
 **Фаза C — финализация (только если верификация прошла):**
 8. `systemctl disable nginx` — **остаётся установленным, конфиги целы** (кнопка отката).
-9. `systemctl disable --now certbot.timer` — серты ведёт Caddy. `/etc/letsencrypt`
-   **не удаляем** (осиротевший серт безвреден, авто-продлевался бы — но timer выключен).
-10. Отчёт: что переехало, что осиротело, инструкция отката.
+9. `systemctl disable --now certbot.timer` — серты ведёт Caddy; `/etc/letsencrypt` **не
+   удаляем** (осиротевший серт безвреден, timer выключен).
+10. Запись в ledger; отчёт: что переехало, что осиротело, инструкция отката.
 
-**Откат** (любой шаг верификации падает): вернуть Caddy на временные порты (или
-остановить), `systemctl start nginx` → прод снова на nginx. Ничего не удалено.
+**Откат** (любой шаг верификации падает): Caddy на временные порты (или стоп),
+`systemctl start nginx` → прод снова на nginx. Ничего не удалено; ledger миграцию
+выполненной не отмечает.
 
-**Ограничения (честно, в отчёте):**
-- Переезжают только vhost'ы задеплоенных через `rpi` проектов. Руками сделанные
-  nginx-сайты вне `rpi` — перечисляем в warning, не переносим.
-- HTTP→HTTPS редирект и forwarded-хедеры Caddy делает сам; кастомные nginx-хедеры не
+**Ограничения (в отчёте):**
+- Переезжают только vhost'ы задеплоенных через `rpi` проектов; руками сделанные
+  nginx-сайты вне `rpi` — перечисляем, не переносим.
+- HTTP→HTTPS-редирект и forwarded-хедеры Caddy делает сам; кастомные nginx-хедеры не
   транслируются (перечисляем).
-- Rate-limit LE: выпуск нового `*.<label>`-серта при существующем идентичном — 1
-  «duplicate certificate» из лимита 5/неделю; для разовой миграции не проблема.
-- Два DNS-01 (certbot renew vs Caddy issue) не конфликтуют: каждый добавляет/удаляет
-  **свою** TXT по record-id через Cloudflare API.
-- Повторный `--migrate-proxy` после переезда — no-op (Caddy на 80/443, nginx disabled),
-  только сверка роутов.
+- Rate-limit LE: новый `*.<label>`-серт при идентичном существующем — 1 «duplicate» из
+  5/неделю; для разовой миграции ок.
+- Два DNS-01 (certbot renew vs Caddy issue) не конфликтуют (каждый правит свою TXT по
+  record-id).
+- Повторный запуск после переезда — no-op: `detect` вернёт `Done`.
 - Туннель миграцией не затрагивается (cloudflared не слушает 80/443).
+
+### 7.6. Подсказка о миграции + migration-гайд
+
+`rpi agent setup` и `rpi agent migrate --list` при **применимой разрушающей** миграции
+печатают actionable-note (не падают, прод не трогают). Пример:
+
+```
+note: обнаружен nginx на 80/443 и certbot-серт *.lan.example.com — LAN-HTTPS ведётся
+      вручную. Перенести под управление тулы:
+        sudo rpi agent migrate --run nginx-to-caddy
+      Что делает и как откатить — docs/migration-nginx-to-caddy.md
+```
+
+Отдельный **migration-гайд** `docs/migration-nginx-to-caddy.md` (конвенция
+`docs/migration-*.md`, как `migration-v0.5-to-v0.6.md`) описывает: что переезжает,
+пофазовый ход, downtime, паритет-чек, откат, что осиротеет и как снести.
 
 ---
 
@@ -343,19 +430,28 @@ teardown):
   `cert.pem` на деплое). Логика upsert/rollback `config.yml` — без изменений.
 - `hostnet.rs`: переиспользовать `UdpHostNetwork::primary_ipv4` (из LAN-expose) для
   `[lan].ip = "auto"`.
+- `sqlite.rs`/`repo.rs`: numbered-миграция `ADD COLUMN lan_host TEXT` (по образцу
+  `expose`), чтобы `rpi ls` показывал LAN-хост без редеплоя; плюс таблица **ledger**
+  системных миграций (§7.2). Схемные миграции применяются автоматически на старте — это
+  не операторская `migrate`.
 
 **`bin/agent`:**
-- `config.rs`: новые секции `CloudflareSection { zone, token_file, account_id? }` и
-  `LanSection { enabled, domain_label, ip, acme_email, caddy_admin }`; `CloudflaredSection`
-  — как есть.
-- `setup.rs`: расширить `SetupOpts`/`cloudflared_bootstrap` до полного флоу (§5),
-  добавить `caddy_bootstrap`, `migrate_proxy`. Всё через `Sys` + новый тонкий порт для
-  Cloudflare API (в bootstrap ходим напрямую, вне трейта `Sys`, но за тестируемым
-  интерфейсом).
+- `config.rs`: поле `schema: u32` в `AgentConfig` + валидация (`schema == CURRENT`,
+  будущее → ошибка, старое → config-migration; по образцу `rpi.toml`); новые секции
+  `CloudflareSection { zone, token_file, account_id? }` и
+  `LanSection { enabled, domain_label, ip, acme_email, caddy_admin }`.
+- `migrate.rs` (новый): трейт `Migration`, `MigrationState`/`MigrationOutcome`, реестр,
+  ledger в `state.db`, раннер (§7). Реализации: `pi-to-rpi` (перенос из `setup.rs`),
+  `nginx-to-caddy`, config-migration `agent.toml`.
+- `setup.rs`: `cloudflared_bootstrap` → полный флоу (§5), новый `caddy_bootstrap`; шаг 0
+  зовёт раннер неразрушающих миграций (вместо прямого `migrate_pi_agent_if_present`).
+  Всё через `Sys` + тестируемый порт Cloudflare API (в bootstrap ходим напрямую, вне
+  `Sys`, но за интерфейсом).
 - сборка `CompositeIngress` из секций конфига там, где сейчас выбирается ingress.
 
 **`bin/cli` + wire:**
-- `main.rs`: новые аргументы `AgentCmd::Setup` (§4.3), проброс в `run_cmd`.
+- `main.rs`: новые аргументы `AgentCmd::Setup` (§4.3) + подкоманда `AgentCmd::Migrate`
+  (§7.3), проброс в `run_cmd`/раннер миграций.
 - `rpitoml.rs`: `IngressSection` — `#[serde(default)] lan_hostname: Option<String>`,
   `#[serde(default)] lan: bool`; резолв/валидация в `to_project_config` (под
   `*.<label>.<zone>`; взаимоисключение с `lan`).
@@ -379,16 +475,21 @@ teardown):
 - **`setup.rs`:** Phase 1 — порядок drop-in → daemon-reload → restart user@uid →
   enable-linger → enable cloudflared; adopt существующего туннеля (creds есть → не
   пересоздаём); safe-write config.yml + вызов `ingress validate`. Phase 2 — install
-  caddy, порт-чек ветвится (свободно → enable; занято → warning без отбора портов),
-  `put_dns` wildcard. `--migrate-proxy` — последовательность фаз A/B/C, при провале
-  верификации откат (nginx start, Caddy на temp-порты), certbot.timer/nginx только
-  `disable`, не delete. dry-run ничего не пишет.
+  caddy, порт-чек ветвится (свободно → enable; занято → подсказка без отбора портов),
+  `put_dns` wildcard. dry-run ничего не пишет.
+- **`migrate.rs`:** реестр/ledger — `detect` даёт Applicable/Done/NotApplicable;
+  неразрушающие применяются авто, разрушающие только по `--run`; повторный прогон
+  (`Done`) → no-op; ledger пишется только при успехе. `nginx-to-caddy` — фазы A/B/C, при
+  провале верификации откат (nginx start, Caddy на temp-порты), certbot.timer/nginx
+  только `disable`, не delete, ledger не отмечен. `pi-to-rpi` — существующие тесты
+  переносятся на новый интерфейс без изменения поведения.
 - **`rpitoml.rs`:** парсинг `lan_hostname`/`lan`; дефолт-отсутствие; валидация
   «под wildcard»; отказ на `lan_hostname` вне `*.<label>.<zone>`; взаимоисключение
   `lan`+`lan_hostname`.
 - **`proto.rs`:** roundtrip `lan_host` через DTO; payload без него → `None`.
 - **`config.rs`:** парсинг `[cloudflare]`/`[lan]` с дефолтами; отсутствие секций —
-  фичи выключены.
+  фичи выключены; валидация `schema` (текущее — ок; будущее → ошибка; старое →
+  config-migration применима).
 
 ---
 
@@ -400,8 +501,9 @@ teardown):
   как работает DNS-01 wildcard, что серт доверенный без своего CA.
 - **Разъяснить `expose` vs `lan_hostname`** (bind-адрес vs HTTPS-ingress) — во
   избежание путаницы.
-- Раздел «Миграция nginx → Caddy»: что делает `--migrate-proxy`, downtime, откат,
-  что осиротеет (certbot-серт/timer).
+- Раздел «Миграции» (`rpi agent migrate`): унифицированный вход, `--list`/`--dry-run`/
+  `--run`, `schema` в `agent.toml`; отдельный `docs/migration-nginx-to-caddy.md` (что
+  делает переезд, downtime, откат, что осиротеет — certbot-серт/timer).
 - Заметка безопасности: приватный LAN-IP публикуется в публичном DNS (вариант A);
   admin API Caddy — только loopback, без авторизации (single-tenant Pi).
 
@@ -411,13 +513,14 @@ teardown):
 
 Один спек, реализация двумя shippable-фазами; фундамент — в первой.
 
-- **Phase 1 — полный авто-bootstrap Cloudflare Tunnel.** Закрывает камни 1–7:
-  API-создание туннеля, drop-in systemd-фикс, DNS-через-API для существующего
-  публичного ingress, install cloudflared. Строит фундамент: `Cloudflare` API-клиент
-  + модель токена/секрета + секция `[cloudflare]`. Самодостаточна.
+- **Phase 1 — полный авто-bootstrap Cloudflare Tunnel + фундамент.** Закрывает камни
+  1–7: API-создание туннеля, drop-in systemd-фикс, DNS-через-API для существующего
+  публичного ingress, install cloudflared. Фундамент: `Cloudflare` API-клиент + модель
+  токена/секрета + секция `[cloudflare]` + `schema` в `agent.toml` + фреймворк миграций
+  (`migrate.rs`, рефактор `pi-to-rpi` в него). Самодостаточна.
 - **Phase 2 — LAN-HTTPS через Caddy.** Install/конфиг Caddy, wildcard-серт, `*.lan`
-  DNS, `CaddyIngress`, поверхность `lan_hostname`/`lan`, миграция `--migrate-proxy`.
-  Переиспользует фундамент Phase 1.
+  DNS, `CaddyIngress`, поверхность `lan_hostname`/`lan`, миграция `nginx-to-caddy` (в
+  фреймворке из Phase 1). Переиспользует фундамент Phase 1.
 
 Каждая фаза → свой план (`writing-plans`) → имплементация → security-review (каталог
 `docs/superpowers/security/`, как у прочих фич с секретами/сетью).
@@ -433,5 +536,8 @@ teardown):
 2. **Service-user для Caddy.** Отдельный `caddy` (изоляция) vs переиспользовать
    `rpi-agent` (меньше сущностей, проще доступ к токену). Дефолт — отдельный `caddy`
    в группе `rpi-agent` для чтения токена.
-3. **Миграция текущего бокса.** По умолчанию `--migrate-proxy` — явный ручной шаг;
-   авто-миграцию на существующем nginx-боксе не делаем. Ок?
+3. **Вход миграций.** Выбрана подкоманда `rpi agent migrate` (а не флаг `--migrate` на
+   `setup`); разрушающие — только по явному `--run <id>`, авто их не запускаем. Если
+   хочешь буквально `setup --migrate` как алиас — скажу, добавлю.
+4. **Ledger миграций.** Таблица в `state.db` (выбрано) vs отдельный
+   `/var/lib/rpi/state/migrations.json`. Дефолт — `state.db` (одно место состояния).
