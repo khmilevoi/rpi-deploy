@@ -14,6 +14,7 @@ import {
   runDev,
   runE2E,
   runPool,
+  runScenario,
   scenarioTimeoutMs,
 } from './run.mjs';
 
@@ -51,12 +52,12 @@ test('makeProjectName is deterministic with injected values', () => {
   );
 });
 
-test('local success builds, starts dependencies, runs client, then tears down', async () => {
+test('single scenario success: version, build, config, up, run client, down, image rm', async () => {
   await withArtifacts(async (artifactDir) => {
     const { calls, runner } = fakeRunner([
       ok('2.33.1'), // version
-      ok(),         // config
-      ok(),         // build client image
+      ok(),         // build client (once, shared image)
+      ok(),         // config --quiet (per scenario)
       ok(),         // up --wait dependencies
       ok(),         // run client
       ok(),         // down
@@ -67,26 +68,122 @@ test('local success builds, starts dependencies, runs client, then tears down', 
       artifactDir,
       projectName: 'rpi-e2e-test',
       env: {},
+      available: ['happy-path'],
     });
     assert.equal(code, 0);
     const commands = calls.map((call) => call.args.join(' '));
     assert.match(commands[0], /^compose version --short$/);
-    assert.match(commands[1], /--file tests[/\\]e2e[/\\]base\.compose\.yaml config --quiet$/);
-    assert.match(commands[2], /--file tests[/\\]e2e[/\\]base\.compose\.yaml build client$/);
+    assert.match(commands[1], /--file tests[/\\]e2e[/\\]base\.compose\.yaml build client$/);
+    assert.match(commands[2], /--project-name rpi-e2e-test-happy-path .*config --quiet$/);
     assert.match(commands[3], /up -d --no-build --wait --wait-timeout 120 dind target git-fixture$/);
     assert.match(commands[4], /run --rm --no-deps client$/);
     assert.match(commands[5], /down -v --remove-orphans$/);
     assert.match(commands[6], /image rm rpi-e2e-runtime:rpi-e2e-test$/);
+    const clientCall = calls[4];
+    assert.equal(clientCall.options.env.RPI_E2E_SCENARIO, 'happy-path');
+    assert.ok(clientCall.options.env.RPI_E2E_ARTIFACT_DIR.endsWith('happy-path'));
   });
 });
 
-test('client failure collects diagnostics and keeps the client exit code', async () => {
+test('multiple scenarios reuse one image build and aggregate the exit code', async () => {
   await withArtifacts(async (artifactDir) => {
     const { calls, runner } = fakeRunner([
-      ok('2.33.1'),
-      ok(),
-      ok(),
-      ok(),
+      ok('2.33.1'), // version
+      ok(),         // build client (once)
+      ok(), ok(), ok(), ok(),                                   // alpha: config, up, run, down
+      ok(), ok(),                                               // beta: config, up
+      { code: 7, stdout: '', stderr: '', timedOut: false },     // beta: run client fails
+      ok(), ok(), ok(),                                         // beta: diagnostics (ps, logs, exec)
+      ok(),                                                     // beta: down
+      ok(),                                                     // image rm
+    ]);
+    const code = await runE2E({
+      runner,
+      artifactDir,
+      projectName: 'rpi-e2e-multi',
+      env: {},
+      available: ['alpha', 'beta'],
+      concurrency: 1,
+    });
+    assert.equal(code, 7);
+    const runCalls = calls.filter((c) => c.args.includes('run'));
+    assert.equal(runCalls.length, 2);
+    assert.equal(runCalls[0].options.env.RPI_E2E_SCENARIO, 'alpha');
+    assert.equal(runCalls[1].options.env.RPI_E2E_SCENARIO, 'beta');
+    const joined = calls.map((c) => c.args.join(' ')).join('\n');
+    assert.equal((joined.match(/build client/g) || []).length, 1);
+    assert.match(joined, /--project-name rpi-e2e-multi-alpha/);
+    assert.match(joined, /--project-name rpi-e2e-multi-beta/);
+  });
+});
+
+test('--fail-fast stops dispatching after the first failure', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([
+      ok('2.33.1'), ok(),                                       // version, build
+      ok(), ok(),                                               // alpha: config, up
+      { code: 23, stdout: '', stderr: '', timedOut: false },    // alpha: run fails
+      ok(), ok(), ok(),                                         // alpha: diagnostics
+      ok(),                                                     // alpha: down
+      ok(),                                                     // image rm
+    ]);
+    const code = await runE2E({
+      runner,
+      artifactDir,
+      projectName: 'rpi-e2e-ff',
+      env: {},
+      available: ['alpha', 'beta', 'gamma'],
+      concurrency: 1,
+      failFast: true,
+    });
+    assert.equal(code, 23);
+    assert.equal(calls.filter((c) => c.args.includes('run')).length, 1);
+    const joined = calls.map((c) => c.args.join(' ')).join('\n');
+    assert.doesNotMatch(joined, /-beta/);
+    assert.doesNotMatch(joined, /-gamma/);
+  });
+});
+
+test('a scenario filter runs only the requested scenario', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([
+      ok('2.33.1'), ok(), ok(), ok(), ok(), ok(), ok(),
+    ]);
+    const code = await runE2E({
+      runner,
+      artifactDir,
+      projectName: 'rpi-e2e-pick',
+      env: {},
+      available: ['alpha', 'beta'],
+      scenarios: ['beta'],
+    });
+    assert.equal(code, 0);
+    const runCall = calls.find((c) => c.args.includes('run'));
+    assert.equal(runCall.options.env.RPI_E2E_SCENARIO, 'beta');
+    const joined = calls.map((c) => c.args.join(' ')).join('\n');
+    assert.doesNotMatch(joined, /-alpha/);
+  });
+});
+
+test('an unknown scenario fails with exit 2 before touching Docker', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([]);
+    const code = await runE2E({
+      runner,
+      artifactDir,
+      env: {},
+      available: ['alpha'],
+      scenarios: ['nope'],
+    });
+    assert.equal(code, 2);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('client failure collects diagnostics before teardown and keeps the exit code', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([
+      ok('2.33.1'), ok(), ok(), ok(),
       { code: 23, stdout: '', stderr: 'deploy failed', timedOut: false },
       ok(), // ps
       ok(), // outer logs
@@ -99,6 +196,7 @@ test('client failure collects diagnostics and keeps the client exit code', async
       artifactDir,
       projectName: 'rpi-e2e-test',
       env: {},
+      available: ['happy-path'],
     });
     assert.equal(code, 23);
     const joined = calls.map((call) => call.args.join(' ')).join('\n');
@@ -124,6 +222,7 @@ test('cleanup failure fails a successful scenario but cannot mask a scenario fai
       artifactDir,
       projectName: 'rpi-e2e-a',
       env: {},
+      available: ['happy-path'],
     }), 9);
 
     const primaryFailure = fakeRunner([
@@ -138,6 +237,7 @@ test('cleanup failure fails a successful scenario but cannot mask a scenario fai
       artifactDir,
       projectName: 'rpi-e2e-b',
       env: {},
+      available: ['happy-path'],
     }), 17);
   });
 });
@@ -153,6 +253,7 @@ test('prebuilt mode skips local build and image removal', async () => {
         RPI_E2E_PREBUILT: '1',
         RPI_E2E_RUNTIME_IMAGE: 'rpi-e2e-runtime:ci',
       },
+      available: ['happy-path'],
     }), 0);
     const joined = calls.map((call) => call.args.join(' ')).join('\n');
     assert.doesNotMatch(joined, / build client/);
@@ -168,6 +269,7 @@ test('Compose older than 2.33.1 fails before any service starts', async () => {
       artifactDir,
       projectName: 'rpi-e2e-old',
       env: {},
+      available: ['happy-path'],
     }), 1);
     assert.equal(calls.length, 1);
   });
@@ -186,6 +288,7 @@ test('a timed-out client returns 124 and tears down exactly once', async () => {
       artifactDir,
       projectName: 'rpi-e2e-timeout',
       env: {},
+      available: ['happy-path'],
     }), 124);
     assert.equal(calls.filter((call) => call.args.includes('down')).length, 1);
   });
@@ -201,6 +304,7 @@ test('an already-aborted run exits 130 without touching Docker', async () => {
       artifactDir,
       projectName: 'rpi-e2e-aborted',
       env: {},
+      available: ['happy-path'],
       signal: controller.signal,
     }), 130);
     assert.equal(calls.length, 0);
@@ -219,11 +323,37 @@ test('RPI_E2E_KEEP=1 skips teardown and image removal', async () => {
       artifactDir,
       projectName: 'rpi-e2e-keep',
       env: { RPI_E2E_KEEP: '1' },
+      available: ['happy-path'],
     }), 23);
     const joined = calls.map((call) => call.args.join(' ')).join('\n');
     assert.doesNotMatch(joined, /down -v/);
     assert.doesNotMatch(joined, /image rm/);
   });
+});
+
+test('runScenario appends a scenario compose override when present', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rpi-e2e-override-'));
+  try {
+    await mkdir(path.join(dir, 'custom'), { recursive: true });
+    await writeFile(path.join(dir, 'custom', 'compose.override.yaml'), 'services: {}\n');
+    await withArtifacts(async (artifactDir) => {
+      const { calls, runner } = fakeRunner([ok(), ok(), ok(), ok()]);
+      const result = await runScenario({
+        scenario: 'custom',
+        projectName: 'rpi-e2e-x-custom',
+        runtimeImage: 'img:x',
+        artifactDir,
+        runner,
+        env: {},
+        scenariosDir: dir,
+      });
+      assert.equal(result.code, 0);
+      const joined = calls.map((c) => c.args.join(' ')).join('\n');
+      assert.match(joined, /--file .*custom[/\\]compose\.override\.yaml/);
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('dev up builds the shared image once and waits for client-dev', async () => {
@@ -237,6 +367,15 @@ test('dev up builds the shared image once and waits for client-dev', async () =>
       commands[1],
       /up -d --no-build --wait --wait-timeout 120 dind target git-fixture client-dev$/,
     );
+    assert.equal(calls[0].options.env.RPI_E2E_SCENARIO, 'happy-path');
+  });
+});
+
+test('dev up accepts a scenario argument', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([ok(), ok()]);
+    assert.equal(await runDev('up', { runner, artifactDir, env: {}, scenario: 'custom' }), 0);
+    assert.equal(calls[0].options.env.RPI_E2E_SCENARIO, 'custom');
   });
 });
 
@@ -248,6 +387,7 @@ test('dev down tears down the fixed dev project and removes its image', async ()
     assert.match(joined, /--project-name rpi-e2e-dev/);
     assert.match(joined, /down -v --remove-orphans/);
     assert.match(joined, /image rm rpi-e2e-runtime:rpi-e2e-dev/);
+    assert.equal(calls[0].options.env.RPI_E2E_SCENARIO, 'happy-path');
   });
 });
 

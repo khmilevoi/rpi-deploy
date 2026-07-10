@@ -235,85 +235,67 @@ async function collectDiagnostics(compose, artifactDir) {
   });
 }
 
-export async function runE2E({
+/**
+ * One isolated scenario stack: its own compose project, DinD engine, agent,
+ * git fixture, and client run. Returns a result row for the summary.
+ */
+export async function runScenario({
+  scenario,
+  projectName,
+  runtimeImage,
+  artifactDir,
   runner = spawnDocker,
   env = process.env,
-  projectName = makeProjectName(),
-  artifactDir = env.RPI_E2E_ARTIFACT_DIR
-    ? path.resolve(env.RPI_E2E_ARTIFACT_DIR)
-    : path.join(ROOT, 'target', 'e2e-artifacts', projectName),
+  keep = env.RPI_E2E_KEEP === '1',
+  timeoutMs = SCENARIO_TIMEOUT_MS,
+  scenariosDir = SCENARIOS_DIR,
   signal,
-} = {}) {
+}) {
+  const startedAt = Date.now();
   await mkdir(artifactDir, { recursive: true });
-  if (signal?.aborted) return 130;
-  const prebuilt = env.RPI_E2E_PREBUILT === '1';
-  const runtimeImage = env.RPI_E2E_RUNTIME_IMAGE || `rpi-e2e-runtime:${projectName}`;
   const composeEnv = {
     ...env,
     RPI_E2E_ARTIFACT_DIR: artifactDir,
     RPI_E2E_RUNTIME_IMAGE: runtimeImage,
-    RPI_E2E_SCENARIO: 'happy-path',
+    RPI_E2E_SCENARIO: scenario,
   };
-  const base = [
-    'compose', '--ansi', 'never', '--project-name', projectName,
-    '--file', COMPOSE_FILE,
-  ];
+  const files = ['--file', COMPOSE_FILE];
+  const override = path.join(scenariosDir, scenario, 'compose.override.yaml');
+  if (existsSync(override)) files.push('--file', override);
+  const base = ['compose', '--ansi', 'never', '--project-name', projectName, ...files];
   const compose = (tail, options = {}) => runner([...base, ...tail], {
     env: composeEnv,
     signal,
     ...options,
   });
 
-  let primaryCode = 1;
+  let code = 1;
+  let timedOut = false;
   let attemptedStart = false;
-  let localImageTouched = false;
   try {
-    const versionResult = await runner(['compose', 'version', '--short'], {
-      env: composeEnv,
-      quiet: true,
-      signal,
-    });
-    if (versionResult.code !== 0) throw new Error(versionResult.stderr || 'docker compose unavailable');
-    const version = parseComposeVersion(versionResult.stdout);
-    if (!versionAtLeast(version, MIN_COMPOSE)) {
-      throw new Error(`Docker Compose >= ${MIN_COMPOSE.join('.')} required; found ${version.join('.')}`);
-    }
-
     const config = await compose(['config', '--quiet'], { quiet: true });
-    if (config.code !== 0) throw new Error(config.stderr || 'docker compose config failed');
+    if (config.code !== 0) throw new Error(config.stderr || `compose config failed (${scenario})`);
 
     attemptedStart = true;
-    if (!prebuilt) {
-      localImageTouched = true;
-      const build = await compose(['build', 'client'], {
-        logPath: path.join(artifactDir, 'build.log'),
-        timeoutMs: BUILD_TIMEOUT_MS,
-      });
-      if (build.code !== 0) throw new Error('e2e runtime image build failed');
-    }
-
     const dependencies = await compose([
       'up', '-d', '--no-build', '--wait', '--wait-timeout', '120',
       'dind', 'target', 'git-fixture',
     ], { logPath: path.join(artifactDir, 'dependencies.log') });
     if (dependencies.code !== 0) {
-      primaryCode = signal?.aborted
-        ? 130
-        : (dependencies.timedOut ? 124 : (dependencies.code || 1));
+      timedOut = dependencies.timedOut;
+      code = signal?.aborted ? 130 : (dependencies.timedOut ? 124 : (dependencies.code || 1));
       await collectDiagnostics(compose, artifactDir);
-      return primaryCode;
+    } else {
+      const client = await compose(['run', '--rm', '--no-deps', 'client'], {
+        logPath: path.join(artifactDir, 'scenario.log'),
+        timeoutMs,
+      });
+      timedOut = client.timedOut;
+      code = signal?.aborted ? 130 : (client.timedOut ? 124 : client.code);
+      if (code !== 0) await collectDiagnostics(compose, artifactDir);
     }
-
-    const client = await compose(['run', '--rm', '--no-deps', 'client'], {
-      logPath: path.join(artifactDir, 'scenario.log'),
-      timeoutMs: SCENARIO_TIMEOUT_MS,
-    });
-    primaryCode = signal?.aborted
-      ? 130
-      : (client.timedOut ? 124 : client.code);
-    if (primaryCode !== 0) await collectDiagnostics(compose, artifactDir);
   } catch (error) {
-    primaryCode = signal?.aborted ? 130 : 1;
+    code = signal?.aborted ? 130 : 1;
     try {
       await writeFile(
         path.join(artifactDir, 'launcher-error.log'),
@@ -325,7 +307,6 @@ export async function runE2E({
     }
     if (attemptedStart) await collectDiagnostics(compose, artifactDir);
   } finally {
-    const keep = env.RPI_E2E_KEEP === '1';
     if (attemptedStart && keep) {
       console.warn(`rpi e2e: RPI_E2E_KEEP=1 — stack kept (project ${projectName})`);
       console.warn(`rpi e2e:   docker exec -it ${projectName}-target-1 bash`);
@@ -336,22 +317,134 @@ export async function runE2E({
         logPath: path.join(artifactDir, 'cleanup.log'),
         timeoutMs: 120_000,
       });
-      if (primaryCode === 0 && down.code !== 0) primaryCode = down.code || 1;
-    }
-    if (localImageTouched && !keep) {
-      await runner(['image', 'rm', runtimeImage], {
-        env: composeEnv,
-        quiet: true,
-        signal,
-      });
+      if (code === 0 && down.code !== 0) code = down.code || 1;
     }
   }
-  return primaryCode;
+  return { scenario, code, timedOut, durationMs: Date.now() - startedAt, artifactDir };
+}
+
+/**
+ * Orchestrator: validate scenario names, check the compose version, build the
+ * shared runtime image once, run scenario stacks through a bounded pool, print
+ * the summary, and remove the locally built image.
+ */
+export async function runE2E({
+  runner = spawnDocker,
+  env = process.env,
+  projectName = makeProjectName(),
+  scenarios = [],
+  available,
+  concurrency,
+  failFast = false,
+  artifactDir = env.RPI_E2E_ARTIFACT_DIR
+    ? path.resolve(env.RPI_E2E_ARTIFACT_DIR)
+    : path.join(ROOT, 'target', 'e2e-artifacts', projectName),
+  signal,
+} = {}) {
+  await mkdir(artifactDir, { recursive: true });
+  if (signal?.aborted) return 130;
+
+  const all = available ?? await discoverScenarios();
+  if (!all.length) {
+    console.error('rpi e2e: no scenarios found under tests/e2e/scenarios');
+    return 2;
+  }
+  const unknown = scenarios.filter((name) => !all.includes(name));
+  if (unknown.length) {
+    console.error(
+      `rpi e2e: unknown scenario(s): ${unknown.join(', ')} (available: ${all.join(', ')})`,
+    );
+    return 2;
+  }
+  const selected = scenarios.length ? scenarios : all;
+
+  const prebuilt = env.RPI_E2E_PREBUILT === '1';
+  const keep = env.RPI_E2E_KEEP === '1';
+  const runtimeImage = env.RPI_E2E_RUNTIME_IMAGE || `rpi-e2e-runtime:${projectName}`;
+  const envConcurrency = Number.parseInt(env.RPI_E2E_CONCURRENCY ?? '', 10);
+  const poolSize = concurrency
+    ?? (Number.isInteger(envConcurrency) && envConcurrency >= 1
+      ? envConcurrency
+      : DEFAULT_CONCURRENCY);
+  const buildEnv = {
+    ...env,
+    RPI_E2E_ARTIFACT_DIR: artifactDir,
+    RPI_E2E_RUNTIME_IMAGE: runtimeImage,
+    RPI_E2E_SCENARIO: selected[0],
+  };
+  const base = ['compose', '--ansi', 'never', '--project-name', projectName, '--file', COMPOSE_FILE];
+
+  let localImageTouched = false;
+  let results = [];
+  try {
+    const versionResult = await runner(['compose', 'version', '--short'], {
+      env: buildEnv,
+      quiet: true,
+      signal,
+    });
+    if (versionResult.code !== 0) throw new Error(versionResult.stderr || 'docker compose unavailable');
+    const version = parseComposeVersion(versionResult.stdout);
+    if (!versionAtLeast(version, MIN_COMPOSE)) {
+      throw new Error(`Docker Compose >= ${MIN_COMPOSE.join('.')} required; found ${version.join('.')}`);
+    }
+
+    if (!prebuilt) {
+      localImageTouched = true;
+      const build = await runner([...base, 'build', 'client'], {
+        env: buildEnv,
+        signal,
+        logPath: path.join(artifactDir, 'build.log'),
+        timeoutMs: BUILD_TIMEOUT_MS,
+      });
+      if (build.code !== 0) throw new Error('e2e runtime image build failed');
+    }
+
+    const pooled = await runPool(
+      selected,
+      poolSize,
+      async (scenario) => {
+        if (signal?.aborted) return { scenario, skipped: true };
+        return runScenario({
+          scenario,
+          projectName: `${projectName}-${scenario}`,
+          runtimeImage,
+          artifactDir: path.join(artifactDir, scenario),
+          runner,
+          env,
+          keep,
+          timeoutMs: await scenarioTimeoutMs(scenario),
+          signal,
+        });
+      },
+      { stopOn: failFast ? (result) => !result.skipped && result.code !== 0 : undefined },
+    );
+    results = selected.map((scenario, i) => pooled[i] ?? { scenario, skipped: true });
+    console.log(formatSummary(results));
+  } catch (error) {
+    try {
+      await writeFile(
+        path.join(artifactDir, 'launcher-error.log'),
+        `${error instanceof Error ? error.stack || error.message : String(error)}\n`,
+        'utf8',
+      );
+    } catch (writeError) {
+      console.error(`rpi e2e: cannot write launcher error: ${writeError}`);
+    }
+    return signal?.aborted ? 130 : 1;
+  } finally {
+    if (localImageTouched && !keep) {
+      await runner(['image', 'rm', runtimeImage], { env: buildEnv, quiet: true, signal });
+    }
+  }
+  if (signal?.aborted) return 130;
+  const failed = results.find((r) => !r.skipped && r.code !== 0);
+  return failed ? (failed.code || 1) : 0;
 }
 
 export async function runDev(action, {
   runner = spawnDocker,
   env = process.env,
+  scenario = 'happy-path',
   projectName = 'rpi-e2e-dev',
   artifactDir = path.join(ROOT, 'target', 'e2e-artifacts', projectName),
   signal,
@@ -362,11 +455,14 @@ export async function runDev(action, {
     ...env,
     RPI_E2E_ARTIFACT_DIR: artifactDir,
     RPI_E2E_RUNTIME_IMAGE: runtimeImage,
-    RPI_E2E_SCENARIO: 'happy-path',
+    RPI_E2E_SCENARIO: scenario,
   };
+  const files = ['--file', COMPOSE_FILE];
+  const override = path.join(SCENARIOS_DIR, scenario, 'compose.override.yaml');
+  if (existsSync(override)) files.push('--file', override);
   const base = [
     'compose', '--ansi', 'never', '--project-name', projectName,
-    '--file', COMPOSE_FILE, '--profile', 'dev',
+    ...files, '--profile', 'dev',
   ];
   const compose = (tail, options = {}) => runner([...base, ...tail], {
     env: composeEnv,
@@ -381,10 +477,10 @@ export async function runDev(action, {
       'dind', 'target', 'git-fixture', 'client-dev',
     ]);
     if (up.code !== 0) return up.code || 1;
-    console.log(`rpi e2e dev: stack is up (project ${projectName})`);
+    console.log(`rpi e2e dev: stack is up (project ${projectName}, scenario ${scenario})`);
     console.log(`  docker exec -it ${projectName}-client-dev-1 bash   # rpi CLI + SSH key`);
     console.log(`  docker exec -it ${projectName}-target-1 bash       # agent + sshd + nested Docker`);
-    console.log('  in client-dev, once: source /opt/e2e/lib.sh && e2e_client_init');
+    console.log('  in client-dev, once: source /opt/e2e/lib.sh && e2e_bootstrap');
     return 0;
   }
   if (action === 'down') {
@@ -399,16 +495,28 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
-  const [flag, flagProject] = process.argv.slice(2);
-  if (flag === '--dev-up') {
-    process.exitCode = await runDev('up', { signal: controller.signal });
-  } else if (flag === '--dev-down' || flag === '--down') {
+  const args = process.argv.slice(2);
+  if (args[0] === '--dev-up') {
+    process.exitCode = await runDev('up', {
+      signal: controller.signal,
+      ...(args[1] ? { scenario: args[1] } : {}),
+    });
+  } else if (args[0] === '--dev-down' || args[0] === '--down') {
     process.exitCode = await runDev('down', {
       signal: controller.signal,
-      ...(flag === '--down' && flagProject ? { projectName: flagProject } : {}),
+      ...(args[0] === '--down' && args[1] ? { projectName: args[1] } : {}),
     });
   } else {
-    console.warn('rpi e2e: starting an isolated privileged Docker-in-Docker daemon');
-    process.exitCode = await runE2E({ signal: controller.signal });
+    let options;
+    try {
+      options = parseRunArgs(args);
+    } catch (error) {
+      console.error(`rpi e2e: ${error instanceof Error ? error.message : error}`);
+      process.exitCode = 2;
+    }
+    if (options) {
+      console.warn('rpi e2e: starting isolated privileged Docker-in-Docker daemons');
+      process.exitCode = await runE2E({ ...options, signal: controller.signal });
+    }
   }
 }
