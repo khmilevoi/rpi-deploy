@@ -8,7 +8,7 @@ containers.
 
 Website: https://rpi.iiskelo.com
 
-Status: v0.16 (raspberry triangle brand banner + deploy result stamp) —
+Status: v0.17 (Cloudflare token file/stdin input + ingress half-state detection) —
 everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
@@ -55,7 +55,14 @@ and degrading cleanly under `NO_COLOR`/non-unicode/piped output; `rpi deploy`
 now ends with a result stamp showing status, project, ingress URL, and
 elapsed time; and table cells render the exact brand colour on
 `COLORTERM=truecolor`/`24bit` terminals instead of the nearest 256-colour
-approximation).
+approximation), and v0.17 hardened Cloudflare Tunnel setup (`rpi agent setup`
+accepts the Cloudflare API token via `--cf-token-file` or stdin instead of an
+inline `--cf-token` argument, which is now deprecated; a fresh `cloudflared`
+install is refused when a foreign tunnel is already running on the host;
+`rpi doctor` now flags ingress half-states such as a connector that's down or
+a route that's missing; and the agent injects `DBUS_SESSION_BUS_ADDRESS`
+alongside `XDG_RUNTIME_DIR` so `cloudflared` restarts no longer fail on
+systems that need it).
 
 Supported features:
 
