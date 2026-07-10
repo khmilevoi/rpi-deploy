@@ -1,16 +1,18 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { createWriteStream } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { createWriteStream, existsSync } from 'node:fs';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
 const COMPOSE_FILE = path.join('tests', 'e2e', 'compose.yaml');
+const SCENARIOS_DIR = path.join(HERE, 'scenarios');
 const MIN_COMPOSE = [2, 33, 1];
 const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
 const SCENARIO_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_CONCURRENCY = 2;
 
 export function parseComposeVersion(text) {
   const match = /(?:^|\s)v?(\d+)\.(\d+)\.(\d+)(?:[-+][^\s]+)?(?:\s|$)/.exec(text.trim());
@@ -32,6 +34,115 @@ export function makeProjectName({
   suffix = randomBytes(3).toString('hex'),
 } = {}) {
   return `rpi-e2e-${pid}-${now.toString(36)}-${suffix}`.toLowerCase();
+}
+
+/** Scenario folders under tests/e2e/scenarios that contain a scenario.sh. */
+export async function discoverScenarios(dir = SCENARIOS_DIR) {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const names = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (existsSync(path.join(dir, entry.name, 'scenario.sh'))) names.push(entry.name);
+  }
+  return names.sort();
+}
+
+/**
+ * Bounded worker pool. results[i] corresponds to items[i]. Once stopOn(result)
+ * returns true, no new items are dispatched; in-flight workers finish and the
+ * undispatched slots stay undefined.
+ */
+export async function runPool(items, limit, worker, { stopOn } = {}) {
+  const results = new Array(items.length);
+  let next = 0;
+  let stopped = false;
+  const lanes = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      while (!stopped) {
+        const i = next;
+        if (i >= items.length) return;
+        next += 1;
+        results[i] = await worker(items[i], i);
+        if (stopOn?.(results[i])) stopped = true;
+      }
+    },
+  );
+  await Promise.all(lanes);
+  return results;
+}
+
+export function formatSummary(results) {
+  const width = Math.max(...results.map((r) => r.scenario.length));
+  const lines = results.map((r) => {
+    const status = r.skipped
+      ? 'SKIP'
+      : r.code === 0
+        ? 'PASS'
+        : r.timedOut
+          ? 'FAIL (timeout)'
+          : `FAIL (exit ${r.code})`;
+    const duration = r.skipped ? '' : ` ${Math.round((r.durationMs ?? 0) / 1000)}s`;
+    return `  ${r.scenario.padEnd(width)}  ${status}${duration}`;
+  });
+  const failed = results.filter((r) => !r.skipped && r.code !== 0).length;
+  const skipped = results.filter((r) => r.skipped).length;
+  const passed = results.length - failed - skipped;
+  const tail = skipped ? `, ${skipped} skipped` : '';
+  return [`rpi e2e: ${passed}/${results.length} scenarios passed${tail}`, ...lines].join('\n');
+}
+
+/** KEY=VALUE lines; '#' comments and blanks ignored. */
+export function parseMetaEnv(text) {
+  const out = {};
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+/** Per-scenario client timeout: RPI_E2E_TIMEOUT (seconds) from meta.env. */
+export async function scenarioTimeoutMs(scenario, dir = SCENARIOS_DIR) {
+  try {
+    const meta = parseMetaEnv(await readFile(path.join(dir, scenario, 'meta.env'), 'utf8'));
+    const secs = Number(meta.RPI_E2E_TIMEOUT);
+    if (Number.isInteger(secs) && secs > 0) return secs * 1000;
+  } catch {
+    /* no meta.env — use the default */
+  }
+  return SCENARIO_TIMEOUT_MS;
+}
+
+/** CLI: positional scenario filters, --fail-fast, --concurrency N. */
+export function parseRunArgs(args) {
+  const options = { scenarios: [], failFast: false };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--fail-fast') {
+      options.failFast = true;
+    } else if (arg === '--concurrency') {
+      const value = Number(args[i + 1]);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`--concurrency needs a positive integer, got: ${args[i + 1] ?? '(nothing)'}`);
+      }
+      options.concurrency = value;
+      i += 1;
+    } else if (arg.startsWith('--')) {
+      throw new Error(`unknown flag: ${arg}`);
+    } else {
+      options.scenarios.push(arg);
+    }
+  }
+  return options;
 }
 
 export async function spawnDocker(args, {

@@ -2,9 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 
-import { makeProjectName, parseComposeVersion, runDev, runE2E } from './run.mjs';
+import {
+  discoverScenarios,
+  formatSummary,
+  makeProjectName,
+  parseComposeVersion,
+  parseMetaEnv,
+  parseRunArgs,
+  runDev,
+  runE2E,
+  runPool,
+  scenarioTimeoutMs,
+} from './run.mjs';
 
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '', timedOut: false });
 
@@ -238,4 +249,108 @@ test('dev down tears down the fixed dev project and removes its image', async ()
     assert.match(joined, /down -v --remove-orphans/);
     assert.match(joined, /image rm rpi-e2e-runtime:rpi-e2e-dev/);
   });
+});
+
+test('discoverScenarios lists folders that contain scenario.sh, sorted', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rpi-e2e-scenarios-'));
+  try {
+    await mkdir(path.join(dir, 'zeta'), { recursive: true });
+    await writeFile(path.join(dir, 'zeta', 'scenario.sh'), '#!/usr/bin/env bash\n');
+    await mkdir(path.join(dir, 'alpha'), { recursive: true });
+    await writeFile(path.join(dir, 'alpha', 'scenario.sh'), '#!/usr/bin/env bash\n');
+    await mkdir(path.join(dir, 'not-a-scenario'), { recursive: true });
+    await writeFile(path.join(dir, 'stray-file'), 'x');
+    assert.deepEqual(await discoverScenarios(dir), ['alpha', 'zeta']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('discoverScenarios returns empty for a missing directory', async () => {
+  assert.deepEqual(
+    await discoverScenarios(path.join(os.tmpdir(), 'rpi-e2e-none-such')),
+    [],
+  );
+});
+
+test('runPool caps concurrency and preserves result order', async () => {
+  let active = 0;
+  let peak = 0;
+  const results = await runPool([10, 20, 30, 40, 50], 2, async (item) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+    return item + 1;
+  });
+  assert.deepEqual(results, [11, 21, 31, 41, 51]);
+  assert.equal(peak, 2);
+});
+
+test('runPool stops dispatching after stopOn matches, leaving the rest undefined', async () => {
+  const seen = [];
+  const results = await runPool(
+    ['a', 'b', 'c', 'd'],
+    1,
+    async (item) => {
+      seen.push(item);
+      return { item, code: item === 'b' ? 1 : 0 };
+    },
+    { stopOn: (result) => result.code !== 0 },
+  );
+  assert.deepEqual(seen, ['a', 'b']);
+  assert.equal(results[2], undefined);
+  assert.equal(results[3], undefined);
+});
+
+test('formatSummary renders pass/fail/skip lines and a totals header', () => {
+  const text = formatSummary([
+    { scenario: 'happy-path', code: 0, durationMs: 61_000 },
+    { scenario: 'rm-root-owned', code: 23, durationMs: 5_000, timedOut: false },
+    { scenario: 'slowpoke', code: 124, durationMs: 900_000, timedOut: true },
+    { scenario: 'never-ran', skipped: true },
+  ]);
+  assert.match(text, /^rpi e2e: 1\/4 scenarios passed, 1 skipped$/m);
+  assert.match(text, /happy-path\s+PASS 61s/);
+  assert.match(text, /rm-root-owned\s+FAIL \(exit 23\) 5s/);
+  assert.match(text, /slowpoke\s+FAIL \(timeout\) 900s/);
+  assert.match(text, /never-ran\s+SKIP$/m);
+});
+
+test('parseMetaEnv reads KEY=VALUE lines and ignores comments and blanks', () => {
+  assert.deepEqual(parseMetaEnv('# note\nRPI_E2E_TIMEOUT=1200\n\nX = y\n'), {
+    RPI_E2E_TIMEOUT: '1200',
+    X: 'y',
+  });
+});
+
+test('scenarioTimeoutMs honors meta.env and falls back to the default', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rpi-e2e-meta-'));
+  try {
+    await mkdir(path.join(dir, 'slow'), { recursive: true });
+    await writeFile(path.join(dir, 'slow', 'meta.env'), 'RPI_E2E_TIMEOUT=1200\n');
+    await mkdir(path.join(dir, 'plain'), { recursive: true });
+    await mkdir(path.join(dir, 'bad'), { recursive: true });
+    await writeFile(path.join(dir, 'bad', 'meta.env'), 'RPI_E2E_TIMEOUT=soon\n');
+    assert.equal(await scenarioTimeoutMs('slow', dir), 1_200_000);
+    assert.equal(await scenarioTimeoutMs('plain', dir), 15 * 60 * 1000);
+    assert.equal(await scenarioTimeoutMs('bad', dir), 15 * 60 * 1000);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('parseRunArgs collects scenario filters and flags', () => {
+  assert.deepEqual(parseRunArgs([]), { scenarios: [], failFast: false });
+  assert.deepEqual(parseRunArgs(['happy-path', '--fail-fast']), {
+    scenarios: ['happy-path'],
+    failFast: true,
+  });
+  assert.deepEqual(parseRunArgs(['--concurrency', '3', 'a', 'b']), {
+    scenarios: ['a', 'b'],
+    failFast: false,
+    concurrency: 3,
+  });
+  assert.throws(() => parseRunArgs(['--concurrency', 'many']), /positive integer/);
+  assert.throws(() => parseRunArgs(['--wat']), /unknown flag/);
 });
