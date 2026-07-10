@@ -145,16 +145,36 @@ impl Source for GitSource {
     }
 }
 
-/// Cleanup fallback image for `force_remove_via_docker`. Pinned (not
-/// `:latest`) so the fallback container's behavior can't drift under us.
-/// `busybox` is a few hundred KB and its `rm` applet is all this needs; the
-/// specific tag is already pulled by every scenario in `tests/e2e` (both
-/// fixture apps build `FROM busybox:1.37`), so on this codebase's own e2e
-/// harness the fallback never needs a fresh network pull. On a real host
-/// that has never used this image before, the first `rpi rm` that hits the
-/// fallback pays a small one-time pull; every `rpi rm` after that reuses the
-/// locally cached image.
-const CLEANUP_IMAGE: &str = "busybox:1.37";
+/// Default cleanup fallback image for `force_remove_via_docker`, used unless
+/// overridden by `CLEANUP_IMAGE_ENV_VAR`. Pinned (not `:latest`) so the
+/// fallback container's behavior can't drift under us. `busybox` is a few
+/// hundred KB and its `rm` applet is all this needs; the specific tag is
+/// already pulled by every scenario in `tests/e2e` (both fixture apps build
+/// `FROM busybox:1.37`), so on this codebase's own e2e harness the fallback
+/// never needs a fresh network pull. On a real host that has never used this
+/// image before, the first `rpi rm` that hits the fallback pays a small
+/// one-time pull; every `rpi rm` after that reuses the locally cached image.
+const DEFAULT_CLEANUP_IMAGE: &str = "busybox:1.37";
+
+/// Env var that overrides the cleanup fallback image. Lets an operator on an
+/// offline/air-gapped host (or one that just prefers a pre-mirrored image)
+/// point the one-shot cleanup container at something already present
+/// locally, instead of forcing a network pull of `DEFAULT_CLEANUP_IMAGE` the
+/// first time `remove_tree` hits `EACCES`. Named after this crate's existing
+/// `PI_*` env vars (`PI_SERVER`, `PI_AGENT_URL`, `PI_THEME`).
+const CLEANUP_IMAGE_ENV_VAR: &str = "PI_RM_CLEANUP_IMAGE";
+
+/// Resolves the image `force_remove_via_docker` runs: `CLEANUP_IMAGE_ENV_VAR`
+/// if set to a non-blank value (surrounding whitespace trimmed), else
+/// `DEFAULT_CLEANUP_IMAGE`. Kept as a small, pure, env-reading helper so the
+/// resolution logic is unit-testable without touching Docker.
+fn cleanup_image() -> String {
+    std::env::var(CLEANUP_IMAGE_ENV_VAR)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_CLEANUP_IMAGE.to_string())
+}
 
 /// Removes `path` (file or directory tree), tolerating a tree the agent does
 /// not fully own. Tries a plain removal first -- the common case, since the
@@ -182,14 +202,15 @@ async fn remove_tree(path: &Path) -> Result<(), DomainError> {
         Err(_) => {} // EACCES: fall through to the root cleanup container below.
     }
 
-    if let Err(docker_err) = force_remove_via_docker(path).await {
-        return Err(permission_denied_err(path, &docker_err));
+    let image = cleanup_image();
+    if let Err(docker_err) = force_remove_via_docker(path, &image).await {
+        return Err(permission_denied_err(path, &image, &docker_err));
     }
 
     match tokio::fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(permission_denied_err(path, &e.to_string())),
+        Err(e) => Err(permission_denied_err(path, &image, &e.to_string())),
     }
 }
 
@@ -213,13 +234,13 @@ fn split_for_force_remove(path: &Path) -> Result<(&Path, &str), String> {
 /// the container. Mounting the parent (rather than the target itself) lets
 /// the container delete the target outright rather than just its contents,
 /// so a successful run leaves nothing behind for the caller to clean up.
-fn force_remove_args(parent: &Path, name: &str) -> Vec<String> {
+fn force_remove_args(parent: &Path, name: &str, image: &str) -> Vec<String> {
     vec![
         "run".to_string(),
         "--rm".to_string(),
         "-v".to_string(),
         format!("{}:/target", parent.display()),
-        CLEANUP_IMAGE.to_string(),
+        image.to_string(),
         "rm".to_string(),
         "-rf".to_string(),
         "--".to_string(),
@@ -228,23 +249,28 @@ fn force_remove_args(parent: &Path, name: &str) -> Vec<String> {
 }
 
 /// Force-removes `path` as root by running a one-shot `docker` container
-/// (see `force_remove_args`), the same `docker` CLI invocation mechanism
-/// this crate already uses for every compose operation (`docker.rs`).
-async fn force_remove_via_docker(path: &Path) -> Result<(), String> {
+/// using `image` (see `force_remove_args`), the same `docker` CLI invocation
+/// mechanism this crate already uses for every compose operation
+/// (`docker.rs`).
+async fn force_remove_via_docker(path: &Path, image: &str) -> Result<(), String> {
     let (parent, name) = split_for_force_remove(path)?;
     let mut cmd = Command::new("docker");
-    cmd.args(force_remove_args(parent, name));
+    cmd.args(force_remove_args(parent, name, image));
     run_capture(cmd).await.map(|_| ())
 }
 
-fn permission_denied_err(path: &Path, detail: &str) -> DomainError {
+fn permission_denied_err(path: &Path, image: &str, detail: &str) -> DomainError {
     DomainError::Source(format!(
         "cannot remove {p}: it contains files owned by another user (typically \
          left behind by a container that ran as root and wrote into a \
          bind-mounted path under the workdir); automatic cleanup via a \
-         one-shot root container also failed ({detail}). Fix manually on the \
-         agent host with `sudo rm -rf {p}` and re-run `rpi rm`.",
+         one-shot root container ({image}) also failed ({detail}). If this \
+         host cannot reach a registry to pull {image} (e.g. an air-gapped \
+         host), set {var}=<image already present locally> and re-run `rpi \
+         rm`. Otherwise fix manually on the agent host with `sudo rm -rf {p}` \
+         and re-run `rpi rm`.",
         p = path.display(),
+        var = CLEANUP_IMAGE_ENV_VAR,
     ))
 }
 
@@ -297,7 +323,11 @@ mod tests {
 
     #[test]
     fn force_remove_args_bind_mounts_parent_and_removes_child_by_name() {
-        let args = force_remove_args(Path::new("/var/lib/rpi/workdirs"), "rateme");
+        let args = force_remove_args(
+            Path::new("/var/lib/rpi/workdirs"),
+            "rateme",
+            DEFAULT_CLEANUP_IMAGE,
+        );
         assert_eq!(
             args,
             vec![
@@ -305,7 +335,7 @@ mod tests {
                 "--rm",
                 "-v",
                 "/var/lib/rpi/workdirs:/target",
-                CLEANUP_IMAGE,
+                DEFAULT_CLEANUP_IMAGE,
                 "rm",
                 "-rf",
                 "--",
@@ -315,16 +345,79 @@ mod tests {
     }
 
     #[test]
+    fn force_remove_args_uses_the_image_it_is_given() {
+        let args = force_remove_args(
+            Path::new("/var/lib/rpi/workdirs"),
+            "rateme",
+            "registry.local/cleanup:offline",
+        );
+        assert_eq!(args[4], "registry.local/cleanup:offline");
+    }
+
+    #[test]
     fn cleanup_image_is_pinned_not_latest() {
         assert!(
-            CLEANUP_IMAGE.contains(':') && !CLEANUP_IMAGE.ends_with(":latest"),
-            "fallback image must be pinned for reproducibility: {CLEANUP_IMAGE}"
+            DEFAULT_CLEANUP_IMAGE.contains(':') && !DEFAULT_CLEANUP_IMAGE.ends_with(":latest"),
+            "default fallback image must be pinned for reproducibility: {DEFAULT_CLEANUP_IMAGE}"
         );
+    }
+
+    // Serializes tests that mutate `CLEANUP_IMAGE_ENV_VAR` via `std::env`,
+    // which is process-global state shared across the parallel threads
+    // `cargo test` runs tests on by default. Without this, a test asserting
+    // the unset/default case could observe an override left behind by a
+    // concurrently-running override test, or vice versa.
+    static CLEANUP_IMAGE_ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn cleanup_image_defaults_when_env_var_is_unset() {
+        let _guard = CLEANUP_IMAGE_ENV_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        std::env::remove_var(CLEANUP_IMAGE_ENV_VAR);
+        assert_eq!(cleanup_image(), DEFAULT_CLEANUP_IMAGE);
+    }
+
+    #[test]
+    fn cleanup_image_uses_the_env_var_override_when_set() {
+        let _guard = CLEANUP_IMAGE_ENV_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        std::env::set_var(CLEANUP_IMAGE_ENV_VAR, "registry.local/cleanup:offline");
+        let resolved = cleanup_image();
+        std::env::remove_var(CLEANUP_IMAGE_ENV_VAR);
+        assert_eq!(resolved, "registry.local/cleanup:offline");
+    }
+
+    #[test]
+    fn cleanup_image_falls_back_to_default_on_blank_override() {
+        let _guard = CLEANUP_IMAGE_ENV_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        std::env::set_var(CLEANUP_IMAGE_ENV_VAR, "   ");
+        let resolved = cleanup_image();
+        std::env::remove_var(CLEANUP_IMAGE_ENV_VAR);
+        assert_eq!(resolved, DEFAULT_CLEANUP_IMAGE);
+    }
+
+    #[test]
+    fn cleanup_image_falls_back_to_default_on_empty_override() {
+        let _guard = CLEANUP_IMAGE_ENV_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        std::env::set_var(CLEANUP_IMAGE_ENV_VAR, "");
+        let resolved = cleanup_image();
+        std::env::remove_var(CLEANUP_IMAGE_ENV_VAR);
+        assert_eq!(resolved, DEFAULT_CLEANUP_IMAGE);
     }
 
     #[test]
     fn permission_denied_err_names_the_path_and_recovery_command() {
-        let err = permission_denied_err(Path::new("/var/lib/rpi/workdirs/rateme"), "boom");
+        let err = permission_denied_err(
+            Path::new("/var/lib/rpi/workdirs/rateme"),
+            DEFAULT_CLEANUP_IMAGE,
+            "boom",
+        );
         let msg = err.to_string();
         assert!(
             msg.contains("/var/lib/rpi/workdirs/rateme"),
@@ -337,6 +430,14 @@ mod tests {
         assert!(
             msg.contains("boom"),
             "message should include the underlying error: {msg}"
+        );
+        assert!(
+            msg.contains(DEFAULT_CLEANUP_IMAGE),
+            "message should name the cleanup image: {msg}"
+        );
+        assert!(
+            msg.contains(CLEANUP_IMAGE_ENV_VAR),
+            "message should mention the override env var: {msg}"
         );
         assert!(msg.starts_with("source error:"), "{msg}");
     }
