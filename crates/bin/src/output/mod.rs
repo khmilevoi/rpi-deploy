@@ -9,6 +9,10 @@ pub use spinner::spinner;
 mod logpane;
 pub use logpane::LogPane;
 
+mod pipeline;
+#[allow(unused_imports)] // wired into `deploy()` by a later task
+pub use pipeline::Pipeline;
+
 mod banner;
 pub use banner::{brand_banner, deploy_stamp, stderr_is_tty, stdout_is_tty, StampOutcome};
 mod theme;
