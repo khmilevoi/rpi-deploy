@@ -255,8 +255,12 @@ It:
 - generates a collision-resistant `COMPOSE_PROJECT_NAME` prefixed with
   `rpi-e2e-`;
 - runs `docker compose config --quiet` before starting;
-- starts the harness with `--abort-on-container-exit` and
-  `--exit-code-from client`;
+- starts DinD, target, and Git dependencies detached with
+  `docker compose up -d --wait`; the target's
+  `service_completed_successfully` dependency runs the one-shot key generator;
+- runs the terminal scenario with
+  `docker compose run --rm --no-deps client`, preserving its exit code while
+  the target and DinD remain alive for diagnostics;
 - enforces a total scenario deadline and handles Ctrl+C/termination;
 - collects diagnostics before teardown on any non-zero result;
 - always runs `docker compose down -v --remove-orphans` in a `finally` path;
