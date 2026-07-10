@@ -45,6 +45,7 @@ jobs:
       RPI_E2E_RUNTIME_IMAGE: rpi-e2e-runtime:ci
       RPI_E2E_PREBUILT: "1"
       RPI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/rpi-e2e
+      RPI_E2E_CONCURRENCY: "3"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6

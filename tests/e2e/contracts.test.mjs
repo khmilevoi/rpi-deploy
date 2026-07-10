@@ -159,6 +159,7 @@ test('CI runs the e2e gate with Buildx cache and failure-only artifacts', async 
   assert.match(workflow, /cache-from: type=gha,scope=rpi-e2e/);
   assert.match(workflow, /cache-to: type=gha,mode=max,scope=rpi-e2e,ignore-error=true/);
   assert.match(workflow, /RPI_E2E_PREBUILT: "1"/);
+  assert.match(workflow, /RPI_E2E_CONCURRENCY: "3"/);
   assert.match(workflow, /npm run test:e2e/);
   assert.match(workflow, /if: failure\(\)/);
   assert.match(workflow, /actions\/upload-artifact@v7/);
