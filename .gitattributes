@@ -1,0 +1,2 @@
+tests/e2e/*.sh text eol=lf
+tests/e2e/fixtures/app/health text eol=lf

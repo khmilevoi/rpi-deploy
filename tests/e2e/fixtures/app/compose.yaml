@@ -1,0 +1,5 @@
+services:
+  web:
+    build: .
+    expose:
+      - "8080"
