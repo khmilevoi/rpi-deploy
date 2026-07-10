@@ -219,9 +219,12 @@ enum AgentCmd {
         /// Also bootstrap cloudflared (linger + user unit)
         #[arg(long)]
         with_cloudflared: bool,
-        /// Cloudflare API token (or env CLOUDFLARE_API_TOKEN); enables full auto-bootstrap
+        /// DEPRECATED (leaks via ps/shell-history/journald): Cloudflare API token inline; prefer --cf-token-file or CLOUDFLARE_API_TOKEN
         #[arg(long)]
         cf_token: Option<String>,
+        /// Read the Cloudflare API token from a file (path, or `-` for stdin); preferred over --cf-token
+        #[arg(long)]
+        cf_token_file: Option<String>,
         /// Base zone, e.g. example.com
         #[arg(long)]
         domain: Option<String>,
@@ -414,11 +417,23 @@ async fn run() -> anyhow::Result<()> {
                     user,
                     with_cloudflared,
                     cf_token,
+                    cf_token_file,
                     domain,
                     tunnel,
                     dry_run,
                 },
-        } => agent::setup::run_cmd(user, with_cloudflared, cf_token, domain, tunnel, dry_run).await,
+        } => {
+            agent::setup::run_cmd(
+                user,
+                with_cloudflared,
+                cf_token,
+                cf_token_file,
+                domain,
+                tunnel,
+                dry_run,
+            )
+            .await
+        }
         Cmd::Agent {
             cmd:
                 AgentCmd::Migrate {
@@ -609,6 +624,29 @@ mod tests {
                 assert!(with_cloudflared);
                 assert_eq!(cf_token.as_deref(), Some("t"));
                 assert_eq!(domain.as_deref(), Some("example.com"));
+            }
+            _ => panic!("expected agent setup"),
+        }
+    }
+
+    #[test]
+    fn parses_agent_setup_cf_token_file() {
+        let cli = Cli::try_parse_from([
+            "rpi",
+            "agent",
+            "setup",
+            "--with-cloudflared",
+            "--cf-token-file",
+            "/run/secrets/cf",
+            "--domain",
+            "example.com",
+        ])
+        .unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Agent {
+                cmd: AgentCmd::Setup { cf_token_file, .. },
+            } => {
+                assert_eq!(cf_token_file.as_deref(), Some("/run/secrets/cf"));
             }
             _ => panic!("expected agent setup"),
         }

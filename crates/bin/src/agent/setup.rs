@@ -1119,6 +1119,52 @@ async fn resolve_npm_dist_binary(sys: &dyn Sys, login_user: &str) -> Option<Path
     sys.exists(&candidate).then_some(candidate)
 }
 
+const CF_TOKEN_DEPRECATION: &str =
+    "--cf-token passes the API token on the command line, where it leaks via `ps`, shell history, \
+     and journald; prefer --cf-token-file <path> (or `-` for stdin) or the CLOUDFLARE_API_TOKEN \
+     environment variable";
+
+#[derive(Debug)]
+struct CfTokenResolution {
+    token: Option<String>,
+    warning: Option<String>,
+}
+
+/// Resolve the Cloudflare API token most-secure-first: `--cf-token-file`
+/// (`-` = stdin) beats the deprecated inline `--cf-token`, which beats the
+/// `CLOUDFLARE_API_TOKEN` env var. `read` performs the file/stdin read so this
+/// stays unit-testable. An unreadable file, or an empty resolved token, is a
+/// hard error — not a fall-through.
+fn resolve_cf_token(
+    token_file: Option<String>,
+    token_inline: Option<String>,
+    env_token: Option<String>,
+    read: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<CfTokenResolution, String> {
+    if let Some(path) = token_file {
+        let raw = read(&path).map_err(|e| format!("read --cf-token-file {path}: {e}"))?;
+        let token = raw.trim().to_string();
+        if token.is_empty() {
+            return Err(format!("--cf-token-file {path} resolved to an empty token"));
+        }
+        let warning = token_inline.map(|_| CF_TOKEN_DEPRECATION.to_string());
+        return Ok(CfTokenResolution {
+            token: Some(token),
+            warning,
+        });
+    }
+    if let Some(inline) = token_inline {
+        return Ok(CfTokenResolution {
+            token: Some(inline),
+            warning: Some(CF_TOKEN_DEPRECATION.to_string()),
+        });
+    }
+    Ok(CfTokenResolution {
+        token: env_token,
+        warning: None,
+    })
+}
+
 /// CLI entrypoint: resolve the login user (--user or $SUDO_USER), install the
 /// running binary to /usr/local/bin/rpi (npm installs live under node_modules,
 /// but the systemd unit expects the canonical path), run setup, and restart
@@ -1127,6 +1173,7 @@ pub async fn run_cmd(
     user: Option<String>,
     with_cloudflared: bool,
     cf_token: Option<String>,
+    cf_token_file: Option<String>,
     domain: Option<String>,
     tunnel: Option<String>,
     dry_run: bool,
@@ -1137,7 +1184,29 @@ pub async fn run_cmd(
         .ok_or_else(|| anyhow::anyhow!(
             "cannot determine the SSH login user; run via `sudo rpi agent setup` or pass --user <name>"
         ))?;
-    let cf_token = cf_token.or_else(|| std::env::var("CLOUDFLARE_API_TOKEN").ok());
+    let read_token = |path: &str| -> Result<String, String> {
+        if path == "-" {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| e.to_string())?;
+            Ok(buf)
+        } else {
+            std::fs::read_to_string(path).map_err(|e| e.to_string())
+        }
+    };
+    let resolution = resolve_cf_token(
+        cf_token_file,
+        cf_token,
+        std::env::var("CLOUDFLARE_API_TOKEN").ok(),
+        read_token,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(w) = &resolution.warning {
+        crate::output::warn(w);
+    }
+    let cf_token = resolution.token;
     let opts = SetupOpts {
         login_user,
         with_cloudflared,
@@ -2812,5 +2881,71 @@ ingress:\n  - hostname: board.example.com\n    service: http://127.0.0.1:8001\n 
         assert!(!looks_like_tunnel_id(
             "BC15C4E2-1111-2222-3333-444455556666"
         )); // uppercase hex
+    }
+
+    #[test]
+    fn cf_token_file_is_read_and_trimmed() {
+        let r = resolve_cf_token(Some("/tok".into()), None, None, |p| {
+            assert_eq!(p, "/tok");
+            Ok("secret-token\n".into())
+        })
+        .unwrap();
+        assert_eq!(r.token.as_deref(), Some("secret-token"));
+        assert!(r.warning.is_none());
+    }
+
+    #[test]
+    fn cf_token_file_dash_reads_stdin() {
+        // The real reader maps "-" to stdin; the helper just passes the path.
+        let r = resolve_cf_token(Some("-".into()), None, None, |p| {
+            assert_eq!(p, "-");
+            Ok("from-stdin\n".into())
+        })
+        .unwrap();
+        assert_eq!(r.token.as_deref(), Some("from-stdin"));
+    }
+
+    #[test]
+    fn cf_token_file_unreadable_is_error() {
+        let err = resolve_cf_token(Some("/nope".into()), None, None, |_| {
+            Err("No such file".into())
+        })
+        .unwrap_err();
+        assert!(err.contains("--cf-token-file /nope"), "{err}");
+    }
+
+    #[test]
+    fn cf_token_file_empty_resolved_token_is_error() {
+        let err =
+            resolve_cf_token(Some("/tok".into()), None, None, |_| Ok("   \n".into())).unwrap_err();
+        assert!(err.contains("empty token"), "{err}");
+    }
+
+    #[test]
+    fn cf_token_inline_resolves_with_deprecation_warning() {
+        let r =
+            resolve_cf_token(None, Some("inline-tok".into()), None, |_| unreachable!()).unwrap();
+        assert_eq!(r.token.as_deref(), Some("inline-tok"));
+        assert!(r.warning.as_deref().unwrap().contains("--cf-token-file"));
+    }
+
+    #[test]
+    fn cf_token_file_wins_over_inline_but_still_warns() {
+        let r = resolve_cf_token(Some("/tok".into()), Some("inline-tok".into()), None, |_| {
+            Ok("file-tok".into())
+        })
+        .unwrap();
+        assert_eq!(r.token.as_deref(), Some("file-tok"));
+        assert!(
+            r.warning.is_some(),
+            "inline token still triggers the deprecation warning"
+        );
+    }
+
+    #[test]
+    fn cf_token_falls_back_to_env() {
+        let r = resolve_cf_token(None, None, Some("env-tok".into()), |_| unreachable!()).unwrap();
+        assert_eq!(r.token.as_deref(), Some("env-tok"));
+        assert!(r.warning.is_none());
     }
 }
