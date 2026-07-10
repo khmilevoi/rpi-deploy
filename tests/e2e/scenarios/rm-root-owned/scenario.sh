@@ -35,9 +35,9 @@ assert_log rm.log "project 'rm-root-owned' removed"
 run_capture ls-after-rm.log rpi ls "${CONNECT[@]}"
 assert_log ls-after-rm.log 'no projects deployed yet'
 
-workdir_state=$("${SSH[@]}" bash -c \
-  'if [[ -e /var/lib/rpi/workdirs/rm-root-owned ]]; then echo present; else echo absent; fi')
-[[ $workdir_state == absent ]] || fail 'workdir still present after rpi rm'
+if "${SSH[@]}" test -e /var/lib/rpi/workdirs/rm-root-owned; then
+  fail 'workdir still present after rpi rm'
+fi
 
 leftovers=$("${SSH[@]}" env DOCKER_HOST=tcp://127.0.0.1:2375 docker ps -aq \
   --filter label=com.docker.compose.project=rm-root-owned)
