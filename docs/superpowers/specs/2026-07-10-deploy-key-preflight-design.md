@@ -108,27 +108,26 @@ Helpers:
 Rendered with the existing `LogPane` primitives so every outcome collapses to
 a one-line step, consistent with the stage panes:
 
-- access already ok → pane `source access` for the check duration →
-  `✓ source access (1.2s)`.
+- access already ok → no pane during the 1–2 s check (empty `LogPane` renders
+  nothing until its first line) → `✓ source access (1.2s)`.
 - gh path → `✓ deploy key registered via gh (3.4s)`.
 - manual path → box + polling line stay on screen while the user adds the key;
   on success the pane clears and leaves `✓ deploy key added (1m 23s)`.
 
-Manual box:
+Manual box with the pubkey printed above as a plain full-width line
+(so it can be copied; `LogPane` truncates to terminal width):
 
 ```
+ssh-ed25519 AAAAC3Nza… pi-deploy-myapp
 ╭─ deploy key needed ────────────────────────────────────────╮
 │ The Pi can't read git@github.com:khmil/myapp.git yet.      │
-│ Add this read-only deploy key to the repository:           │
-│                                                            │
-│   ssh-ed25519 AAAAC3Nza… pi-deploy-myapp                   │
-│                                                            │
+│ Add the key above to the repository as a read-only deploy  │
+│ key:                                                       │
 │ → https://github.com/khmil/myapp/settings/keys/new         │
 │   (check nothing extra: read-only is the default)          │
-│                                                            │
 │ agent said: Permission denied (publickey)                  │
+│ waiting for access… (checking every 5s, Ctrl+C to abort)   │
 ╰────────────────────────────────────────────────────────────╯
-waiting for access… (checking every 5s, Ctrl+C to abort)
 ```
 
 Non-GitHub repos: the URL line becomes

@@ -61,6 +61,15 @@ timed pane with a `✓ build (48.3s)` summary per stage and a service count in
 the final stamp; older CLI/agent combinations keep the previous single-pane
 view).
 
+First deploy of a private SSH repo no longer fails on a missing deploy key:
+`rpi deploy` now preflights repo access before starting the pipeline. If the
+agent can't read the repo it registers a read-only deploy key through your
+local `gh` automatically (the token never leaves your machine; the private
+key never leaves the Pi), or — without `gh` — prints the public key with
+instructions and continues by itself once you add it (polls every 5 s for up
+to 10 min). `--no-gh-key` skips the GitHub API path. Old agents skip the
+preflight; the fetch stage still prints the key hint there.
+
 Supported features:
 
 - `rpi deploy`;
