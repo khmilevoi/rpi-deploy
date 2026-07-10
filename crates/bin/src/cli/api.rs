@@ -11,7 +11,6 @@ use crate::proto::{
 };
 
 #[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
 pub struct StageEventDto {
     pub stage: String,
     pub status: String,
@@ -19,7 +18,6 @@ pub struct StageEventDto {
     pub elapsed_ms: Option<u64>,
 }
 
-#[allow(dead_code)]
 pub enum DeployStreamEvent<'a> {
     Line(&'a str),
     Stage(StageEventDto),
