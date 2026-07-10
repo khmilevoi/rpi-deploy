@@ -40,6 +40,16 @@ pub trait Source: Send + Sync {
     ) -> Result<FetchedSource, DomainError>;
 
     async fn cleanup(&self, project_name: &str) -> Result<(), DomainError>;
+
+    /// Deploy-key preflight: verify the agent can read `repo`, generating the
+    /// project's deploy key first when missing (SSH repos only; anything else
+    /// is `Ok` without probing). Probe failures are data (`Denied`), not
+    /// errors — `Err` is reserved for local failures (keygen, fs).
+    async fn check_access(
+        &self,
+        project_name: &str,
+        repo: &str,
+    ) -> Result<SourceAccess, DomainError>;
 }
 
 /// Abstraction of container backend (§6). v1 — DockerComposeRuntime.
@@ -192,6 +202,15 @@ pub trait HealthGate: Send + Sync {
         host_port: u16,
         log: Arc<dyn LogSink>,
     ) -> Result<(), DomainError>;
+}
+
+/// Deploy-key preflight verdict (spec 2026-07-10): `Ok` — the agent can read
+/// the repo; `Denied` — it cannot, and the project's public deploy key plus
+/// the probe's error text travel back for the CLI to render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceAccess {
+    Ok,
+    Denied { pubkey: String, error: String },
 }
 
 /// Result of an ingress upsert: `Applied` when the edge is (or already was)

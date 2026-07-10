@@ -6,8 +6,8 @@ use crate::cli::sse::SseParser;
 use crate::proto::{
     AgentOverviewDto, CommandRunRequest, CommandsResponse, DeployAccepted, DeployRequest,
     DeploymentDto, DiagnosticReportDto, GcResponse, LifecycleResponse, ProjectViewDto,
-    RemoveResponse, SecretsListResponse, SecretsSendRequest, SecretsSendResponse, StatsReportDto,
-    VersionInfo,
+    RemoveResponse, SecretsListResponse, SecretsSendRequest, SecretsSendResponse,
+    SourceCheckRequest, SourceCheckResponse, StatsReportDto, VersionInfo,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -85,6 +85,30 @@ impl ApiClient {
             .send()
             .await?;
         Ok(extract_error(resp).await?.json().await?)
+    }
+
+    /// Deploy-key preflight. `Ok(None)` — the agent predates the route (bare
+    /// 404): callers skip the preflight and deploy as before. Deliberate
+    /// deviation from the usual bail-on-404 pattern (spec 2026-07-10): old
+    /// agents still print the key hint inside the fetch stage, so degrading
+    /// silently keeps first deploys working instead of blocking them.
+    pub async fn source_check(
+        &self,
+        project: &str,
+        repo: &str,
+    ) -> anyhow::Result<Option<SourceCheckResponse>> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/projects/{project}/source/check", self.base))
+            .json(&SourceCheckRequest {
+                repo: repo.to_string(),
+            })
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(extract_error(resp).await?.json().await?))
     }
 
     pub async fn active_deployments(&self, project: &str) -> anyhow::Result<Vec<DeploymentDto>> {
@@ -461,6 +485,48 @@ mod tests {
                 "error": "command 'nope' not found; available: create-invite"
             })),
         )
+    }
+
+    async fn source_check_denied() -> impl IntoResponse {
+        axum::Json(serde_json::json!({
+            "ok": false,
+            "pubkey": "ssh-ed25519 AAAA pi-deploy-demo",
+            "error": "Permission denied (publickey)"
+        }))
+    }
+
+    #[tokio::test]
+    async fn source_check_returns_typed_payload() {
+        let app = Router::new().route("/v1/projects/demo/source/check", post(source_check_denied));
+        let client = ApiClient::new(spawn_app(app).await);
+
+        let resp = client
+            .source_check("demo", "git@github.com:x/y.git")
+            .await
+            .unwrap()
+            .expect("new agent answers");
+
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.pubkey.as_deref(),
+            Some("ssh-ed25519 AAAA pi-deploy-demo")
+        );
+        assert_eq!(resp.error.as_deref(), Some("Permission denied (publickey)"));
+    }
+
+    #[tokio::test]
+    async fn source_check_404_means_old_agent_and_returns_none() {
+        // Deliberate deviation from the bail-on-404 pattern (spec 2026-07-10):
+        // old agents keep working, the fetch stage still prints the key hint.
+        let app = Router::new().route("/v1/projects/demo/source/check", post(not_found_plain));
+        let client = ApiClient::new(spawn_app(app).await);
+
+        let resp = client
+            .source_check("demo", "git@github.com:x/y.git")
+            .await
+            .unwrap();
+
+        assert!(resp.is_none());
     }
 
     #[tokio::test]

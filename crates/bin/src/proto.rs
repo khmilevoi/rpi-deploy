@@ -419,6 +419,23 @@ impl From<ProjectView> for ProjectViewDto {
     }
 }
 
+/// POST /v1/projects/{name}/source/check — deploy-key preflight (spec
+/// 2026-07-10). A failed probe is data (`ok: false` + key to register),
+/// never an HTTP error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceCheckRequest {
+    pub repo: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceCheckResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub pubkey: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

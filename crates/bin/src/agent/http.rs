@@ -23,7 +23,8 @@ use crate::proto::{
     AgentOverviewDto, CommandRunRequest, CommandsResponse, DeployAccepted, DeployRequest,
     DeploymentDto, DiagnosticReportDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
     GcResponse, LifecycleResponse, ProjectViewDto, RemoveResponse, SecretsListResponse,
-    SecretsSendRequest, SecretsSendResponse, StatsReportDto, VersionInfo,
+    SecretsSendRequest, SecretsSendResponse, SourceCheckRequest, SourceCheckResponse,
+    StatsReportDto, VersionInfo,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -58,6 +59,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/projects/{name}/secrets",
             put(send_secrets_handler).get(list_secrets_handler),
         )
+        .route("/v1/projects/{name}/source/check", post(source_check))
         // base64 inflates the 8 MiB bundle limit by ~4/3; leave headroom
         .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
         .with_state(state)
@@ -376,6 +378,38 @@ async fn active_deployments(
     }
     let list = state.history.active(&name).await.map_err(ApiError)?;
     Ok(Json(list.into_iter().map(Into::into).collect()))
+}
+
+/// POST /v1/projects/{name}/source/check — deploy-key preflight (spec
+/// 2026-07-10). Stateless: ensures the project deploy key exists and probes
+/// repo access; a failed probe is `ok: false`, not an HTTP error.
+async fn source_check(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<SourceCheckRequest>,
+) -> Result<Json<SourceCheckResponse>, ApiError> {
+    if !is_valid_name(&name) {
+        return Err(ApiError(DomainError::Invalid(
+            "project name must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    let access = state
+        .source
+        .check_access(&name, &req.repo)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(match access {
+        pi_domain::contracts::SourceAccess::Ok => SourceCheckResponse {
+            ok: true,
+            pubkey: None,
+            error: None,
+        },
+        pi_domain::contracts::SourceAccess::Denied { pubkey, error } => SourceCheckResponse {
+            ok: false,
+            pubkey: Some(pubkey),
+            error: Some(error),
+        },
+    }))
 }
 
 fn sse_log(line: String) -> Result<Event, Infallible> {
@@ -761,6 +795,14 @@ mod tests {
         source
     }
 
+    fn checked_source(access: pi_domain::contracts::SourceAccess) -> MockSource {
+        let mut source = MockSource::new();
+        source
+            .expect_check_access()
+            .returning(move |_, _| Ok(access.clone()));
+        source
+    }
+
     fn ok_runtime() -> MockContainerRuntime {
         let mut runtime = MockContainerRuntime::new();
         runtime.expect_build().returning(|_, _| Ok(()));
@@ -867,7 +909,7 @@ mod tests {
         let send_secrets = SendSecrets::new(
             secrets.clone(),
             projects,
-            source,
+            source.clone(),
             FsSecretsWriter::new(),
             overrides,
             runtime,
@@ -879,6 +921,7 @@ mod tests {
             history,
             hub: DeployEventsHub::new(),
             ids: UuidGen::new(),
+            source,
             send_secrets,
             list_secrets,
             gc,
@@ -964,6 +1007,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_check_ok_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(checked_source(pi_domain::contracts::SourceAccess::Ok)),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, json) = request(
+            app,
+            post_json(
+                "/v1/projects/demo/source/check",
+                &serde_json::json!({ "repo": "git@github.com:x/y.git" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert!(json["pubkey"].is_null());
+        assert!(json["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn source_check_denied_carries_pubkey_and_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(checked_source(pi_domain::contracts::SourceAccess::Denied {
+                pubkey: "ssh-ed25519 AAAA pi-deploy-demo".into(),
+                error: "Permission denied (publickey)".into(),
+            })),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, json) = request(
+            app,
+            post_json(
+                "/v1/projects/demo/source/check",
+                &serde_json::json!({ "repo": "git@github.com:x/y.git" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["pubkey"], "ssh-ed25519 AAAA pi-deploy-demo");
+        assert_eq!(json["error"], "Permission denied (publickey)");
+    }
+
+    #[tokio::test]
+    async fn source_check_invalid_name_is_400() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, _) = request(
+            app,
+            post_json(
+                "/v1/projects/UPPER/source/check",
+                &serde_json::json!({ "repo": "git@github.com:x/y.git" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn deploy_end_to_end_with_mocked_docker() {
         let dir = tempfile::tempdir().unwrap();
         let app = router(state_with(
@@ -1032,6 +1141,14 @@ mod tests {
 
             async fn cleanup(&self, _project_name: &str) -> Result<(), DomainError> {
                 Ok(())
+            }
+
+            async fn check_access(
+                &self,
+                _project_name: &str,
+                _repo: &str,
+            ) -> Result<pi_domain::contracts::SourceAccess, DomainError> {
+                Ok(pi_domain::contracts::SourceAccess::Ok)
             }
         }
 
@@ -1199,6 +1316,14 @@ mod tests {
 
             async fn cleanup(&self, _project_name: &str) -> Result<(), DomainError> {
                 Ok(())
+            }
+
+            async fn check_access(
+                &self,
+                _project_name: &str,
+                _repo: &str,
+            ) -> Result<pi_domain::contracts::SourceAccess, DomainError> {
+                Ok(pi_domain::contracts::SourceAccess::Ok)
             }
         }
 

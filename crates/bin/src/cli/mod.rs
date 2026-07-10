@@ -6,6 +6,7 @@ pub mod keys;
 pub mod prompt;
 pub mod rpitoml;
 pub mod setup;
+pub mod sourcekey;
 pub mod sse;
 pub mod ssh;
 pub mod tunnel;

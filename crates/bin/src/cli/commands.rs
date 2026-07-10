@@ -12,7 +12,11 @@ use crate::duration::parse_duration_secs;
 use crate::output;
 use crate::proto::{DeployRequest, DiagnosticCheckDto};
 
-pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Result<()> {
+pub async fn deploy(
+    git_ref: Option<String>,
+    no_gh_key: bool,
+    connect: ConnectOpts,
+) -> anyhow::Result<()> {
     let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
     let project = rpitoml.to_project_config();
     output::show_deploy_banner(&rpitoml.project.name);
@@ -26,6 +30,8 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
     if let Some(warning) = version_mismatch_warning(env!("CARGO_PKG_VERSION"), &version.version) {
         output::warn(warning);
     }
+
+    crate::cli::sourcekey::preflight(&api, &rpitoml.project.name, &project.repo, no_gh_key).await?;
 
     let req = DeployRequest {
         project: (&project).into(),

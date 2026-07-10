@@ -14,7 +14,7 @@ use pi_application::remove::RemoveProject;
 use pi_application::scheduler::{DeployRunner, DeployScheduler};
 use pi_application::secrets::{ListSecrets, SendSecrets};
 use pi_application::stats::GetStats;
-use pi_domain::contracts::{DeploymentHistory, HostNetwork, IdGen, Ingress};
+use pi_domain::contracts::{DeploymentHistory, HostNetwork, IdGen, Ingress, Source};
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
 use pi_infrastructure::disk::SysinfoDiskProbe;
 use pi_infrastructure::docker::DockerComposeRuntime;
@@ -41,6 +41,7 @@ pub struct AppState {
     pub history: Arc<dyn DeploymentHistory>,
     pub hub: Arc<DeployEventsHub>,
     pub ids: Arc<dyn IdGen>,
+    pub source: Arc<dyn Source>,
     pub send_secrets: Arc<SendSecrets>,
     pub list_secrets: Arc<ListSecrets>,
     pub gc: Arc<RunGc>,
@@ -182,7 +183,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     let send_secrets = SendSecrets::new(
         secrets.clone(),
         projects,
-        source,
+        source.clone(),
         secrets_writer,
         overrides,
         runtime,
@@ -195,6 +196,7 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         history,
         hub: DeployEventsHub::new(),
         ids: UuidGen::new(),
+        source: source as Arc<dyn Source>,
         send_secrets,
         list_secrets,
         gc,
