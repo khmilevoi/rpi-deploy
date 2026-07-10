@@ -71,8 +71,8 @@ test('local success builds, starts dependencies, runs client, then tears down', 
     assert.equal(code, 0);
     const commands = calls.map((call) => call.args.join(' '));
     assert.match(commands[0], /^compose version --short$/);
-    assert.match(commands[1], /--file tests[/\\]e2e[/\\]compose\.yaml config --quiet$/);
-    assert.match(commands[2], /--file tests[/\\]e2e[/\\]compose\.yaml build client$/);
+    assert.match(commands[1], /--file tests[/\\]e2e[/\\]base\.compose\.yaml config --quiet$/);
+    assert.match(commands[2], /--file tests[/\\]e2e[/\\]base\.compose\.yaml build client$/);
     assert.match(commands[3], /up -d --no-build --wait --wait-timeout 120 dind target git-fixture$/);
     assert.match(commands[4], /run --rm --no-deps client$/);
     assert.match(commands[5], /down -v --remove-orphans$/);

@@ -28,4 +28,4 @@ RUN groupadd --system rpi-agent && \
     docker --version && docker compose version && rpi --version
 
 COPY tests/e2e /opt/e2e
-RUN sed -i 's/\r$//' /opt/e2e/*.sh && chmod 0755 /opt/e2e/*.sh
+RUN find /opt/e2e -name '*.sh' -exec sed -i 's/\r$//' {} + -exec chmod 0755 {} +

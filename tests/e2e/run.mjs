@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
-const COMPOSE_FILE = path.join('tests', 'e2e', 'compose.yaml');
+const COMPOSE_FILE = path.join('tests', 'e2e', 'base.compose.yaml');
 const SCENARIOS_DIR = path.join(HERE, 'scenarios');
 const MIN_COMPOSE = [2, 33, 1];
 const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -252,6 +252,7 @@ export async function runE2E({
     ...env,
     RPI_E2E_ARTIFACT_DIR: artifactDir,
     RPI_E2E_RUNTIME_IMAGE: runtimeImage,
+    RPI_E2E_SCENARIO: 'happy-path',
   };
   const base = [
     'compose', '--ansi', 'never', '--project-name', projectName,
@@ -361,6 +362,7 @@ export async function runDev(action, {
     ...env,
     RPI_E2E_ARTIFACT_DIR: artifactDir,
     RPI_E2E_RUNTIME_IMAGE: runtimeImage,
+    RPI_E2E_SCENARIO: 'happy-path',
   };
   const base = [
     'compose', '--ansi', 'never', '--project-name', projectName,

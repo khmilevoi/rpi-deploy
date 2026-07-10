@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -8,16 +8,21 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
 const read = (relative) => readFile(path.join(ROOT, relative), 'utf8');
 
-test('fixture uses local Git, managed port allocation, HTTP fallback, and LF content', async () => {
+test('happy-path satisfies the scenario folder contract', async () => {
+  await access(path.join(ROOT, 'tests/e2e/scenarios/happy-path/scenario.sh'));
+  await access(path.join(ROOT, 'tests/e2e/scenarios/happy-path/app/rpi.toml'));
+});
+
+test('happy-path fixture uses local Git, managed port allocation, HTTP fallback, and LF content', async () => {
   const [attributes, config, compose, dockerfile, health] = await Promise.all([
     read('.gitattributes'),
-    read('tests/e2e/fixtures/app/rpi.toml'),
-    read('tests/e2e/fixtures/app/compose.yaml'),
-    read('tests/e2e/fixtures/app/Dockerfile'),
-    read('tests/e2e/fixtures/app/health'),
+    read('tests/e2e/scenarios/happy-path/app/rpi.toml'),
+    read('tests/e2e/scenarios/happy-path/app/compose.yaml'),
+    read('tests/e2e/scenarios/happy-path/app/Dockerfile'),
+    read('tests/e2e/scenarios/happy-path/app/health'),
   ]);
-  assert.match(attributes, /tests\/e2e\/\*\.sh text eol=lf/);
-  assert.match(attributes, /tests\/e2e\/fixtures\/app\/health text eol=lf/);
+  assert.match(attributes, /tests\/e2e\/\*\*\/\*\.sh text eol=lf/);
+  assert.match(attributes, /tests\/e2e\/scenarios\/\*\/app\/health text eol=lf/);
   assert.match(config, /name = "e2e-fixture"/);
   assert.match(config, /repo = "git:\/\/git-fixture\/fixture\.git"/);
   assert.match(config, /service = "web"/);
@@ -30,28 +35,33 @@ test('fixture uses local Git, managed port allocation, HTTP fallback, and LF con
   assert.equal(health.trim(), 'ok');
 });
 
-test('runtime builds one current rpi binary and contains required target tools', async () => {
+test('runtime builds one current rpi binary, ships target tools, and normalizes nested scripts', async () => {
   const [dockerfile, agent, target, git] = await Promise.all([
     read('tests/e2e/Dockerfile'),
-    read('tests/e2e/agent.toml'),
-    read('tests/e2e/target-entrypoint.sh'),
-    read('tests/e2e/git-entrypoint.sh'),
+    read('tests/e2e/agent.default.toml'),
+    read('tests/e2e/entrypoints/target-entrypoint.sh'),
+    read('tests/e2e/entrypoints/git-entrypoint.sh'),
   ]);
   assert.match(dockerfile, /cargo build --locked -p pi/);
   assert.match(dockerfile, /COPY --from=builder \/out\/rpi \/usr\/local\/bin\/rpi/);
   assert.match(dockerfile, /FROM docker:28-cli AS docker_cli/);
   assert.match(dockerfile, /docker-compose/);
+  assert.match(dockerfile, /find \/opt\/e2e -name '\*\.sh'/);
   assert.match(agent, /socket = "\/run\/rpi\/agent\.sock"/);
   assert.match(agent, /port_min = 18080/);
   assert.match(agent, /port_max = 18089/);
   assert.match(target, /runuser -u rpi-agent/);
   assert.match(target, /AllowStreamLocalForwarding=yes/);
+  assert.match(target, /RPI_E2E_SCENARIO/);
+  assert.match(target, /agent\.default\.toml/);
+  assert.match(git, /RPI_E2E_SCENARIO/);
+  assert.match(git, /scenarios\/\$SCENARIO\/app/);
   assert.match(git, /git daemon/);
   assert.match(git, /fixture\.git/);
 });
 
-test('outer Compose isolates DinD and preserves the target loopback model', async () => {
-  const compose = await read('tests/e2e/compose.yaml');
+test('base compose isolates DinD, keeps the loopback model, and is scenario-parametrized', async () => {
+  const compose = await read('tests/e2e/base.compose.yaml');
   assert.match(compose, /privileged: true/);
   assert.equal((compose.match(/privileged: true/g) || []).length, 1);
   assert.match(compose, /127\.0\.0\.1:2375/);
@@ -61,6 +71,12 @@ test('outer Compose isolates DinD and preserves the target loopback model', asyn
   assert.match(compose, /condition: service_healthy/);
   assert.doesNotMatch(compose, /\/var\/run\/docker\.sock/);
   assert.doesNotMatch(compose, /^\s{4}ports:/m);
+  assert.match(compose, /RPI_E2E_SCENARIO: \$\{RPI_E2E_SCENARIO:\?/);
+  assert.match(compose, /\/opt\/e2e\/entrypoints\/target-entrypoint\.sh/);
+  assert.match(compose, /\/opt\/e2e\/entrypoints\/git-entrypoint\.sh/);
+  assert.match(compose, /\/opt\/e2e\/scenarios\/\$\{RPI_E2E_SCENARIO\}\/scenario\.sh/);
+  assert.match(compose, /working_dir: \/opt\/e2e\/scenarios\/\$\{RPI_E2E_SCENARIO\}\/app/);
+  assert.doesNotMatch(compose, /\.\/agent\.toml/, 'agent config is baked, not bind-mounted');
   const targetBlock = /^  target:\s*$([\s\S]*?)^  git-fixture:\s*$/m.exec(compose)?.[1] || '';
   assert.match(targetBlock, /ssh-public:\/run\/e2e-public:ro/);
   assert.doesNotMatch(targetBlock, /ssh-private/);
@@ -70,16 +86,16 @@ test('outer Compose isolates DinD and preserves the target loopback model', asyn
   assert.doesNotMatch(dindBlock, /0\.0\.0\.0:2375/);
 });
 
-test('Compose service names match the launcher contract', async () => {
-  const compose = await read('tests/e2e/compose.yaml');
+test('compose service names match the launcher contract', async () => {
+  const compose = await read('tests/e2e/base.compose.yaml');
   for (const service of ['keygen', 'dind', 'target', 'git-fixture', 'client']) {
     assert.match(compose, new RegExp(`^  ${service}:`, 'm'));
   }
 });
 
-test('scenario drives deploy, redeploy, and remove through the shared library', async () => {
+test('happy-path scenario drives deploy, redeploy, and remove through the shared library', async () => {
   const [scenario, lib] = await Promise.all([
-    read('tests/e2e/scenario.sh'),
+    read('tests/e2e/scenarios/happy-path/scenario.sh'),
     read('tests/e2e/lib.sh'),
   ]);
   assert.match(scenario, /^source \/opt\/e2e\/lib\.sh$/m);
@@ -116,7 +132,7 @@ test('scenario drives deploy, redeploy, and remove through the shared library', 
 });
 
 test('dev profile provides an exec-able client and stays out of the CI path', async () => {
-  const compose = await read('tests/e2e/compose.yaml');
+  const compose = await read('tests/e2e/base.compose.yaml');
   assert.match(compose, /^  client-dev:/m);
   const devBlock = /^  client-dev:\s*$([\s\S]*?)^networks:/m.exec(compose)?.[1] || '';
   assert.match(devBlock, /profiles: \["dev"\]/);

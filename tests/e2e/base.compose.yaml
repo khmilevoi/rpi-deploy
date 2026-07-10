@@ -65,11 +65,13 @@ services:
     environment:
       DOCKER_HOST: tcp://127.0.0.1:2375
       RUST_LOG: info
-    command: ["/opt/e2e/target-entrypoint.sh"]
+      RPI_E2E_SCENARIO: ${RPI_E2E_SCENARIO:?RPI_E2E_SCENARIO must be set by run.mjs}
+    command: ["/opt/e2e/entrypoints/target-entrypoint.sh"]
     volumes:
       - ssh-public:/run/e2e-public:ro
       - agent-data:/var/lib/rpi
-      - ./agent.toml:/etc/rpi/agent.toml:ro
+    # The healthcheck pins /run/rpi/agent.sock: a per-scenario agent.toml may
+    # override anything except `socket` (and must keep sshd on port 22).
     healthcheck:
       test:
         - CMD
@@ -88,7 +90,9 @@ services:
 
   git-fixture:
     <<: *runtime
-    command: ["/opt/e2e/git-entrypoint.sh"]
+    environment:
+      RPI_E2E_SCENARIO: ${RPI_E2E_SCENARIO:?RPI_E2E_SCENARIO must be set by run.mjs}
+    command: ["/opt/e2e/entrypoints/git-entrypoint.sh"]
     networks:
       - e2e
     healthcheck:
@@ -109,8 +113,9 @@ services:
     environment:
       HOME: /tmp/rpi-e2e-home
       NO_COLOR: "1"
-    working_dir: /opt/e2e/fixtures/app
-    command: ["/opt/e2e/scenario.sh"]
+      RPI_E2E_SCENARIO: ${RPI_E2E_SCENARIO:?RPI_E2E_SCENARIO must be set by run.mjs}
+    working_dir: /opt/e2e/scenarios/${RPI_E2E_SCENARIO}/app
+    command: ["/opt/e2e/scenarios/${RPI_E2E_SCENARIO}/scenario.sh"]
     networks:
       - e2e
     volumes:
@@ -133,7 +138,8 @@ services:
     environment:
       HOME: /tmp/rpi-e2e-home
       NO_COLOR: "1"
-    working_dir: /opt/e2e/fixtures/app
+      RPI_E2E_SCENARIO: ${RPI_E2E_SCENARIO:?RPI_E2E_SCENARIO must be set by run.mjs}
+    working_dir: /opt/e2e/scenarios/${RPI_E2E_SCENARIO}/app
     command: ["sleep", "infinity"]
     networks:
       - e2e

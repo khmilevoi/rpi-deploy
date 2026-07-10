@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCENARIO=${RPI_E2E_SCENARIO:?RPI_E2E_SCENARIO must be set}
+AGENT_CONFIG=/opt/e2e/scenarios/$SCENARIO/agent.toml
+[[ -f $AGENT_CONFIG ]] || AGENT_CONFIG=/opt/e2e/agent.default.toml
+
 install -d -o rpi-agent -g rpi-agent -m 0750 /var/lib/rpi /var/log/rpi
 install -d -o rpi-agent -g rpi-agent -m 0770 /run/rpi
 install -d -o deploy -g deploy -m 0700 /home/deploy/.ssh
@@ -13,7 +17,7 @@ runuser -u rpi-agent -- env \
   XDG_CONFIG_HOME=/var/lib/rpi/.config \
   XDG_CACHE_HOME=/var/lib/rpi/.cache \
   DOCKER_HOST=tcp://127.0.0.1:2375 \
-  /usr/local/bin/rpi agent run --config /etc/rpi/agent.toml &
+  /usr/local/bin/rpi agent run --config "$AGENT_CONFIG" &
 agent_pid=$!
 
 /usr/sbin/sshd -D -e \
