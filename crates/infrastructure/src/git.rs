@@ -135,19 +135,117 @@ impl Source for GitSource {
     }
 
     async fn cleanup(&self, project_name: &str) -> Result<(), DomainError> {
-        let src_err = |e: std::io::Error| DomainError::Source(e.to_string());
         for path in [
             self.workdirs.join(project_name),
             self.keys.join(project_name),
         ] {
-            match tokio::fs::remove_dir_all(&path).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(src_err(e)),
-            }
+            remove_tree(&path).await?;
         }
         Ok(())
     }
+}
+
+/// Cleanup fallback image for `force_remove_via_docker`. Pinned (not
+/// `:latest`) so the fallback container's behavior can't drift under us.
+/// `busybox` is a few hundred KB and its `rm` applet is all this needs; the
+/// specific tag is already pulled by every scenario in `tests/e2e` (both
+/// fixture apps build `FROM busybox:1.37`), so on this codebase's own e2e
+/// harness the fallback never needs a fresh network pull. On a real host
+/// that has never used this image before, the first `rpi rm` that hits the
+/// fallback pays a small one-time pull; every `rpi rm` after that reuses the
+/// locally cached image.
+const CLEANUP_IMAGE: &str = "busybox:1.37";
+
+/// Removes `path` (file or directory tree), tolerating a tree the agent does
+/// not fully own. Tries a plain removal first -- the common case, since the
+/// agent created everything under its own data dir -- and only reaches for
+/// Docker when that comes back `EACCES`: a deployed service bind-mounted a
+/// path under the workdir and, running as root (Docker's default container
+/// user), wrote root-owned files into it. The agent process itself is never
+/// root and can't `chown`/`chmod` its way out of that.
+///
+/// The fallback runs a throwaway container, via the same `docker` CLI
+/// invocation this crate already uses for every compose operation
+/// (`docker.rs`), that bind-mounts the parent directory and force-removes
+/// the target by name as root. This grants the *cleanup step*, not the
+/// long-running `rpi-agent` process, root privilege: the agent already
+/// talks to dockerd (which runs as root) for every build/up/down, so this
+/// reuses privilege the system already grants the daemon instead of
+/// escalating the agent itself (e.g. via a sudoers rule).
+async fn remove_tree(path: &Path) -> Result<(), DomainError> {
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() != std::io::ErrorKind::PermissionDenied => {
+            return Err(DomainError::Source(e.to_string()));
+        }
+        Err(_) => {} // EACCES: fall through to the root cleanup container below.
+    }
+
+    if let Err(docker_err) = force_remove_via_docker(path).await {
+        return Err(permission_denied_err(path, &docker_err));
+    }
+
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(permission_denied_err(path, &e.to_string())),
+    }
+}
+
+/// Splits `path` into the parent to bind-mount and the child name to delete
+/// inside it, the two pieces `force_remove_args` needs. A named error (not
+/// just `None`) so callers can report *why* the fallback couldn't even be
+/// attempted.
+fn split_for_force_remove(path: &Path) -> Result<(&Path, &str), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("{} has a non-UTF-8 file name", path.display()))?;
+    Ok((parent, name))
+}
+
+/// `docker run` args that delete `name` (a child of `parent`) as root:
+/// bind-mounts `parent` at `/target` and `rm -rf`s the child by name inside
+/// the container. Mounting the parent (rather than the target itself) lets
+/// the container delete the target outright rather than just its contents,
+/// so a successful run leaves nothing behind for the caller to clean up.
+fn force_remove_args(parent: &Path, name: &str) -> Vec<String> {
+    vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-v".to_string(),
+        format!("{}:/target", parent.display()),
+        CLEANUP_IMAGE.to_string(),
+        "rm".to_string(),
+        "-rf".to_string(),
+        "--".to_string(),
+        format!("/target/{name}"),
+    ]
+}
+
+/// Force-removes `path` as root by running a one-shot `docker` container
+/// (see `force_remove_args`), the same `docker` CLI invocation mechanism
+/// this crate already uses for every compose operation (`docker.rs`).
+async fn force_remove_via_docker(path: &Path) -> Result<(), String> {
+    let (parent, name) = split_for_force_remove(path)?;
+    let mut cmd = Command::new("docker");
+    cmd.args(force_remove_args(parent, name));
+    run_capture(cmd).await.map(|_| ())
+}
+
+fn permission_denied_err(path: &Path, detail: &str) -> DomainError {
+    DomainError::Source(format!(
+        "cannot remove {p}: it contains files owned by another user (typically \
+         left behind by a container that ran as root and wrote into a \
+         bind-mounted path under the workdir); automatic cleanup via a \
+         one-shot root container also failed ({detail}). Fix manually on the \
+         agent host with `sudo rm -rf {p}` and re-run `rpi rm`.",
+        p = path.display(),
+    ))
 }
 
 #[cfg(test)]
@@ -181,6 +279,86 @@ mod tests {
             source.workdir("rateme"),
             std::path::PathBuf::from("/var/lib/rpi/workdirs/rateme")
         );
+    }
+
+    #[test]
+    fn split_for_force_remove_returns_parent_and_name() {
+        let (parent, name) =
+            split_for_force_remove(Path::new("/var/lib/rpi/workdirs/rateme")).unwrap();
+        assert_eq!(parent, Path::new("/var/lib/rpi/workdirs"));
+        assert_eq!(name, "rateme");
+    }
+
+    #[test]
+    fn split_for_force_remove_rejects_a_path_with_no_parent() {
+        let err = split_for_force_remove(Path::new("/")).unwrap_err();
+        assert!(err.contains("no parent directory"), "{err}");
+    }
+
+    #[test]
+    fn force_remove_args_bind_mounts_parent_and_removes_child_by_name() {
+        let args = force_remove_args(Path::new("/var/lib/rpi/workdirs"), "rateme");
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "--rm",
+                "-v",
+                "/var/lib/rpi/workdirs:/target",
+                CLEANUP_IMAGE,
+                "rm",
+                "-rf",
+                "--",
+                "/target/rateme",
+            ]
+        );
+    }
+
+    #[test]
+    fn cleanup_image_is_pinned_not_latest() {
+        assert!(
+            CLEANUP_IMAGE.contains(':') && !CLEANUP_IMAGE.ends_with(":latest"),
+            "fallback image must be pinned for reproducibility: {CLEANUP_IMAGE}"
+        );
+    }
+
+    #[test]
+    fn permission_denied_err_names_the_path_and_recovery_command() {
+        let err = permission_denied_err(Path::new("/var/lib/rpi/workdirs/rateme"), "boom");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/var/lib/rpi/workdirs/rateme"),
+            "message should name the path: {msg}"
+        );
+        assert!(
+            msg.contains("sudo rm -rf /var/lib/rpi/workdirs/rateme"),
+            "message should give a manual recovery command: {msg}"
+        );
+        assert!(
+            msg.contains("boom"),
+            "message should include the underlying error: {msg}"
+        );
+        assert!(msg.starts_with("source error:"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn remove_tree_removes_an_ordinary_agent_owned_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("project");
+        std::fs::create_dir_all(target.join("nested")).unwrap();
+        std::fs::write(target.join("nested").join("file.txt"), b"hi").unwrap();
+
+        remove_tree(&target).await.unwrap();
+
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn remove_tree_tolerates_an_already_absent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("never-existed");
+
+        remove_tree(&target).await.unwrap();
     }
 }
 
