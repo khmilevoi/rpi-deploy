@@ -10,6 +10,36 @@ use crate::proto::{
     VersionInfo,
 };
 
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct StageEventDto {
+    pub stage: String,
+    pub status: String,
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
+}
+
+#[allow(dead_code)]
+pub enum DeployStreamEvent<'a> {
+    Line(&'a str),
+    Stage(StageEventDto),
+    Summary { services: usize },
+}
+
+fn parse_stage(data: &str) -> Option<StageEventDto> {
+    serde_json::from_str(data).ok()
+}
+
+fn parse_summary(data: &str) -> Option<usize> {
+    #[derive(serde::Deserialize)]
+    struct SummaryDto {
+        services: usize,
+    }
+    serde_json::from_str::<SummaryDto>(data)
+        .ok()
+        .map(|s| s.services)
+}
+
 async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
     if resp.status().is_success() {
         return Ok(resp);
@@ -152,7 +182,7 @@ impl ApiClient {
     pub async fn follow_logs(
         &self,
         id: &str,
-        mut on_line: impl FnMut(&str),
+        mut on_event: impl FnMut(DeployStreamEvent<'_>),
     ) -> anyhow::Result<String> {
         let resp = self
             .http
@@ -177,7 +207,17 @@ impl ApiClient {
             buf.drain(..valid_up_to);
             for ev in parser.push(&text) {
                 match ev.event.as_str() {
-                    "log" => on_line(&ev.data),
+                    "log" => on_event(DeployStreamEvent::Line(&ev.data)),
+                    "stage" => {
+                        if let Some(dto) = parse_stage(&ev.data) {
+                            on_event(DeployStreamEvent::Stage(dto));
+                        }
+                    }
+                    "summary" => {
+                        if let Some(services) = parse_summary(&ev.data) {
+                            on_event(DeployStreamEvent::Summary { services });
+                        }
+                    }
                     "finished" => return Ok(ev.data),
                     _ => {}
                 }
@@ -508,5 +548,28 @@ mod tests {
             err.to_string(),
             "command 'nope' not found; available: create-invite"
         );
+    }
+
+    #[test]
+    fn parse_stage_accepts_valid_and_rejects_malformed_payloads() {
+        let ev = parse_stage(r#"{"stage":"build","status":"ok","elapsed_ms":48231}"#).unwrap();
+        assert_eq!(ev.stage, "build");
+        assert_eq!(ev.status, "ok");
+        assert_eq!(ev.elapsed_ms, Some(48231));
+
+        let started = parse_stage(r#"{"stage":"fetch","status":"started"}"#).unwrap();
+        assert_eq!(started.elapsed_ms, None);
+
+        assert!(parse_stage("not json").is_none());
+        assert!(
+            parse_stage(r#"{"status":"ok"}"#).is_none(),
+            "missing stage field"
+        );
+    }
+
+    #[test]
+    fn parse_summary_accepts_valid_and_rejects_malformed_payloads() {
+        assert_eq!(parse_summary(r#"{"services":2}"#), Some(2));
+        assert_eq!(parse_summary("nope"), None);
     }
 }

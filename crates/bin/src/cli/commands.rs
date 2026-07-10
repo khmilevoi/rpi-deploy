@@ -3,7 +3,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 
-use crate::cli::api::ApiClient;
+use crate::cli::api::{ApiClient, DeployStreamEvent};
 use crate::cli::config::ConnectOpts;
 use crate::cli::rpitoml::{RpiToml, SecretsSection};
 use crate::cli::ssh::SshExec;
@@ -48,11 +48,13 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
     let mut pane = output::LogPane::new(format!("deploy '{}'", rpitoml.project.name), 10);
     let mut warnings: Vec<String> = Vec::new();
     let status = api
-        .follow_logs(&accepted.deployment_id, |line| {
-            if let Some(w) = deploy_warning(line) {
-                warnings.push(w.to_string());
+        .follow_logs(&accepted.deployment_id, |ev| {
+            if let DeployStreamEvent::Line(line) = ev {
+                if let Some(w) = deploy_warning(line) {
+                    warnings.push(w.to_string());
+                }
+                pane.push_line(line)
             }
-            pane.push_line(line)
         })
         .await?;
     let elapsed = started.elapsed();
