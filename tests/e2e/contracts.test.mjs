@@ -72,3 +72,30 @@ test('Compose service names match the launcher contract', async () => {
     assert.match(compose, new RegExp(`^  ${service}:`, 'm'));
   }
 });
+
+test('scenario uses the production SSH path and covers deploy, redeploy, and remove', async () => {
+  const [scenario, lib] = await Promise.all([
+    read('tests/e2e/scenario.sh'),
+    read('tests/e2e/lib.sh'),
+  ]);
+  assert.match(scenario, /^source \/opt\/e2e\/lib\.sh$/m);
+  assert.match(lib, /unset PI_AGENT_URL/);
+  assert.match(lib, /ssh-keyscan -H target/);
+  assert.match(lib, /\/etc\/ssh\/ssh_known_hosts/);
+  assert.doesNotMatch(scenario, /PI_AGENT_URL=/);
+  assert.doesNotMatch(scenario, /\$HOME\/\.ssh/);
+  assert.equal((scenario.match(/rpi deploy/g) || []).length, 2);
+  assert.match(scenario, /rpi ls/);
+  assert.match(scenario, /127\.0\.0\.1:18080\/health/);
+  assert.match(scenario, /rpi rm e2e-fixture --yes/);
+  assert.match(scenario, /com\.docker\.compose\.project=e2e-fixture/);
+  assert.match(scenario, /env DOCKER_HOST=tcp:\/\/127\.0\.0\.1:2375 docker ps/);
+  for (const milestone of [
+    'fetched ',
+    'docker compose build ...',
+    'docker compose up -d ...',
+    'healthcheck: passed',
+  ]) {
+    assert.match(scenario, new RegExp(milestone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+});
