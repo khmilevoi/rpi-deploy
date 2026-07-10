@@ -92,7 +92,6 @@ impl ApiClient {
     /// deviation from the usual bail-on-404 pattern (spec 2026-07-10): old
     /// agents still print the key hint inside the fetch stage, so degrading
     /// silently keeps first deploys working instead of blocking them.
-    #[allow(dead_code)]
     pub async fn source_check(
         &self,
         project: &str,
