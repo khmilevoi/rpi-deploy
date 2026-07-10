@@ -4,6 +4,22 @@
 consecutive pushes without retries, staged timeouts prevent jobs from hanging,
 and the `--host/--user/--key` flags avoid requiring client config on the runner.
 
+## This repository's Docker e2e merge gate
+
+The `e2e` job in `.github/workflows/ci.yml` runs after the Linux format, clippy,
+and unit-test job on every pull request and push to `master`. It prebuilds the
+shared runtime with Docker Buildx, uses the GitHub Actions cache backend v2, and
+runs `npm run test:e2e` on `ubuntu-latest` with a 30-minute job timeout.
+
+The job intentionally has only `contents: read`, consumes no repository or
+deployment secrets, and uploads `${{ runner.temp }}/rpi-e2e` only when the job
+fails. The DinD service is privileged, so this job must remain on a disposable
+GitHub-hosted runner; do not copy it to `self-hosted` without a separate threat
+review.
+
+The cache is an optimization, not a correctness dependency. Cache export uses
+`ignore-error=true`, and a cold runner must still build and pass.
+
 ## Repository Secrets (Settings -> Secrets -> Actions)
 
 | Secret | Description |

@@ -1,0 +1,12 @@
+.git
+.github
+.superpowers
+.worktrees
+.claude/worktrees
+target
+dist
+node_modules
+docs
+*.db
+*.db-wal
+*.db-shm

@@ -500,6 +500,45 @@ sudo systemctl enable --now rpi-agent
 cargo test --workspace
 ```
 
+### Full Docker end-to-end test
+
+The production-path e2e test builds the current `rpi` once, starts an isolated
+target with real SSH and `/run/rpi/agent.sock`, and deploys a local Git fixture
+into a dedicated Docker-in-Docker daemon:
+
+```bash
+npm run test:e2e
+```
+
+Requirements: Node.js 18+, Docker Desktop using Linux containers (or Docker
+Engine on Linux), Docker Compose 2.33.1+, and support for privileged Linux
+containers. The command starts a **privileged** `docker:28-dind` service, but it
+does not mount the host Docker socket or publish test ports to the host.
+
+The scenario covers `rpi deploy` over SSH, the agent Unix socket, real Compose
+build/up, HTTP health, a stable second deploy, `rpi ls`, and `rpi rm`. It does
+not cover systemd installation, Cloudflare, secrets, private Git, or ARM.
+
+On failure, inspect `target/e2e-artifacts/<run-id>`. The launcher records build,
+outer Compose, agent, nested Docker, scenario, and cleanup diagnostics before it
+removes the run's containers, networks, and volumes. Set `RPI_E2E_KEEP=1` to
+keep a run's stack around for inspection; the launcher prints the cleanup
+command.
+
+### Manual dev stack
+
+`npm run e2e:dev:up` starts the same topology plus a long-lived `client-dev`
+container (Compose profile `dev`, fixed project name `rpi-e2e-dev`):
+
+```bash
+docker exec -it rpi-e2e-dev-client-dev-1 bash   # rpi CLI + SSH key
+docker exec -it rpi-e2e-dev-target-1 bash       # agent + sshd + nested Docker
+```
+
+Inside `client-dev`, run `source /opt/e2e/lib.sh && e2e_client_init` once, then
+use `rpi <cmd> --host target --user deploy --key /run/e2e-keys/id_ed25519`.
+`npm run e2e:dev:down` removes the dev stack and its image.
+
 Run a local TCP agent and point the CLI at it:
 
 ```bash

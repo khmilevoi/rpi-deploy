@@ -1,0 +1,20 @@
+services:
+  web:
+    build: .
+    expose:
+      - "8080"
+    # `./data` does not exist in the freshly-cloned fixture checkout, so
+    # Docker auto-creates it on the daemon side as root:root before the
+    # container starts. The container itself runs as root (no `user:`
+    # directive -- this mirrors real-world images that don't drop
+    # privileges), so the files it writes under /data stay root-owned too.
+    # Once bind-mounted through `target`'s workdir path, this is the exact
+    # shape that trips the `rpi rm` EACCES bug: the non-root rpi-agent that
+    # later runs `rpi rm` can list this directory (default mode 0755 is
+    # world-readable+executable) but cannot unlink files inside it.
+    volumes:
+      - ./data:/data
+    command:
+      - sh
+      - -c
+      - mkdir -p /data/sub && touch /data/sub/root-owned.txt && exec httpd -f -p 8080 -h /www

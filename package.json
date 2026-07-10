@@ -18,7 +18,11 @@
   ],
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
-    "prepublishOnly": "node scripts/check-version.js"
+    "prepublishOnly": "node scripts/check-version.js",
+    "test:node": "node --test",
+    "test:e2e": "node tests/e2e/run.mjs",
+    "e2e:dev:up": "node tests/e2e/run.mjs --dev-up",
+    "e2e:dev:down": "node tests/e2e/run.mjs --dev-down"
   },
   "engines": { "node": ">=18" },
   "os": ["linux", "darwin", "win32"]

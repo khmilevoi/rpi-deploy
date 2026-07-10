@@ -1,0 +1,167 @@
+x-runtime: &runtime
+  image: ${RPI_E2E_RUNTIME_IMAGE:?RPI_E2E_RUNTIME_IMAGE must be set by run.mjs}
+  build:
+    context: ../..
+    dockerfile: tests/e2e/Dockerfile
+
+services:
+  keygen:
+    <<: *runtime
+    network_mode: none
+    command:
+      - bash
+      - -ceu
+      - |
+        rm -f /run/e2e-keys/id_ed25519 /run/e2e-keys/id_ed25519.pub
+        rm -f /run/e2e-public/id_ed25519.pub
+        ssh-keygen -q -t ed25519 -N '' -f /run/e2e-keys/id_ed25519
+        chmod 0600 /run/e2e-keys/id_ed25519
+        install -m 0644 /run/e2e-keys/id_ed25519.pub /run/e2e-public/id_ed25519.pub
+    volumes:
+      - ssh-private:/run/e2e-keys
+      - ssh-public:/run/e2e-public
+
+  dind:
+    image: docker:28-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+      DOCKER_HOST: tcp://127.0.0.1:2375
+    # The docker:28-dind entrypoint script injects its own all-interfaces
+    # default host binding only when `$#` is 0 or the *first* command
+    # argument starts with `-`. Passing a bare `--host=tcp://127.0.0.1:2375`
+    # as `command` triggered that guard and made dockerd try to bind port
+    # 2375 twice ("port is already allocated"). Prefixing the command with
+    # the literal `dockerd` executable name as argument 0 (which does not
+    # start with `-`) skips the guard, so `exec "$@"` runs
+    # `dockerd --host=tcp://127.0.0.1:2375` exactly once, bound to loopback
+    # only. This keeps the Docker API unreachable from sibling containers
+    # (`git-fixture`, `client`) on the shared `e2e` bridge network; only
+    # `target`, which shares this container's network namespace via
+    # `network_mode: service:dind`, can reach it.
+    command: ["dockerd", "--host=tcp://127.0.0.1:2375"]
+    volumes:
+      - dind-data:/var/lib/docker
+      # Shared with `target`'s agent-data mount below (same volume, same
+      # path) so a bind-mount source dir that `docker compose` on `target`
+      # resolves under the agent's workdir (/var/lib/rpi/workdirs/<project>)
+      # is materialized by this daemon on the *same* underlying volume,
+      # instead of on dind's own ephemeral overlay fs. Without this, any
+      # scenario relying on bind-mount-created files landing in the
+      # agent-visible workdir (e.g. rm-root-owned) would silently no-op.
+      - agent-data:/var/lib/rpi
+    networks:
+      e2e:
+        aliases:
+          - target
+    healthcheck:
+      test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    stop_grace_period: 10s
+
+  target:
+    <<: *runtime
+    network_mode: service:dind
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      dind:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://127.0.0.1:2375
+      RUST_LOG: info
+      RPI_E2E_SCENARIO: ${RPI_E2E_SCENARIO:?RPI_E2E_SCENARIO must be set by run.mjs}
+    command: ["/opt/e2e/entrypoints/target-entrypoint.sh"]
+    volumes:
+      - ssh-public:/run/e2e-public:ro
+      - agent-data:/var/lib/rpi
+    # The healthcheck pins /run/rpi/agent.sock: a per-scenario agent.toml may
+    # override anything except `socket` (and must keep sshd on port 22).
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -ec
+        - >-
+          curl --fail --silent --unix-socket /run/rpi/agent.sock
+          http://localhost/v1/version >/dev/null &&
+          docker info >/dev/null &&
+          exec 3<>/dev/tcp/127.0.0.1/22
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    stop_grace_period: 10s
+
+  git-fixture:
+    <<: *runtime
+    environment:
+      RPI_E2E_SCENARIO: ${RPI_E2E_SCENARIO:?RPI_E2E_SCENARIO must be set by run.mjs}
+    command: ["/opt/e2e/entrypoints/git-entrypoint.sh"]
+    networks:
+      - e2e
+    healthcheck:
+      test: ["CMD-SHELL", "git ls-remote git://127.0.0.1/fixture.git HEAD >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  client:
+    <<: *runtime
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      target:
+        condition: service_healthy
+      git-fixture:
+        condition: service_healthy
+    environment:
+      HOME: /tmp/rpi-e2e-home
+      NO_COLOR: "1"
+      RPI_E2E_SCENARIO: ${RPI_E2E_SCENARIO:?RPI_E2E_SCENARIO must be set by run.mjs}
+    working_dir: /opt/e2e/scenarios/${RPI_E2E_SCENARIO}/app
+    command: ["/opt/e2e/scenarios/${RPI_E2E_SCENARIO}/scenario.sh"]
+    networks:
+      - e2e
+    volumes:
+      - ssh-private:/run/e2e-keys:ro
+      - type: bind
+        source: ${RPI_E2E_ARTIFACT_DIR:?RPI_E2E_ARTIFACT_DIR must be set by run.mjs}
+        target: /artifacts
+
+  client-dev:
+    <<: *runtime
+    profiles: ["dev"]
+    init: true
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      target:
+        condition: service_healthy
+      git-fixture:
+        condition: service_healthy
+    environment:
+      HOME: /tmp/rpi-e2e-home
+      NO_COLOR: "1"
+      RPI_E2E_SCENARIO: ${RPI_E2E_SCENARIO:?RPI_E2E_SCENARIO must be set by run.mjs}
+    working_dir: /opt/e2e/scenarios/${RPI_E2E_SCENARIO}/app
+    command: ["sleep", "infinity"]
+    networks:
+      - e2e
+    volumes:
+      - ssh-private:/run/e2e-keys:ro
+      - type: bind
+        source: ${RPI_E2E_ARTIFACT_DIR:?RPI_E2E_ARTIFACT_DIR must be set by run.mjs}
+        target: /artifacts
+
+networks:
+  e2e:
+
+volumes:
+  agent-data:
+  dind-data:
+  ssh-private:
+  ssh-public:

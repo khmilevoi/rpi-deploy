@@ -23,7 +23,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
-      - run: node --test "scripts/**/*.test.js"
+      - run: npm run test:node
 
   windows:
     runs-on: windows-latest
@@ -35,4 +35,38 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
-      - run: node --test "scripts/**/*.test.js"
+      - run: npm run test:node
+
+  e2e:
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RPI_E2E_RUNTIME_IMAGE: rpi-e2e-runtime:ci
+      RPI_E2E_PREBUILT: "1"
+      RPI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/rpi-e2e
+      RPI_E2E_CONCURRENCY: "3"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: docker/setup-buildx-action@v4
+      - name: Build cached e2e runtime
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: tests/e2e/Dockerfile
+          load: true
+          tags: rpi-e2e-runtime:ci
+          cache-from: type=gha,scope=rpi-e2e
+          cache-to: type=gha,mode=max,scope=rpi-e2e,ignore-error=true
+      - name: Production-path Docker e2e
+        run: npm run test:e2e
+      - name: Upload e2e diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rpi-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rpi-e2e
+          if-no-files-found: ignore
