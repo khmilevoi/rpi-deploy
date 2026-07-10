@@ -8,7 +8,7 @@ containers.
 
 Website: https://rpi.iiskelo.com
 
-Status: v0.17.1 (`rpi doctor` cloudflared-service check fix) —
+Status: v0.18.0 (deploy pipeline view + deploy-key preflight) —
 everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
@@ -65,19 +65,19 @@ alongside `XDG_RUNTIME_DIR` so `cloudflared` restarts no longer fail on
 systems that need it), v0.17.1 fixes `rpi doctor`'s `cloudflared service`
 check reporting a false failure over SSH sessions that don't already export
 `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`, even when the unit is active,
-and v0.17.2 a deploy pipeline view (`rpi deploy` now renders each stage
-(`fetch → build → start → health → route → gc`) as a collapsing timed pane
-with a `✓ build (48.3s)` summary per stage and a service count in the final
-stamp; older CLI/agent combinations keep the previous single-pane view).
-
-First deploy of a private SSH repo no longer fails on a missing deploy key:
-`rpi deploy` now preflights repo access before starting the pipeline. If the
-agent can't read the repo it registers a read-only deploy key through your
-local `gh` automatically (the token never leaves your machine; the private
-key never leaves the Pi), or — without `gh` — prints the public key with
-instructions and continues by itself once you add it (polls every 5 s for up
-to 10 min). `--no-gh-key` skips the GitHub API path. Old agents skip the
-preflight; the fetch stage still prints the key hint there.
+and v0.18.0 two features: a deploy pipeline view (`rpi deploy` now renders
+each stage (`fetch → build → start → health → route → gc`) as a collapsing
+timed pane with a `✓ build (48.3s)` summary per stage and a service count in
+the final stamp; older CLI/agent combinations keep the previous single-pane
+view), and a deploy-key preflight (first deploy of a private SSH repo no
+longer fails on a missing deploy key: `rpi deploy` now verifies repo access
+before starting the pipeline; if the agent can't read the repo it registers a
+read-only deploy key through your local `gh` automatically — the token never
+leaves your machine, the private key never leaves the Pi — or, without `gh`,
+prints the public key with instructions and continues by itself once you add
+it, polling every 5 s for up to 10 min; `--no-gh-key` skips the GitHub API
+path; old agents skip the preflight, and the fetch stage still prints the key
+hint there).
 
 Supported features:
 
