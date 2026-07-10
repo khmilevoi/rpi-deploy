@@ -1,6 +1,6 @@
 # Docker Production-Path E2E Deploy — Design
 
-Date: 2026-07-10  
+Date: 2026-07-10
 Status: approved
 
 ## 1. Context
@@ -43,8 +43,8 @@ The test passes only when the current checkout's `rpi` binary:
 - repeats the deploy successfully while preserving port `18080`;
 - removes the project with `rpi rm --yes` and leaves no nested project
   containers behind;
-- tears down every outer test container, network, and volume on both success and
-  failure.
+- tears down every outer test container, network, and volume after success and
+  controlled scenario failure while the host Docker Engine remains available.
 
 ## 3. Scope
 
@@ -163,9 +163,9 @@ not release optimization or musl packaging, and must remain viable as a PR gate.
 
 The runtime image contains only the test tooling shared by the client, target,
 and Git fixture roles: OpenSSH client/server, Git including `git daemon`, curl,
-the Docker CLI with Compose v2, and basic POSIX utilities. Client and target use
-the exact same `rpi` binary layer, so a version mismatch cannot be hidden by the
-harness.
+the Docker CLI with Compose v2, Bash, and basic Unix utilities. Client and target
+use the exact same `rpi` binary layer, so a version mismatch cannot be hidden by
+the harness.
 
 ### 6.2 `dind`
 
@@ -238,9 +238,9 @@ allocated host port rather than short-circuiting on Docker health state.
 ### 6.6 Client scenario
 
 The `client` service depends on successful key generation and healthy DinD,
-target, and Git services. It runs a strict POSIX shell scenario with
-`set -eu` and pipeline failure propagation. It sets `NO_COLOR=1` so assertions
-operate on stable semantic text, not ANSI presentation.
+target, and Git services. It runs a strict Bash scenario with
+`set -euo pipefail`. It sets `NO_COLOR=1` so assertions operate on stable
+semantic text, not ANSI presentation.
 
 The scenario uses only normal CLI flags; `PI_AGENT_URL` is unset throughout.
 
@@ -388,7 +388,7 @@ Add a separate `e2e` job to `.github/workflows/ci.yml`:
 - `runs-on: ubuntu-latest` and `needs: linux` avoid spending DinD time when the
   Linux format/lint/unit gate already failed;
 - Node 22 is installed consistently with the existing jobs;
-- Docker Buildx is initialized with current GitHub-hosted BuildKit support;
+- Docker Buildx is initialized with `docker/setup-buildx-action@v3`;
 - the runtime image is prebuilt, loaded into the runner daemon, and cached with
   `cache-from: type=gha` and
   `cache-to: type=gha,mode=max,scope=rpi-e2e,ignore-error=true`;
@@ -399,7 +399,8 @@ Add a separate `e2e` job to `.github/workflows/ci.yml`:
   Dockerfile using Docker Desktop's normal BuildKit cache;
 - the job runs `npm run test:e2e` with `timeout-minutes: 30`;
 - on `failure()`, the workflow uploads `${{ runner.temp }}/rpi-e2e` as a
-  diagnostic artifact using the repository's current artifact-action major;
+  diagnostic artifact using `actions/upload-artifact@v6`, matching the release
+  workflow;
 - job permissions stay `contents: read` and no secrets are referenced.
 
 The Buildx setup must support the GitHub Actions cache service API v2. Current
@@ -447,8 +448,8 @@ Add:
 
 Update:
 
-- `package.json` — add `test:node` if needed to centralize current Node tests,
-  add the launcher unit test, and add `test:e2e`;
+- `package.json` — add `test:node` to centralize current Node tests, include the
+  launcher unit test, and add `test:e2e`;
 - `.github/workflows/ci.yml` — use the shared Node test command and add the e2e
   job;
 - `README.md` — document local e2e requirements, command, privileged DinD
@@ -476,7 +477,8 @@ The implementation is complete when all of the following are true:
 5. The app uses port `18080` on both deploys and answers `/health` with `ok`.
 6. No fixture project container remains after `rpi rm`.
 7. No outer `rpi-e2e-<run-id>` containers, networks, or volumes remain after a
-   successful or failed launcher run.
+   successful run or a controlled scenario failure while the host Docker Engine
+   remains available.
 8. A forced launcher-unit-test failure proves diagnostics run before cleanup and
    the original exit status is preserved.
 9. Existing `cargo test --locked` and Node tests remain green on Linux and
