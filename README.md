@@ -55,7 +55,11 @@ and degrading cleanly under `NO_COLOR`/non-unicode/piped output; `rpi deploy`
 now ends with a result stamp showing status, project, ingress URL, and
 elapsed time; and table cells render the exact brand colour on
 `COLORTERM=truecolor`/`24bit` terminals instead of the nearest 256-colour
-approximation).
+approximation), and v0.17 a deploy pipeline view (`rpi deploy` now renders
+each stage (`fetch → build → start → health → route → gc`) as a collapsing
+timed pane with a `✓ build (48.3s)` summary per stage and a service count in
+the final stamp; older CLI/agent combinations keep the previous single-pane
+view).
 
 Supported features:
 
