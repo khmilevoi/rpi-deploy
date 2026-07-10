@@ -72,6 +72,10 @@ enum Cmd {
         /// Cancel the active deploy(s) of the current project instead
         #[arg(long)]
         cancel: bool,
+        /// Skip deploy-key auto-registration via GitHub CLI; show the key
+        /// for manual setup instead
+        #[arg(long, conflicts_with = "cancel")]
+        no_gh_key: bool,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
@@ -320,12 +324,13 @@ async fn run() -> anyhow::Result<()> {
         Cmd::Deploy {
             git_ref,
             cancel,
+            no_gh_key,
             connect,
         } => {
             if cancel {
                 cli::commands::deploy_cancel(connect).await
             } else {
-                cli::commands::deploy(git_ref, connect).await
+                cli::commands::deploy(git_ref, no_gh_key, connect).await
             }
         }
         Cmd::Ls { connect } => cli::commands::ls(connect).await,
@@ -466,6 +471,19 @@ mod tests {
             }
             _ => panic!("expected deploy"),
         }
+    }
+
+    #[test]
+    fn deploy_no_gh_key_flag_parses() {
+        let cli = Cli::try_parse_from(["pi", "deploy", "--no-gh-key"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Deploy { no_gh_key, .. }) => assert!(no_gh_key),
+            _ => panic!("expected deploy"),
+        }
+        assert!(
+            Cli::try_parse_from(["pi", "deploy", "--cancel", "--no-gh-key"]).is_err(),
+            "--no-gh-key conflicts with --cancel"
+        );
     }
 
     #[test]
