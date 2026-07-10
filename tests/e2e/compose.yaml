@@ -119,6 +119,30 @@ services:
         source: ${RPI_E2E_ARTIFACT_DIR:?RPI_E2E_ARTIFACT_DIR must be set by run.mjs}
         target: /artifacts
 
+  client-dev:
+    <<: *runtime
+    profiles: ["dev"]
+    init: true
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      target:
+        condition: service_healthy
+      git-fixture:
+        condition: service_healthy
+    environment:
+      HOME: /tmp/rpi-e2e-home
+      NO_COLOR: "1"
+    working_dir: /opt/e2e/fixtures/app
+    command: ["sleep", "infinity"]
+    networks:
+      - e2e
+    volumes:
+      - ssh-private:/run/e2e-keys:ro
+      - type: bind
+        source: ${RPI_E2E_ARTIFACT_DIR:?RPI_E2E_ARTIFACT_DIR must be set by run.mjs}
+        target: /artifacts
+
 networks:
   e2e:
 

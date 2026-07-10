@@ -103,3 +103,17 @@ test('scenario uses the production SSH path and covers deploy, redeploy, and rem
     assert.match(scenario, new RegExp(milestone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 });
+
+test('dev profile provides an exec-able client and stays out of the CI path', async () => {
+  const compose = await read('tests/e2e/compose.yaml');
+  assert.match(compose, /^  client-dev:/m);
+  const devBlock = /^  client-dev:\s*$([\s\S]*?)^networks:/m.exec(compose)?.[1] || '';
+  assert.match(devBlock, /profiles: \["dev"\]/);
+  assert.match(devBlock, /command: \["sleep", "infinity"\]/);
+  assert.match(devBlock, /init: true/);
+  const workflow = await read('.github/workflows/ci.yml');
+  assert.doesNotMatch(workflow, /RPI_E2E_KEEP|client-dev|--profile dev/);
+  const pkg = await read('package.json');
+  assert.match(pkg, /"e2e:dev:up": "node tests\/e2e\/run\.mjs --dev-up"/);
+  assert.match(pkg, /"e2e:dev:down": "node tests\/e2e\/run\.mjs --dev-down"/);
+});

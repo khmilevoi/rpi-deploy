@@ -213,14 +213,20 @@ export async function runE2E({
     }
     if (attemptedStart) await collectDiagnostics(compose, artifactDir);
   } finally {
-    if (attemptedStart) {
+    const keep = env.RPI_E2E_KEEP === '1';
+    if (attemptedStart && keep) {
+      console.warn(`rpi e2e: RPI_E2E_KEEP=1 — stack kept (project ${projectName})`);
+      console.warn(`rpi e2e:   docker exec -it ${projectName}-target-1 bash`);
+      console.warn(`rpi e2e:   clean up: node tests/e2e/run.mjs --down ${projectName}`);
+    }
+    if (attemptedStart && !keep) {
       const down = await compose(['down', '-v', '--remove-orphans'], {
         logPath: path.join(artifactDir, 'cleanup.log'),
         timeoutMs: 120_000,
       });
       if (primaryCode === 0 && down.code !== 0) primaryCode = down.code || 1;
     }
-    if (localImageTouched) {
+    if (localImageTouched && !keep) {
       await runner(['image', 'rm', runtimeImage], {
         env: composeEnv,
         quiet: true,
@@ -231,10 +237,65 @@ export async function runE2E({
   return primaryCode;
 }
 
+export async function runDev(action, {
+  runner = spawnDocker,
+  env = process.env,
+  projectName = 'rpi-e2e-dev',
+  artifactDir = path.join(ROOT, 'target', 'e2e-artifacts', projectName),
+  signal,
+} = {}) {
+  await mkdir(artifactDir, { recursive: true });
+  const runtimeImage = env.RPI_E2E_RUNTIME_IMAGE || `rpi-e2e-runtime:${projectName}`;
+  const composeEnv = {
+    ...env,
+    RPI_E2E_ARTIFACT_DIR: artifactDir,
+    RPI_E2E_RUNTIME_IMAGE: runtimeImage,
+  };
+  const base = [
+    'compose', '--ansi', 'never', '--project-name', projectName,
+    '--file', COMPOSE_FILE, '--profile', 'dev',
+  ];
+  const compose = (tail, options = {}) => runner([...base, ...tail], {
+    env: composeEnv,
+    signal,
+    ...options,
+  });
+  if (action === 'up') {
+    const build = await compose(['build', 'client'], { timeoutMs: BUILD_TIMEOUT_MS });
+    if (build.code !== 0) return build.code || 1;
+    const up = await compose([
+      'up', '-d', '--no-build', '--wait', '--wait-timeout', '120',
+      'dind', 'target', 'git-fixture', 'client-dev',
+    ]);
+    if (up.code !== 0) return up.code || 1;
+    console.log(`rpi e2e dev: stack is up (project ${projectName})`);
+    console.log(`  docker exec -it ${projectName}-client-dev-1 bash   # rpi CLI + SSH key`);
+    console.log(`  docker exec -it ${projectName}-target-1 bash       # agent + sshd + nested Docker`);
+    console.log('  in client-dev, once: source /opt/e2e/lib.sh && e2e_client_init');
+    return 0;
+  }
+  if (action === 'down') {
+    const down = await compose(['down', '-v', '--remove-orphans'], { timeoutMs: 120_000 });
+    await runner(['image', 'rm', runtimeImage], { env: composeEnv, quiet: true, signal });
+    return down.code || 0;
+  }
+  throw new Error(`unknown dev action: ${action}`);
+}
+
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  console.warn('rpi e2e: starting an isolated privileged Docker-in-Docker daemon');
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
-  process.exitCode = await runE2E({ signal: controller.signal });
+  const [flag, flagProject] = process.argv.slice(2);
+  if (flag === '--dev-up') {
+    process.exitCode = await runDev('up', { signal: controller.signal });
+  } else if (flag === '--dev-down' || flag === '--down') {
+    process.exitCode = await runDev('down', {
+      signal: controller.signal,
+      ...(flag === '--down' && flagProject ? { projectName: flagProject } : {}),
+    });
+  } else {
+    console.warn('rpi e2e: starting an isolated privileged Docker-in-Docker daemon');
+    process.exitCode = await runE2E({ signal: controller.signal });
+  }
 }

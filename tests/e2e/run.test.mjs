@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 
-import { makeProjectName, parseComposeVersion, runE2E } from './run.mjs';
+import { makeProjectName, parseComposeVersion, runDev, runE2E } from './run.mjs';
 
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '', timedOut: false });
 
@@ -193,5 +193,49 @@ test('an already-aborted run exits 130 without touching Docker', async () => {
       signal: controller.signal,
     }), 130);
     assert.equal(calls.length, 0);
+  });
+});
+
+test('RPI_E2E_KEEP=1 skips teardown and image removal', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([
+      ok('2.33.1'), ok(), ok(), ok(),
+      { code: 23, stdout: '', stderr: '', timedOut: false },
+      ok(), ok(), ok(), // diagnostics
+    ]);
+    assert.equal(await runE2E({
+      runner,
+      artifactDir,
+      projectName: 'rpi-e2e-keep',
+      env: { RPI_E2E_KEEP: '1' },
+    }), 23);
+    const joined = calls.map((call) => call.args.join(' ')).join('\n');
+    assert.doesNotMatch(joined, /down -v/);
+    assert.doesNotMatch(joined, /image rm/);
+  });
+});
+
+test('dev up builds the shared image once and waits for client-dev', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([ok(), ok()]);
+    assert.equal(await runDev('up', { runner, artifactDir, env: {} }), 0);
+    const commands = calls.map((call) => call.args.join(' '));
+    assert.match(commands[0], /--project-name rpi-e2e-dev/);
+    assert.match(commands[0], /--profile dev build client$/);
+    assert.match(
+      commands[1],
+      /up -d --no-build --wait --wait-timeout 120 dind target git-fixture client-dev$/,
+    );
+  });
+});
+
+test('dev down tears down the fixed dev project and removes its image', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([ok(), ok()]);
+    assert.equal(await runDev('down', { runner, artifactDir, env: {} }), 0);
+    const joined = calls.map((call) => call.args.join(' ')).join('\n');
+    assert.match(joined, /--project-name rpi-e2e-dev/);
+    assert.match(joined, /down -v --remove-orphans/);
+    assert.match(joined, /image rm rpi-e2e-runtime:rpi-e2e-dev/);
   });
 });
