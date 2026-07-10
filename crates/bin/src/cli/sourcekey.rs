@@ -88,6 +88,7 @@ const POLL_TIMEOUT_SECS: u64 = 600;
 /// repo before creating a deployment. `Ok(())` — proceed with the deploy;
 /// `Err` — abort, the explanation is already on screen.
 pub async fn preflight(
+    gh: &dyn Gh,
     api: &ApiClient,
     project: &str,
     repo: &str,
@@ -116,7 +117,7 @@ pub async fn preflight(
     };
     let error = first.error.unwrap_or_else(|| "access denied".to_string());
 
-    if !no_gh_key && try_gh_register(api, project, repo, &pubkey).await? {
+    if !no_gh_key && try_gh_register(gh, api, project, repo, &pubkey).await? {
         println!(
             "{}",
             done_line(
@@ -138,9 +139,21 @@ pub async fn preflight(
     if !interactive {
         anyhow::bail!("deploy key not registered; add it to the repository and re-run rpi deploy");
     }
-    pane.push_line(&format!(
-        "waiting for access… (checking every {POLL_INTERVAL_SECS}s, Ctrl+C to abort)"
-    ));
+    // While waiting for the key to be added by hand, also watch for a
+    // background `gh auth login` (github repos, unless --no-gh-key): logging in
+    // mid-wait auto-registers the key without a re-run. `gh_prev` is seeded with
+    // the current state so only a later transition into "logged in" fires.
+    let gh_watch = (!no_gh_key).then(|| parse_github_repo(repo)).flatten();
+    let title = format!("pi-deploy-{project}");
+    let mut gh_prev = match &gh_watch {
+        Some(_) => gh.logged_in().await,
+        None => None,
+    };
+    pane.push_line(&if gh_watch.is_some() {
+        format!("waiting for access… (checking every {POLL_INTERVAL_SECS}s — also watching for gh login, Ctrl+C to abort)")
+    } else {
+        format!("waiting for access… (checking every {POLL_INTERVAL_SECS}s, Ctrl+C to abort)")
+    });
     let deadline = started + std::time::Duration::from_secs(POLL_TIMEOUT_SECS);
     loop {
         tokio::select! {
@@ -155,6 +168,13 @@ pub async fn preflight(
             anyhow::bail!(
                 "deploy key was not added within 10 minutes; add it and re-run rpi deploy"
             );
+        }
+        if let Some((owner, name)) = &gh_watch {
+            let (next, line) = gh_watch_step(gh, gh_prev, owner, name, &title, &pubkey).await;
+            gh_prev = next;
+            if let Some(line) = line {
+                pane.push_line(&line);
+            }
         }
         // Transient check failures (tunnel hiccup) keep polling to the deadline.
         if let Ok(Some(resp)) = api.source_check(project, repo).await {
@@ -174,6 +194,7 @@ pub async fn preflight(
 /// `false` — fall back to the manual box: not a github.com repo, `gh`
 /// missing (silent) or logged out / failed (hint printed via output::note).
 async fn try_gh_register(
+    gh: &dyn Gh,
     api: &ApiClient,
     project: &str,
     repo: &str,
@@ -182,7 +203,7 @@ async fn try_gh_register(
     let Some((owner, name)) = parse_github_repo(repo) else {
         return Ok(false);
     };
-    match gh_logged_in().await {
+    match gh.logged_in().await {
         None => return Ok(false), // gh not installed
         Some(false) => {
             output::note("gh is not logged in (run: gh auth login) — add the key manually below");
@@ -194,7 +215,7 @@ async fn try_gh_register(
         "registering read-only deploy key via gh ({owner}/{name})…"
     ));
     let title = format!("pi-deploy-{project}");
-    if let Err(e) = gh_register(&owner, &name, &title, pubkey).await {
+    if let Err(e) = gh.register_key(&owner, &name, &title, pubkey).await {
         output::note(format!(
             "gh couldn't register the key ({e}) — add it manually below"
         ));
@@ -209,37 +230,95 @@ async fn try_gh_register(
     Ok(false)
 }
 
-/// `gh auth token`: cheap, no network. `None` — gh missing; `Some(logged_in)`.
-async fn gh_logged_in() -> Option<bool> {
-    let out = tokio::process::Command::new("gh")
-        .args(["auth", "token"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await;
-    match out {
-        Ok(o) => Some(o.status.success()),
-        Err(_) => None,
-    }
+/// Whether a change in `gh` login state should (re)trigger auto-registration:
+/// only a fresh transition into "logged in" counts, so a key that failed to
+/// register (missing repo scope, say) isn't retried on every poll tick.
+fn gh_login_became_available(prev: Option<bool>, now: Option<bool>) -> bool {
+    now == Some(true) && prev != Some(true)
 }
 
-/// POST the deploy key via `gh api`; `Err` carries gh's first stderr line.
-async fn gh_register(owner: &str, repo: &str, title: &str, pubkey: &str) -> Result<(), String> {
-    let out = tokio::process::Command::new("gh")
-        .args(gh_register_args(owner, repo, title, pubkey))
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .map_err(|e| format!("gh: {e}"))?;
-    if out.status.success() {
-        return Ok(());
+/// One `gh`-login watch step for the wait loop. Re-checks login through `gh`
+/// and, on a fresh logout→login transition, registers the deploy key. Returns
+/// the login state to carry into the next tick plus an optional pane line.
+async fn gh_watch_step(
+    gh: &dyn Gh,
+    prev: Option<bool>,
+    owner: &str,
+    name: &str,
+    title: &str,
+    pubkey: &str,
+) -> (Option<bool>, Option<String>) {
+    let now = gh.logged_in().await;
+    if !gh_login_became_available(prev, now) {
+        return (now, None);
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(stderr
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("gh api failed")
-        .to_string())
+    let line = match gh.register_key(owner, name, title, pubkey).await {
+        Ok(()) => "gh login detected — deploy key registered; confirming access…".to_string(),
+        Err(e) => {
+            format!("gh login detected but couldn't register the key ({e}); add it manually above")
+        }
+    };
+    (now, Some(line))
+}
+
+/// Local `gh` CLI operations behind a trait so the preflight is testable
+/// without shelling out (`ScriptedGh` in tests).
+#[async_trait::async_trait]
+pub trait Gh: Sync {
+    /// `gh auth token`: cheap, no network. `None` — gh missing; `Some(logged_in)`.
+    async fn logged_in(&self) -> Option<bool>;
+    /// POST a read-only deploy key via `gh api`; `Err` carries gh's first
+    /// stderr line.
+    async fn register_key(
+        &self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        pubkey: &str,
+    ) -> Result<(), String>;
+}
+
+/// Boundary to the real `gh` binary.
+pub struct GhCli;
+
+#[async_trait::async_trait]
+impl Gh for GhCli {
+    async fn logged_in(&self) -> Option<bool> {
+        let out = tokio::process::Command::new("gh")
+            .args(["auth", "token"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await;
+        match out {
+            Ok(o) => Some(o.status.success()),
+            Err(_) => None,
+        }
+    }
+
+    async fn register_key(
+        &self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        pubkey: &str,
+    ) -> Result<(), String> {
+        let out = tokio::process::Command::new("gh")
+            .args(gh_register_args(owner, repo, title, pubkey))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .map_err(|e| format!("gh: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Err(stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("gh api failed")
+            .to_string())
+    }
 }
 
 #[cfg(test)]
@@ -348,7 +427,7 @@ mod tests {
     async fn preflight_skips_https_repos_without_calling_the_agent() {
         // port 1 would refuse any request — proves no request is made
         let api = ApiClient::new("http://127.0.0.1:1".into());
-        preflight(&api, "demo", "https://github.com/x/y.git", true)
+        preflight(&GhCli, &api, "demo", "https://github.com/x/y.git", true)
             .await
             .unwrap();
     }
@@ -357,7 +436,7 @@ mod tests {
     async fn preflight_skips_when_agent_lacks_the_route() {
         let app = Router::new(); // any request -> bare 404 (old agent)
         let api = ApiClient::new(spawn_app(app).await);
-        preflight(&api, "demo", "git@github.com:x/y.git", true)
+        preflight(&GhCli, &api, "demo", "git@github.com:x/y.git", true)
             .await
             .unwrap();
     }
@@ -369,7 +448,7 @@ mod tests {
         }
         let app = Router::new().route("/v1/projects/demo/source/check", post(ok));
         let api = ApiClient::new(spawn_app(app).await);
-        preflight(&api, "demo", "git@github.com:x/y.git", true)
+        preflight(&GhCli, &api, "demo", "git@github.com:x/y.git", true)
             .await
             .unwrap();
     }
@@ -390,9 +469,123 @@ mod tests {
         }
         let app = Router::new().route("/v1/projects/demo/source/check", post(denied));
         let api = ApiClient::new(spawn_app(app).await);
-        let err = preflight(&api, "demo", "git@github.com:x/y.git", true)
+        let err = preflight(&GhCli, &api, "demo", "git@github.com:x/y.git", true)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("re-run rpi deploy"), "{err}");
+    }
+
+    /// Scripted `gh` stand-in (mirrors `ScriptedPrompter`): `logged_in` replays
+    /// a queue of states, `register_key` returns a fixed result and records its
+    /// calls so tests can assert what was registered.
+    struct ScriptedGh {
+        logins: std::sync::Mutex<std::collections::VecDeque<Option<bool>>>,
+        register: Result<(), String>,
+        register_calls: std::sync::Mutex<Vec<(String, String, String, String)>>,
+    }
+
+    impl ScriptedGh {
+        fn new(
+            logins: impl IntoIterator<Item = Option<bool>>,
+            register: Result<(), String>,
+        ) -> Self {
+            Self {
+                logins: std::sync::Mutex::new(logins.into_iter().collect()),
+                register,
+                register_calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn register_calls(&self) -> usize {
+            self.register_calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Gh for ScriptedGh {
+        async fn logged_in(&self) -> Option<bool> {
+            self.logins.lock().unwrap().pop_front().unwrap_or(None)
+        }
+        async fn register_key(
+            &self,
+            owner: &str,
+            repo: &str,
+            title: &str,
+            pubkey: &str,
+        ) -> Result<(), String> {
+            self.register_calls.lock().unwrap().push((
+                owner.into(),
+                repo.into(),
+                title.into(),
+                pubkey.into(),
+            ));
+            self.register.clone()
+        }
+    }
+
+    #[test]
+    fn gh_login_became_available_only_on_fresh_login() {
+        assert!(gh_login_became_available(None, Some(true)));
+        assert!(gh_login_became_available(Some(false), Some(true)));
+        assert!(!gh_login_became_available(Some(true), Some(true)));
+        assert!(!gh_login_became_available(Some(true), Some(false)));
+        assert!(!gh_login_became_available(Some(false), Some(false)));
+        assert!(!gh_login_became_available(None, None));
+        assert!(!gh_login_became_available(None, Some(false)));
+    }
+
+    #[tokio::test]
+    async fn gh_watch_step_registers_on_fresh_login() {
+        let gh = ScriptedGh::new([Some(true)], Ok(()));
+        let (next, line) = gh_watch_step(
+            &gh,
+            Some(false),
+            "khmil",
+            "myapp",
+            "pi-deploy-demo",
+            "ssh-ed25519 AAAA",
+        )
+        .await;
+        assert_eq!(next, Some(true), "carries the new login state forward");
+        assert!(line.unwrap().contains("registered"), "shows a success line");
+        assert_eq!(gh.register_calls(), 1, "registers exactly once");
+        assert_eq!(
+            gh.register_calls.lock().unwrap()[0],
+            (
+                "khmil".into(),
+                "myapp".into(),
+                "pi-deploy-demo".into(),
+                "ssh-ed25519 AAAA".into()
+            ),
+            "registers with the repo/title/key it was handed"
+        );
+    }
+
+    #[tokio::test]
+    async fn gh_watch_step_ignores_steady_logged_in_state() {
+        let gh = ScriptedGh::new([Some(true)], Ok(()));
+        let (next, line) = gh_watch_step(&gh, Some(true), "khmil", "myapp", "t", "k").await;
+        assert_eq!(next, Some(true));
+        assert!(line.is_none(), "no pane line when nothing changed");
+        assert_eq!(gh.register_calls(), 0, "never re-registers a steady state");
+    }
+
+    #[tokio::test]
+    async fn gh_watch_step_surfaces_registration_error() {
+        let gh = ScriptedGh::new([Some(true)], Err("HTTP 403: forbidden".into()));
+        let (next, line) = gh_watch_step(&gh, Some(false), "khmil", "myapp", "t", "k").await;
+        assert_eq!(next, Some(true), "still advances the login state");
+        let line = line.expect("a fresh login always yields a pane line");
+        assert!(line.contains("couldn't register"), "{line}");
+        assert!(line.contains("HTTP 403"), "carries gh's error text: {line}");
+        assert_eq!(gh.register_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn gh_watch_step_stays_quiet_while_logged_out() {
+        let gh = ScriptedGh::new([Some(false)], Ok(()));
+        let (next, line) = gh_watch_step(&gh, Some(false), "khmil", "myapp", "t", "k").await;
+        assert_eq!(next, Some(false));
+        assert!(line.is_none());
+        assert_eq!(gh.register_calls(), 0);
     }
 }

@@ -31,7 +31,14 @@ pub async fn deploy(
         output::warn(warning);
     }
 
-    crate::cli::sourcekey::preflight(&api, &rpitoml.project.name, &project.repo, no_gh_key).await?;
+    crate::cli::sourcekey::preflight(
+        &crate::cli::sourcekey::GhCli,
+        &api,
+        &rpitoml.project.name,
+        &project.repo,
+        no_gh_key,
+    )
+    .await?;
 
     let req = DeployRequest {
         project: (&project).into(),
