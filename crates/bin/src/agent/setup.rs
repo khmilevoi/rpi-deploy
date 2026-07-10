@@ -671,6 +671,25 @@ pub struct CloudflaredBootstrap {
     pub zone: String,
 }
 
+/// Whether a cloudflared process is currently running, for the foreign-tunnel
+/// guard (Part A). Detects a *process* (`pgrep -x cloudflared`), not the unit
+/// file: the no-token fallback scaffolds the unit without starting it, so a
+/// unit-file check would false-positive on that legitimate workflow.
+#[derive(Debug, PartialEq, Eq)]
+enum CloudflaredState {
+    Running,
+    NotRunning,
+    Undetermined,
+}
+
+async fn cloudflared_running(sys: &dyn Sys) -> CloudflaredState {
+    match sys.run("pgrep", &["-x", "cloudflared"]).await {
+        Ok(_) => CloudflaredState::Running,
+        Err(e) if e.starts_with("spawn ") => CloudflaredState::Undetermined,
+        Err(_) => CloudflaredState::NotRunning,
+    }
+}
+
 /// Create (or adopt) the tunnel via the Cloudflare API, write its credentials
 /// JSON + a validated config.yml, and append [cloudflare]/[cloudflared] to
 /// agent.toml. The credentials JSON carries the tunnel secret, so a failed
@@ -700,6 +719,40 @@ pub(crate) async fn cloudflared_bootstrap_full(
         }
         adopt_existing_cloudflared(sys, cf, opts, rep).await;
         return true;
+    }
+
+    // Foreign-tunnel guard (Part A): config.yml is absent, so rpi has never
+    // created a tunnel here — any cloudflared already running is foreign.
+    // Refuse rather than overwrite its unit and restart it. Every destructive
+    // action below happens after this point.
+    match cloudflared_running(sys).await {
+        CloudflaredState::NotRunning => {}
+        CloudflaredState::Running => {
+            let msg = format!(
+                "a cloudflared tunnel is already running on this host, but rpi has no config.yml \
+                 at {CLOUDFLARED_CONFIG_PATH} to adopt — refusing to overwrite it and restart the \
+                 tunnel. Stop the running cloudflared (then re-run to create a fresh rpi-managed \
+                 tunnel), or move its config to {CLOUDFLARED_CONFIG_PATH} so setup adopts it."
+            );
+            if dry {
+                rep.skipped.push(format!("would refuse: {msg}"));
+            } else {
+                rep.errors.push(msg);
+            }
+            return false;
+        }
+        CloudflaredState::Undetermined => {
+            let msg = "could not check for a running cloudflared (pgrep unavailable); refusing to \
+                       proceed rather than risk overwriting an existing tunnel — verify manually \
+                       that no cloudflared is running, or install pgrep, then re-run."
+                .to_string();
+            if dry {
+                rep.skipped.push(format!("would refuse: {msg}"));
+            } else {
+                rep.errors.push(msg);
+            }
+            return false;
+        }
     }
 
     if dry {
@@ -1169,7 +1222,8 @@ pub(crate) mod fake {
         pub paths: HashSet<String>,
         pub files: HashMap<String, String>,
         pub ok: HashMap<String, String>, // "program a b" -> stdout
-        pub err: HashSet<String>,        // "program a b" that fail
+        pub err: HashSet<String>,        // "program a b" that fail with a generic error
+        pub err_msg: HashMap<String, String>, // "program a b" -> exact error string (e.g. "spawn …")
         pub calls: Mutex<Vec<String>>,
         pub writes: Mutex<Vec<(String, String)>>,
     }
@@ -1191,6 +1245,9 @@ pub(crate) mod fake {
         async fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
             let k = FakeSys::key(program, args);
             self.calls.lock().unwrap().push(k.clone());
+            if let Some(msg) = self.err_msg.get(&k) {
+                return Err(msg.clone());
+            }
             if self.err.contains(&k) {
                 return Err(format!("fake error: {k}"));
             }
@@ -1227,6 +1284,35 @@ mod tests {
         let mut absent = FakeSys::default();
         absent.err.insert(FakeSys::key("id", &["-u", "rpi-agent"]));
         assert!(!user_exists(&absent, "rpi-agent").await);
+    }
+
+    #[tokio::test]
+    async fn cloudflared_running_maps_run_outcomes() {
+        // Ok(_) -> a cloudflared process exists
+        let mut sys = FakeSys::default();
+        sys.ok
+            .insert(FakeSys::key("pgrep", &["-x", "cloudflared"]), "4321".into());
+        assert_eq!(cloudflared_running(&sys).await, CloudflaredState::Running);
+
+        // Err(non-spawn) -> pgrep ran, no match
+        let mut sys = FakeSys::default();
+        sys.err
+            .insert(FakeSys::key("pgrep", &["-x", "cloudflared"]));
+        assert_eq!(
+            cloudflared_running(&sys).await,
+            CloudflaredState::NotRunning
+        );
+
+        // Err("spawn …") -> pgrep not installed
+        let mut sys = FakeSys::default();
+        sys.err_msg.insert(
+            FakeSys::key("pgrep", &["-x", "cloudflared"]),
+            "spawn pgrep: No such file or directory".into(),
+        );
+        assert_eq!(
+            cloudflared_running(&sys).await,
+            CloudflaredState::Undetermined
+        );
     }
 
     #[tokio::test]
@@ -1297,6 +1383,9 @@ mod tests {
         );
         sys.ok
             .insert(FakeSys::key("docker", &["compose", "version"]), "v2".into());
+        // Clean host: no foreign cloudflared running (Part A guard sees NotRunning).
+        sys.err
+            .insert(FakeSys::key("pgrep", &["-x", "cloudflared"]));
         sys
     }
 
@@ -2600,6 +2689,115 @@ ingress:\n  - hostname: board.example.com\n    service: http://127.0.0.1:8001\n 
             rep.skipped.iter().any(|s| s.contains("agent.toml")),
             "{:?}",
             rep.skipped
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_refuses_when_foreign_cloudflared_running() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let mut sys = fresh_sys();
+        // cloudflared installed (binary step skips) and running (foreign).
+        sys.ok.insert(
+            FakeSys::key("cloudflared", &["--version"]),
+            "2024.1.0".into(),
+        );
+        sys.err
+            .remove(&FakeSys::key("pgrep", &["-x", "cloudflared"]));
+        sys.ok
+            .insert(FakeSys::key("pgrep", &["-x", "cloudflared"]), "4321".into());
+        let cf = MockCloudflareApi::new(); // no expectations: tunnel API must not be called
+        let mut rep = SetupReport::default();
+        let opts = CloudflaredBootstrap {
+            tunnel_name: "myboard".into(),
+            zone: "example.com".into(),
+        };
+        let adopted = cloudflared_bootstrap_full(&sys, &cf, &opts, false, &mut rep).await;
+        assert!(!adopted);
+        assert!(
+            rep.errors
+                .iter()
+                .any(|e| e.contains("already running") && e.contains("refusing")),
+            "{:?}",
+            rep.errors
+        );
+        assert!(
+            sys.writes.lock().unwrap().is_empty(),
+            "guard must write nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_dry_run_refuses_when_foreign_cloudflared_running() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let mut sys = fresh_sys();
+        sys.err
+            .remove(&FakeSys::key("pgrep", &["-x", "cloudflared"]));
+        sys.ok
+            .insert(FakeSys::key("pgrep", &["-x", "cloudflared"]), "4321".into());
+        let cf = MockCloudflareApi::new();
+        let mut rep = SetupReport::default();
+        let opts = CloudflaredBootstrap {
+            tunnel_name: "myboard".into(),
+            zone: "example.com".into(),
+        };
+        let adopted = cloudflared_bootstrap_full(&sys, &cf, &opts, true, &mut rep).await;
+        assert!(!adopted);
+        assert!(
+            rep.skipped.iter().any(|s| s.starts_with("would refuse:")),
+            "{:?}",
+            rep.skipped
+        );
+        assert!(rep.errors.is_empty());
+        assert!(sys.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_refuses_when_pgrep_unavailable() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let mut sys = fresh_sys();
+        sys.err
+            .remove(&FakeSys::key("pgrep", &["-x", "cloudflared"]));
+        sys.err_msg.insert(
+            FakeSys::key("pgrep", &["-x", "cloudflared"]),
+            "spawn pgrep: No such file or directory".into(),
+        );
+        let cf = MockCloudflareApi::new();
+        let mut rep = SetupReport::default();
+        let opts = CloudflaredBootstrap {
+            tunnel_name: "myboard".into(),
+            zone: "example.com".into(),
+        };
+        let adopted = cloudflared_bootstrap_full(&sys, &cf, &opts, false, &mut rep).await;
+        assert!(!adopted);
+        assert!(
+            rep.errors.iter().any(|e| e.contains("pgrep unavailable")),
+            "{:?}",
+            rep.errors
+        );
+        assert!(sys.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn adoption_runs_even_with_a_cloudflared_already_running() {
+        use pi_domain::contracts::MockCloudflareApi;
+        let mut sys = adoption_sys(MANUAL_CONFIG_UUID);
+        sys.paths
+            .insert("/var/lib/rpi/cloudflared/creds.json".into());
+        // A cloudflared is running, but config.yml is present -> the adoption
+        // branch runs first and the fresh-path guard never fires.
+        sys.err
+            .remove(&FakeSys::key("pgrep", &["-x", "cloudflared"]));
+        sys.ok
+            .insert(FakeSys::key("pgrep", &["-x", "cloudflared"]), "4321".into());
+        let cf = MockCloudflareApi::new();
+        let mut rep = SetupReport::default();
+        let adopted =
+            cloudflared_bootstrap_full(&sys, &cf, &adoption_opts(), false, &mut rep).await;
+        assert!(adopted, "config.yml present -> adoption");
+        assert!(
+            !rep.errors.iter().any(|e| e.contains("refusing")),
+            "guard must not fire on adoption: {:?}",
+            rep.errors
         );
     }
 
