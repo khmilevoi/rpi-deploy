@@ -49,3 +49,26 @@ test('runtime builds one current rpi binary and contains required target tools',
   assert.match(git, /git daemon/);
   assert.match(git, /fixture\.git/);
 });
+
+test('outer Compose isolates DinD and preserves the target loopback model', async () => {
+  const compose = await read('tests/e2e/compose.yaml');
+  assert.match(compose, /privileged: true/);
+  assert.equal((compose.match(/privileged: true/g) || []).length, 1);
+  assert.match(compose, /127\.0\.0\.1:2375/);
+  assert.match(compose, /network_mode: service:dind/);
+  assert.match(compose, /aliases:\s*\n\s*- target/);
+  assert.match(compose, /condition: service_completed_successfully/);
+  assert.match(compose, /condition: service_healthy/);
+  assert.doesNotMatch(compose, /\/var\/run\/docker\.sock/);
+  assert.doesNotMatch(compose, /^\s{4}ports:/m);
+  const targetBlock = /^  target:\s*$([\s\S]*?)^  git-fixture:\s*$/m.exec(compose)?.[1] || '';
+  assert.match(targetBlock, /ssh-public:\/run\/e2e-public:ro/);
+  assert.doesNotMatch(targetBlock, /ssh-private/);
+});
+
+test('Compose service names match the launcher contract', async () => {
+  const compose = await read('tests/e2e/compose.yaml');
+  for (const service of ['keygen', 'dind', 'target', 'git-fixture', 'client']) {
+    assert.match(compose, new RegExp(`^  ${service}:`, 'm'));
+  }
+});

@@ -1,0 +1,118 @@
+x-runtime: &runtime
+  image: ${RPI_E2E_RUNTIME_IMAGE:?RPI_E2E_RUNTIME_IMAGE must be set by run.mjs}
+  build:
+    context: ../..
+    dockerfile: tests/e2e/Dockerfile
+
+services:
+  keygen:
+    <<: *runtime
+    network_mode: none
+    command:
+      - bash
+      - -ceu
+      - |
+        rm -f /run/e2e-keys/id_ed25519 /run/e2e-keys/id_ed25519.pub
+        rm -f /run/e2e-public/id_ed25519.pub
+        ssh-keygen -q -t ed25519 -N '' -f /run/e2e-keys/id_ed25519
+        chmod 0600 /run/e2e-keys/id_ed25519
+        install -m 0644 /run/e2e-keys/id_ed25519.pub /run/e2e-public/id_ed25519.pub
+    volumes:
+      - ssh-private:/run/e2e-keys
+      - ssh-public:/run/e2e-public
+
+  dind:
+    image: docker:28-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+      DOCKER_HOST: tcp://127.0.0.1:2375
+    command:
+      - --host=tcp://127.0.0.1:2375
+    volumes:
+      - dind-data:/var/lib/docker
+    networks:
+      e2e:
+        aliases:
+          - target
+    healthcheck:
+      test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    stop_grace_period: 10s
+
+  target:
+    <<: *runtime
+    network_mode: service:dind
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      dind:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://127.0.0.1:2375
+      RUST_LOG: info
+    command: ["/opt/e2e/target-entrypoint.sh"]
+    volumes:
+      - ssh-public:/run/e2e-public:ro
+      - agent-data:/var/lib/rpi
+      - ./agent.toml:/etc/rpi/agent.toml:ro
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -ec
+        - >-
+          curl --fail --silent --unix-socket /run/rpi/agent.sock
+          http://localhost/v1/version >/dev/null &&
+          docker info >/dev/null &&
+          exec 3<>/dev/tcp/127.0.0.1/22
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    stop_grace_period: 10s
+
+  git-fixture:
+    <<: *runtime
+    command: ["/opt/e2e/git-entrypoint.sh"]
+    networks:
+      - e2e
+    healthcheck:
+      test: ["CMD-SHELL", "git ls-remote git://127.0.0.1/fixture.git HEAD >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  client:
+    <<: *runtime
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      target:
+        condition: service_healthy
+      git-fixture:
+        condition: service_healthy
+    environment:
+      HOME: /tmp/rpi-e2e-home
+      NO_COLOR: "1"
+    working_dir: /opt/e2e/fixtures/app
+    command: ["/opt/e2e/scenario.sh"]
+    networks:
+      - e2e
+    volumes:
+      - ssh-private:/run/e2e-keys:ro
+      - type: bind
+        source: ${RPI_E2E_ARTIFACT_DIR:?RPI_E2E_ARTIFACT_DIR must be set by run.mjs}
+        target: /artifacts
+
+networks:
+  e2e:
+
+volumes:
+  agent-data:
+  dind-data:
+  ssh-private:
+  ssh-public:
