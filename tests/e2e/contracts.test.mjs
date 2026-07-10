@@ -117,3 +117,23 @@ test('dev profile provides an exec-able client and stays out of the CI path', as
   assert.match(pkg, /"e2e:dev:up": "node tests\/e2e\/run\.mjs --dev-up"/);
   assert.match(pkg, /"e2e:dev:down": "node tests\/e2e\/run\.mjs --dev-down"/);
 });
+
+test('CI runs the e2e gate with Buildx cache and failure-only artifacts', async () => {
+  const workflow = await read('.github/workflows/ci.yml');
+  assert.match(workflow, /branches: \[master\]/);
+  assert.match(workflow, /^  pull_request:\s*$/m);
+  assert.match(workflow, /permissions:\s*\n  contents: read/);
+  assert.match(workflow, /^  e2e:\s*$/m);
+  assert.match(workflow, /needs: linux/);
+  assert.match(workflow, /runs-on: ubuntu-latest/);
+  assert.match(workflow, /timeout-minutes: 30/);
+  assert.match(workflow, /docker\/setup-buildx-action@v4/);
+  assert.match(workflow, /docker\/build-push-action@v7/);
+  assert.match(workflow, /cache-from: type=gha,scope=rpi-e2e/);
+  assert.match(workflow, /cache-to: type=gha,mode=max,scope=rpi-e2e,ignore-error=true/);
+  assert.match(workflow, /RPI_E2E_PREBUILT: "1"/);
+  assert.match(workflow, /npm run test:e2e/);
+  assert.match(workflow, /if: failure\(\)/);
+  assert.match(workflow, /actions\/upload-artifact@v7/);
+  assert.doesNotMatch(workflow, /runs-on: self-hosted/);
+});
