@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use pi_domain::contracts::LogSink;
-use pi_domain::entities::{DeploymentStatus, SecretsBundle};
+use pi_domain::entities::{DeploymentStatus, SecretsBundle, StageEvent};
 
 /// Secret values shorter than this are not masked — filters out false
 /// positives like `true`/`3000` (§8.1, §22).
@@ -59,6 +59,14 @@ impl LogSink for MaskingSink {
 
     fn finished(&self, status: DeploymentStatus) {
         self.inner.finished(status);
+    }
+
+    fn stage(&self, ev: &StageEvent) {
+        self.inner.stage(ev);
+    }
+
+    fn summary(&self, services: usize) {
+        self.inner.summary(services);
     }
 }
 
@@ -123,5 +131,18 @@ mod tests {
             *inner.finished.lock().unwrap(),
             vec![DeploymentStatus::Success]
         );
+    }
+
+    #[test]
+    fn stage_and_summary_pass_through_unmasked() {
+        use pi_domain::entities::{StageEvent, StageStatus};
+        let inner = CollectSink::new();
+        let sink = MaskingSink::new(inner.clone());
+        sink.stage(&StageEvent::started("fetch"));
+        sink.summary(3);
+        let stages = inner.stages.lock().unwrap();
+        assert_eq!(stages[0].stage, "fetch");
+        assert_eq!(stages[0].status, StageStatus::Started);
+        assert_eq!(*inner.summaries.lock().unwrap(), vec![3]);
     }
 }
