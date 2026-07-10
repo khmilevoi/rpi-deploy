@@ -8,7 +8,7 @@ containers.
 
 Website: https://rpi.iiskelo.com
 
-Status: v0.17 (Cloudflare token file/stdin input + ingress half-state detection) —
+Status: v0.17.1 (`rpi doctor` cloudflared-service check fix) —
 everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
@@ -62,7 +62,9 @@ install is refused when a foreign tunnel is already running on the host;
 `rpi doctor` now flags ingress half-states such as a connector that's down or
 a route that's missing; and the agent injects `DBUS_SESSION_BUS_ADDRESS`
 alongside `XDG_RUNTIME_DIR` so `cloudflared` restarts no longer fail on
-systems that need it).
+systems that need it), and v0.17.1 fixes `rpi doctor`'s `cloudflared service`
+check reporting a false failure over SSH sessions that don't already export
+`XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`, even when the unit is active.
 
 Supported features:
 
