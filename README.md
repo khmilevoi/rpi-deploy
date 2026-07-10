@@ -1,225 +1,202 @@
-# rpi-deploy
+<div align="center">
 
-`rpi` (package `rpi-deploy`) is a deployment tool for Docker Compose projects
-on Raspberry Pi. The Pi runs an agent, while the CLI runs on a developer
-machine or in CI. The CLI connects to the agent through an SSH tunnel; the
-agent clones the Git repository, builds the Compose stack, and starts the
-containers.
+<img src="assets/logo.svg" width="120" alt="rpi — raspberry triangle logo">
 
-Website: https://rpi.iiskelo.com
+# rpi
 
-Status: v0.19.0 (deploy-key preflight watches for gh login) —
-everything from v0.1–v0.6 (deploy/secrets/
-ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
-`rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
-`npm install -g rpi-deploy` for both roles), v0.7 prebuilt binaries
-(GitHub Actions builds `rpi` for Windows x64, Linux x64, and Linux aarch64 on
-every release tag, and `npm install` downloads the matching binary in seconds
-instead of compiling for ~10 minutes; building from source remains the
-fallback everywhere else, see "Build And Install The Binary" below), `[commands]`
-/ `rpi command` for one-off admin commands in the service container,
-`[secrets].files` for delivering arbitrary secret files (certs, keys)
-alongside the env file, v0.10 per-command service override (`[commands]`
-entries can target a different Compose service than the project default),
-and v0.11 colorful console output (colored semantic messages, tables for
-`rpi ls`/`status`/`stats`, spinners, and a bordered scrolling log pane for
-`rpi deploy`/`rpi command` streaming output, with v0.11.1 fixing a log pane
-flicker and preserving streamed color), and v0.12 semantic console colours
-(a shared palette drives message markers, cyan table headers with
-status/usage-colored cells, the spinner glyph, and the log-pane frame — grey
-while streaming, red with a full-log dump on failure — and `rpi command` now
-keeps its streamed output on screen after a successful run instead of
-clearing it), and v0.13 Cloudflare Tunnel auto-bootstrap (`rpi agent setup`
-with a Cloudflare API token and a domain installs `cloudflared`, creates or
-adopts the tunnel and DNS record entirely through the Cloudflare API — no
-`cloudflared tunnel login`, no `cert.pem` — and writes a validated
-`config.yml`; the agent degrades to disabled ingress instead of failing to
-start when the token is missing or misconfigured) plus a unified
-`rpi agent migrate` framework (detects pending internal migrations, tracks
-applied ones in a ledger in `state.db`; the existing `pi`-to-`rpi` rename now
-runs through it), and v0.14 a themed console layer (a single theme object now
-drives every colour and marker glyph in `rpi`'s output — messages, tables,
-the spinner, and the log pane; the default `raspberry` theme brands every
-message line with a raspberry `▸` marker and the site's green/amber palette,
-switchable to the pre-brand `classic` look via `PI_THEME=classic`), and v0.15
-adoption of hand-built cloudflared tunnels plus loud manual-ingress signals
-(`rpi agent setup` can now adopt a tunnel and `config.yml` that were created
-outside `rpi` without rewriting them or causing downtime; deploys and
-`rpi doctor` now warn loudly when a project declares a public hostname but
-ingress is disabled, so a manually-managed route is never silently
-mismatched; and the agent sets `XDG_RUNTIME_DIR` before restarting
-`cloudflared` so the restart no longer fails on systems that need it), and
-v0.16 a raspberry triangle brand banner (a pink-to-raspberry gradient logo on
-`rpi deploy`, bare `rpi`, and `rpi --version`, gated to interactive terminals
-and degrading cleanly under `NO_COLOR`/non-unicode/piped output; `rpi deploy`
-now ends with a result stamp showing status, project, ingress URL, and
-elapsed time; and table cells render the exact brand colour on
-`COLORTERM=truecolor`/`24bit` terminals instead of the nearest 256-colour
-approximation), and v0.17 hardened Cloudflare Tunnel setup (`rpi agent setup`
-accepts the Cloudflare API token via `--cf-token-file` or stdin instead of an
-inline `--cf-token` argument, which is now deprecated; a fresh `cloudflared`
-install is refused when a foreign tunnel is already running on the host;
-`rpi doctor` now flags ingress half-states such as a connector that's down or
-a route that's missing; and the agent injects `DBUS_SESSION_BUS_ADDRESS`
-alongside `XDG_RUNTIME_DIR` so `cloudflared` restarts no longer fail on
-systems that need it), v0.17.1 fixes `rpi doctor`'s `cloudflared service`
-check reporting a false failure over SSH sessions that don't already export
-`XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`, even when the unit is active,
-and v0.18.0 two features: a deploy pipeline view (`rpi deploy` now renders
-each stage (`fetch → build → start → health → route → gc`) as a collapsing
-timed pane with a `✓ build (48.3s)` summary per stage and a service count in
-the final stamp; older CLI/agent combinations keep the previous single-pane
-view), and a deploy-key preflight (first deploy of a private SSH repo no
-longer fails on a missing deploy key: `rpi deploy` now verifies repo access
-before starting the pipeline; if the agent can't read the repo it registers a
-read-only deploy key through your local `gh` automatically — the token never
-leaves your machine, the private key never leaves the Pi — or, without `gh`,
-prints the public key with instructions and continues by itself once you add
-it, polling every 5 s for up to 10 min; `--no-gh-key` skips the GitHub API
-path; old agents skip the preflight, and the fetch stage still prints the key
-hint there), and v0.19.0 a gh-login watch during that preflight (while
-`rpi deploy` waits for a manually-added deploy key, it now also watches for a
-background `gh auth login`; logging in mid-wait auto-registers the key and
-continues the deploy on the next poll, so you no longer have to cancel and
-re-run — `--no-gh-key` still skips the GitHub path).
+**Deploy anything to your Pi.**
 
-Supported features:
+[![npm](https://img.shields.io/npm/v/rpi-deploy?color=C51A4A&label=npm)](https://www.npmjs.com/package/rpi-deploy)
+[![ci](https://github.com/khmilevoi/rpi-deploy/actions/workflows/ci.yml/badge.svg)](https://github.com/khmilevoi/rpi-deploy/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-- `rpi deploy`;
-- `rpi deploy --cancel`;
-- `rpi ls`;
-- `rpi secrets send`;
-- `rpi secrets ls`;
-- `rpi gc`;
-- `rpi command` (run `[commands]` entries in the service container);
-- `rpi logs <project> [-f]`;
-- `rpi stats [project]`;
-- `rpi start|stop|restart <project>`;
-- `rpi rm <project> [--volumes]`;
-- `rpi status`;
-- `rpi doctor`;
-- `rpi agent status`;
-- `rpi agent logs [-f] [--since 2h]`;
-- `rpi setup`;
-- `rpi init`;
-- `rpi agent setup`;
-- `rpi agent uninstall`;
-- `rpi agent migrate [--list] [--dry-run] [--run <id>] [--all --yes]`;
-- stable host port allocation;
-- Docker Compose overrides;
-- health checks;
-- a latest-wins deployment queue;
-- encrypted secrets bundles (environment and files);
-- optional Cloudflare Tunnel ingress automation.
+[rpi.iiskelo.com](https://rpi.iiskelo.com) · [Releases](https://github.com/khmilevoi/rpi-deploy/releases) · [Quick Start](#quick-start) · [Commands](#commands) · [`rpi.toml`](#project-configuration-rpitoml)
 
-## Runtime Model
+</div>
 
-`rpi` has two parts:
+---
 
-- `rpi agent run` is a daemon on the Raspberry Pi, usually managed by `systemd`.
-  It stores state in SQLite, selects a stable host port, writes a Compose
-  override, runs `docker compose build`, and then runs
-  `docker compose up -d --remove-orphans`.
-- `rpi deploy`, `rpi ls`, `rpi secrets ...`, and `rpi gc` are client commands that run
-  on a developer machine or CI runner. They open an SSH tunnel to the agent's
-  Unix socket.
+`rpi` (npm package [`rpi-deploy`](https://www.npmjs.com/package/rpi-deploy)) deploys Docker Compose projects from Git to a Raspberry Pi — or any Linux host with `systemd`. An agent runs on the Pi; the CLI runs on your machine or in CI and reaches the agent through an SSH tunnel to a Unix socket, so the Pi exposes nothing but SSH. On `rpi deploy` the agent clones or fetches the repository, builds the Compose stack, starts the containers, runs a health check, and — if configured — publishes the service to the internet through a Cloudflare Tunnel.
 
-Each deployable project must contain a `rpi.toml` file. Run `rpi deploy` from the
-root of the project you want to deploy, not necessarily from the root of this
-repository.
+```text
+░░
+▒▒▒▒    r p i
+▓▓▓▓▓▓  deploy · myboard
+▓▓▓▓
+██
 
-## Requirements
+✓ fetch (2.1s)
+✓ build (48.3s)
+✓ start (5.6s)
+✓ health (1.2s)
+✓ route (0.8s)
+✓ gc (0.3s)
 
-On the Raspberry Pi:
-
-- Raspberry Pi OS 64-bit, or another Linux system with `systemd`.
-- SSH access from the developer machine or CI.
-- `git`.
-- Docker Engine.
-- Docker Compose plugin, available as `docker compose`.
-- Rust toolchain, only if building the binary directly on the Pi.
-
-On the developer machine:
-
-- Git.
-- OpenSSH client: `ssh`, `scp`.
-- Rust toolchain, if installing the CLI from source.
-
-Check the Pi:
-
-```bash
-docker --version
-docker compose version
-git --version
+▸ deployed ✓ myboard  →  https://myboard.example.com · 2 services (58.4s)
 ```
 
-## Prepare The Raspberry Pi
+## Highlights
 
-Install base packages:
+- **One-command setup** — `sudo rpi agent setup` bootstraps the Pi (user, dirs, systemd unit); `rpi setup` and `rpi init` wizards configure the client and the project.
+- **No open ports** — the CLI tunnels over your existing SSH access; the agent listens on a Unix socket only.
+- **Staged pipeline view** — `fetch → build → start → health → route → gc`, each stage collapsing into a timed `✓ build (48.3s)` summary.
+- **Private repos without friction** — a deploy-key preflight verifies repo access before the pipeline and registers a read-only deploy key through your local `gh` (the token never leaves your machine, the private key never leaves the Pi). Without `gh` it prints the key and continues by itself once you add it — even picking up a `gh auth login` you run mid-wait.
+- **Encrypted secrets** — `.env` plus arbitrary secret files, sent encrypted, stored age-encrypted on the agent, written `0600` into the checkout at deploy time.
+- **Cloudflare Tunnel ingress** — one command installs `cloudflared`, creates or adopts the tunnel, and manages DNS entirely through the Cloudflare API. Hand-built tunnels are adopted without a rewrite or downtime.
+- **Stable ports & health checks** — the agent allocates a stable host port per project, writes a Compose override, and probes HTTP (or TCP) before declaring success.
+- **Latest-wins deploy queue** — a newer deploy supersedes the one in flight; `rpi deploy --cancel` aborts.
+- **Admin commands** — declare `[commands]` in `rpi.toml` and run them inside the service container with `rpi command`.
+- **Ops built in** — `rpi logs`, `rpi stats`, `rpi status`, `rpi doctor`, `rpi agent logs`, `rpi gc`.
+- **Fast install** — `npm install -g rpi-deploy` downloads a checksum-verified prebuilt binary (Windows x64, Linux x64/aarch64) in seconds, falling back to a source build elsewhere.
 
-```bash
-sudo apt update
-sudo apt install -y git curl build-essential pkg-config
-```
+## Quick Start
 
-Install Docker:
+**1. On the Raspberry Pi** (Docker and Node.js ≥ 18 are the prerequisites):
 
 ```bash
 curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker "$USER"
+sudo apt-get install -y nodejs npm
+
+sudo npm install -g rpi-deploy   # prebuilt arm64 binary — seconds, not minutes
+sudo rpi agent setup             # user, dirs, systemd unit; idempotent
+rpi doctor                       # verify the installation
 ```
 
-After adding the user to the `docker` group, open a new SSH session and check:
+**2. On the developer machine:**
 
 ```bash
-docker ps
-docker compose version
+npm install -g rpi-deploy
+rpi setup                        # wizard: SSH profile for your Pi
 ```
 
-If `docker ps` still requires `sudo`, the current session has not picked up the
-new group membership.
-
-## Configure SSH
-
-Create a key on the developer machine.
-
-PowerShell:
-
-```powershell
-ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\id_ed25519_pi
-type $env:USERPROFILE\.ssh\id_ed25519_pi.pub
-```
-
-Unix shell:
+**3. In the project you want to deploy:**
 
 ```bash
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_pi
-cat ~/.ssh/id_ed25519_pi.pub
+rpi init                         # wizard: generates rpi.toml
+rpi secrets send                 # only if the project needs secrets
+rpi deploy
 ```
 
-Add the public key to `~/.ssh/authorized_keys` for the Pi user that the CLI will
-use for SSH:
+That's it — `rpi ls` shows the project, its host port, and its public hostname if one is configured.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `rpi deploy [--ref <git-ref>] [--no-gh-key]` | Deploy the current project (reads `./rpi.toml`) |
+| `rpi deploy --cancel` | Cancel active deploys of the current project |
+| `rpi ls` (alias: `rpi ps`) | List projects on the agent |
+| `rpi logs <project> [-f] [--tail N]` | Stream container logs |
+| `rpi stats [project] [--json]` | Live CPU / memory / disk metrics |
+| `rpi start\|stop\|restart <project>` | Manage containers without a rebuild |
+| `rpi rm <project> [--volumes]` | Remove a project |
+| `rpi status [--json]` | Agent and host overview |
+| `rpi doctor` | Environment self-diagnosis |
+| `rpi gc` | Prune Docker images and build cache on the Pi |
+| `rpi command [name] [-- <args>]` | Run a `[commands]` entry in the service container; no name lists them |
+| `rpi secrets send [--apply]` | Send the env file and secret files (encrypted at rest) |
+| `rpi secrets ls` | List stored env keys and file paths (values are never transmitted) |
+| `rpi setup` | Wizard: server profile + SSH key + client config |
+| `rpi init` | Wizard: generate `rpi.toml` in the current project |
+| `rpi agent setup` | Bootstrap the agent on the Pi (run with `sudo`; idempotent) |
+| `rpi agent status` / `rpi agent logs [-f] [--since 2h]` | Agent health and logs (falls back to `systemctl`/`journalctl` over SSH) |
+| `rpi agent migrate [--list] [--dry-run] [--run <id>] [--all --yes]` | Host-level migrations |
+| `rpi agent uninstall [--purge]` | Remove the agent (keeps data unless `--purge`) |
+
+Every client command accepts `--server <profile>` to pick a configured server, or `--host`/`--user`/`--key` to connect without a config file.
+
+## How It Works
+
+```text
+developer machine / CI                      Raspberry Pi
+┌──────────────────┐                 ┌────────────────────────────────┐
+│    rpi  (CLI)    │    ssh tunnel   │      rpi agent  (systemd)      │
+│  reads rpi.toml  ├────────────────▶│  /run/rpi/agent.sock           │
+└──────────────────┘                 │  SQLite state · port allocator │
+                                     │  git fetch → compose build     │
+                                     │  → up -d → health → ingress    │
+                                     └────────────────────────────────┘
+```
+
+- `rpi agent run` is a daemon on the Pi, managed by `systemd`. It stores state in SQLite, selects a stable host port from `port_min..port_max`, writes a Compose override binding `127.0.0.1:<host-port>`, runs `docker compose build`, then `docker compose up -d --remove-orphans`, and health-checks the result.
+- `rpi deploy`, `rpi ls`, `rpi secrets …`, and the other client commands run on a developer machine or CI runner and open an SSH tunnel to the agent's Unix socket.
+- Deployments queue latest-wins: pushing a newer deploy supersedes the one in progress.
+- Each deployable project carries an `rpi.toml` at its root. Run `rpi deploy` from the root of *that* project — not from this repository.
+
+## Installation
+
+Client and agent ship in the same npm package; the role comes from what you run after installing. On install the package downloads a prebuilt binary from the matching GitHub Release (Windows x64, Linux x64, Linux aarch64) and verifies its SHA-256 checksum. On other platforms, or when the download fails, it builds the bundled Rust sources (`cargo build --release --locked`; rustup is installed automatically if needed). Set `RPI_DEPLOY_BUILD_FROM_SOURCE=1` to force the source build. Installing with `--ignore-scripts` leaves the CLI unusable — as does npm's `allow-scripts` gate on recent versions, see [Troubleshooting](#troubleshooting).
+
+Update on both roles:
 
 ```bash
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-nano ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
+npm install -g rpi-deploy@latest  # with sudo on the Pi, unless npm is nvm-managed
+sudo rpi agent setup              # Pi only: swaps the binary and restarts the agent
 ```
 
-Test from the developer machine:
+> [!NOTE]
+> If Node.js comes from `nvm` (or another per-user version manager), `sudo npm`/`sudo rpi` won't be found — `sudo` resets `PATH`. Install without `sudo` and forward `PATH` for the one command that needs root:
+>
+> ```bash
+> npm install -g rpi-deploy
+> sudo env "PATH=$PATH" rpi agent setup
+> ```
+>
+> `agent setup` self-installs the binary to `/usr/local/bin/rpi`, which is on root's default `PATH`, so every later `sudo rpi …` works without the wrapper.
+
+Upgrading from v0.5? The command was renamed `pi` → `rpi` and the project config `pi.toml` → `rpi.toml` (hard cutover). See [docs/migration-v0.5-to-v0.6.md](docs/migration-v0.5-to-v0.6.md).
+
+<details>
+<summary><b>Build from source</b> (instead of npm)</summary>
+
+**On the Pi** (simple, but slow on smaller boards):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+git clone https://github.com/khmilevoi/rpi-deploy.git
+cd rpi-deploy
+cargo build --release
+sudo install -m 755 target/release/rpi /usr/local/bin/rpi
+```
+
+**Cross-build on the developer machine:**
+
+```bash
+cargo install cross
+cross build --release --target aarch64-unknown-linux-gnu
+scp target/aarch64-unknown-linux-gnu/release/rpi pi-user@pi-host.local:/tmp/rpi
+# then on the Pi:
+sudo install -m 755 /tmp/rpi /usr/local/bin/rpi
+```
+
+**CLI on the developer machine:**
+
+```bash
+cargo install --path crates/bin --locked
+```
+
+If `rpi` is not found afterwards, add `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows) to `PATH`.
+
+</details>
+
+<details>
+<summary><b>SSH access</b> — creating and installing a key</summary>
+
+The CLI needs passwordless SSH to the Pi. Create a key on the developer machine:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_pi        # PowerShell: $env:USERPROFILE\.ssh\id_ed25519_pi
+```
+
+Append the public key to `~/.ssh/authorized_keys` on the Pi (for the user the CLI will log in as), then test:
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_pi pi-user@pi-host.local true
 ```
 
-Replace `pi-user` and `pi-host.local` with the user and host for your Pi. The
-`true` command does nothing and exits successfully, which makes it useful for
-testing SSH key access.
-
-If the key uses a non-default filename, you can add an SSH profile:
+Optionally add an SSH profile:
 
 ```sshconfig
 Host pi-home
@@ -229,178 +206,245 @@ Host pi-home
     IdentitiesOnly yes
 ```
 
-Test it:
+</details>
 
-```bash
-ssh pi-home true
+## Client Configuration
+
+The CLI reads its config from the user config directory:
+
+- Windows: `%APPDATA%\pi\config.toml`
+- macOS/Linux: `~/.config/pi/config.toml`
+
+`rpi setup` creates this file for you; the format is:
+
+```toml
+default = "home"
+
+[servers.home]
+host = "pi-host.local"
+user = "pi-user"
+key = "~/.ssh/id_ed25519_pi"
 ```
 
-## Install Via npm
+Select a profile per invocation with `--server home` or `PI_SERVER=home`; skip the file entirely with `--host`/`--user`/`--key` (useful in CI). Check the connection with `rpi ls` — with no projects deployed yet it prints `▸ no projects deployed yet`.
 
-Client and agent are the same package; the role comes from what you run after
-installing. Node.js >= 18 and npm are required (on Raspberry Pi OS:
-`sudo apt-get install -y nodejs npm`).
+### Console theme
 
-Developer machine (Linux/macOS/Windows):
+Output uses the raspberry brand theme: a `▸` marker on every message line, the site's green/amber for success/warn, and a pink-to-raspberry triangle banner on `rpi deploy`, bare `rpi`, and `rpi --version`. The banner only appears on an interactive terminal — piped and CI output stays plain. On truecolor terminals (`COLORTERM=truecolor`) colours render as the exact brand `#C51A4A`. Set `PI_THEME=classic` for the pre-brand look; `NO_COLOR` and non-TTY output disable styling entirely.
 
-```bash
-npm install -g rpi-deploy
-rpi setup
-rpi init
+## Project Configuration: `rpi.toml`
+
+Add `rpi.toml` to the root of the project you want to deploy (`rpi init` generates it):
+
+```toml
+schema = 1
+
+[project]
+name = "example-web"            # Compose project name and the agent's state key
+
+[source]
+repo = "git@github.com:you/example-web.git"
+branch = "main"                 # default ref for `rpi deploy`
+
+[build]
+compose = "docker-compose.yml"  # Compose file inside the repository
+
+[ingress]
+service = "web"                 # Compose service that receives traffic
+port = 3000                     # port inside the container
+hostname = "app.example.com"    # optional: public ingress (Cloudflare Tunnel)
+# expose = "lan"                # optional: bind 0.0.0.0 instead of 127.0.0.1
+
+[healthcheck]
+path = "/health"                # omit for a plain TCP probe
+expect = "200"
+timeout = "60s"
+
+[secrets]
+env = ".env"                    # optional, default ".env"
+files = [                       # optional; recreated at the same paths on the Pi
+  "certs/server.pem",
+]
+
+[timeouts]                      # optional per-project overrides
+fetch = "3m"
+build = "45m"
+up = "2m"
+# command = "30m"               # for `rpi command`, default 10m
 ```
 
-Raspberry Pi (agent). Docker must already be installed — the install itself
-builds without it, but `rpi agent setup` requires it
-(`curl -fsSL https://get.docker.com | sh`):
+For a worker, bot, or internal service that needs no public HTTP ingress, simply omit `ingress.hostname`.
 
-```bash
-sudo npm install -g rpi-deploy    # downloads a prebuilt arm64 binary, seconds
-sudo rpi agent setup              # installs /usr/local/bin/rpi, unit, start
-rpi doctor
+Field notes:
+
+- `healthcheck.path` is probed through the allocated host port; without a path the agent uses a TCP probe.
+- `secrets.files` are sent encrypted, stored age-encrypted on the agent, and written `0600` into the checkout on every deploy. Paths are relative with forward slashes; `..` is rejected.
+- `expose = "lan"` binds the host port on `0.0.0.0`. On a host with a public IPv4 that means the public internet, and Docker bypasses host firewalls (UFW/iptables) for published ports — use it only on trusted networks or behind an external firewall.
+
+### `[commands]` — admin commands (optional)
+
+One-off admin commands runnable inside the service container with `rpi command`:
+
+```toml
+[commands]
+create-invite = "node scripts/create-invite.js"
+migrate = ["npx", "prisma", "migrate", "deploy"]
+backup = "sh -c 'pg_dump mydb | gzip > /data/backup.gz'"
+
+[commands.seed]                       # table form: pin a different service
+run     = "node dist/scripts/seed.cjs"
+service = "server"                    # optional; omitted => ingress service
 ```
 
-If Node.js comes from `nvm` (or another per-user version manager) rather than
-apt, `sudo` will not find it — `sudo: npm: command not found` / `sudo: rpi:
-command not found`, since `sudo` resets `PATH` before running. Install
-without `sudo` instead (the nvm prefix is already user-writable), and forward
-`PATH` only for the one command that needs root:
+- Values are a string (split with shell-word rules — quotes work, but no variables/pipes/redirects; need a shell? spell out `sh -c '…'`) or an explicit argv array. Names must match `[a-z0-9][a-z0-9_-]*`.
+- Commands are registered on the agent **at deploy time** and run via `docker compose exec -T` in the `ingress.service` container by default. The agent only executes deployed commands — there is no generic remote exec.
+- `rpi command` (no name) lists the deployed commands; extra args after `--` are appended to the declared argv. The remote exit code becomes the `rpi` exit code. Ctrl+C detaches and best-effort kills the run.
 
-```bash
-npm install -g rpi-deploy                  # no sudo: nvm's prefix is user-owned
-sudo env "PATH=$PATH" rpi agent setup      # sudo alone can't find rpi/node
-rpi doctor
+## Docker Compose Requirements
+
+The agent publishes your service by writing an override file:
+
+```yaml
+services:
+  web:
+    ports:
+      - "127.0.0.1:8000:3000"
 ```
 
-`agent setup` self-installs a native binary to `/usr/local/bin/rpi`, already
-on root's default `PATH`; every `sudo rpi ...` call after this one works
-without the `env` wrapper.
+So the production Compose file should **not** pin a fixed host port itself — that can conflict with the agent's allocator or another project on the same Pi. Use `expose`:
 
-Recent npm versions (v11+ observed) also block unreviewed `postinstall`
-scripts by default, printing `npm warn allow-scripts ... not yet covered by
-allowScripts` instead of failing — if `rpi` then reports the binary was never
-built, reinstall with the script allowed:
-
-```bash
-npm install -g --allow-scripts=rpi-deploy rpi-deploy   # add sudo for a system-wide (apt) npm
+```yaml
+services:
+  web:
+    build:
+      context: .
+    expose:
+      - "3000"
 ```
 
-`npm approve-scripts <pkg>` does not work for a global install (`EGLOBAL` — no
-project `package.json` to write to); `--allow-scripts` on the install command,
-or `npm config set allow-scripts=rpi-deploy --location=user` to persist it, is
-the supported path for `-g`.
+For runtime files (logs, SQLite, uploads), mount directories instead of individual files that may not exist in a fresh clone, and git-ignore them:
 
-Update (both roles):
-
-```bash
-npm install -g rpi-deploy@latest  # with sudo on the Pi, unless npm is nvm-managed
-sudo rpi agent setup              # Pi only: swaps the binary and restarts the agent
+```yaml
+services:
+  app:
+    environment:
+      DATABASE_URL: file:///data/app.db
+    volumes:
+      - ./data:/data
 ```
 
-Upgrading from v0.5? The command was renamed `pi` → `rpi` and the project
-config `pi.toml` → `rpi.toml` (hard cutover, no fallback). Follow the
-step-by-step guide for both roles in
-[docs/migration-v0.5-to-v0.6.md](docs/migration-v0.5-to-v0.6.md).
+## Secrets
 
-On install the package downloads a prebuilt binary from the matching GitHub
-Release (Windows x64, Linux x64, Linux aarch64) and verifies its SHA-256
-checksum. On other platforms (macOS, 32-bit ARM), or when the download fails
-(offline, proxy, checksum mismatch), it falls back to building the bundled
-Rust sources (`cargo build --release --locked`); rustup is installed
-automatically when cargo is missing, and the build directory is removed
-afterwards to save disk space. Building on Windows needs the Visual Studio
-Build Tools C++ workload. Set `RPI_DEPLOY_BUILD_FROM_SOURCE=1` to skip the
-download and force the source build. Installing with `--ignore-scripts`
-leaves the CLI unusable (`rpi` will report that the binary was not built) —
-as does npm's `allow-scripts` gate on recent versions, see above.
-
-## Build And Install The Binary
-
-### Option A: Build On The Pi
-
-This is the simplest option, but it can be slow on smaller boards.
+If `rpi.toml` has a `[secrets]` section, send the bundle from the project root before the first deploy:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-
-git clone <this-repository-url> pi
-cd pi
-cargo build --release
-sudo install -m 755 target/release/rpi /usr/local/bin/rpi
+rpi secrets send          # save on the agent; applied by the next deploy
+rpi secrets send --apply  # save and restart the running stack with the new values
+rpi secrets ls            # list stored env keys and file paths (never values)
 ```
 
-Check it:
+The CLI reads the local env file and `[secrets].files`, sends them encrypted, and the agent stores an age-encrypted bundle in `/var/lib/rpi/secrets`. During `rpi deploy` the agent writes them into the project workdir before running Docker Compose.
+
+## Private Git Repositories
+
+The Pi must be able to read `source.repo`. For private repos over SSH, `rpi deploy` runs a **deploy-key preflight** before starting the pipeline:
+
+- With GitHub CLI (`gh`) logged in locally, the CLI registers a read-only deploy key for the repository automatically — the token never leaves your machine, the private key never leaves the Pi.
+- Without `gh`, it prints the agent's public key with instructions and polls every 5 s (up to 10 min) until you add it — and if you run `gh auth login` mid-wait, it switches to automatic registration on the next poll.
+- `--no-gh-key` skips the GitHub API path and always prints the key for manual setup (GitHub: *Repository → Settings → Deploy keys → Add deploy key*; write access is not needed).
+
+## Cloudflare Tunnel
+
+Only needed when the service must be reachable from the internet; outbound-only services can skip this section.
+
+### Automatic setup (recommended)
+
+One command bootstraps everything through the Cloudflare API — no `cloudflared tunnel login`, no `cert.pem`:
 
 ```bash
-rpi --help
+sudo rpi agent setup --with-cloudflared --cf-token-file <path> --domain <zone>
 ```
 
-### Option B: Cross-Build On The Developer Machine
+It installs the `cloudflared` binary for the host's CPU, creates (or adopts) the tunnel, writes the credentials JSON and a validated `config.yml`, fills the `[cloudflare]`/`[cloudflared]` sections of `/etc/rpi/agent.toml`, and enables the `cloudflared` systemd `--user` service. After that every deploy manages tunnel routes and proxied DNS records by itself.
 
-Run these commands from the root of this repository.
+- Pass the token via `--cf-token-file <path>`, `--cf-token-file -` (stdin), or the `CLOUDFLARE_API_TOKEN` environment variable. The inline `--cf-token` flag is deprecated (it leaks via `ps`/shell history).
+- Required token scopes: `Zone:DNS:Edit`, `Zone:Zone:Read`, `Account:Cloudflare Tunnel:Edit`. The account id is derived from the token.
+- `--tunnel <name>` overrides the tunnel name (default: derived from the hostname). `--dry-run` previews the plan.
+- The token is stored at `/var/lib/rpi/cloudflare/token` (`root:rpi-secrets`, mode `0640`).
+- A fresh install is refused when a foreign tunnel is already running on the host.
+
+### Adopting an existing tunnel
+
+If `/var/lib/rpi/cloudflared/config.yml` already exists (a hand-built tunnel), the same command adopts it instead of recreating anything: the existing `config.yml` is **never rewritten** and `cloudflared` is **not restarted** — hand-written routes and uptime are preserved. The tunnel id is taken from the `tunnel:` key, credentials are checked at the `credentials-file:` path, and the agent config is extended so future deploys manage routes and DNS. `Zone:Zone:Read` + `Zone:DNS:Edit` scopes suffice when `tunnel:` holds a UUID.
+
+### Manual ingress
+
+Without a `[cloudflared]` section in `/etc/rpi/agent.toml`, deploys still succeed — the agent logs the address to route manually (`hostname -> http://127.0.0.1:<host-port>`; see the port in `rpi ls`). If a project declares `[ingress] hostname` while agent ingress is disabled, the deploy summary and `rpi doctor` warn loudly so a manually-managed route is never silently mismatched.
+
+<details>
+<summary><b>Manual cloudflared configuration</b> (without the API token)</summary>
+
+A typical locally managed `cloudflared` config:
+
+```yaml
+tunnel: <tunnel-id-or-name>
+credentials-file: /var/lib/rpi/cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: app.example.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404   # must remain the catch-all
+```
+
+To let the agent edit this config and manage DNS itself, add both sections to `/etc/rpi/agent.toml`:
+
+```toml
+[cloudflared]
+config = "/var/lib/rpi/cloudflared/config.yml"
+tunnel = "home"
+restart = ["systemctl", "--user", "restart", "cloudflared"]
+
+[cloudflare]
+zone = "example.com"
+token_file = "/var/lib/rpi/cloudflare/token"
+```
+
+`rpi-agent` must be able to read/write `config.yml`, run the `restart` command without a password prompt, and read `token_file` (a token scoped to DNS edit + tunnel read). DNS records (proxied CNAMEs to `<tunnel-id>.cfargotunnel.com`) go through the Cloudflare API. Both sections are required — with `[cloudflared]` alone, ingress falls back to manual with a warning.
+
+</details>
+
+## Agent Management
+
+`sudo rpi agent setup` is idempotent: it creates the `rpi-agent` system user, directories, the systemd unit, and `/etc/rpi/agent.toml` if missing, repairs permissions, and never touches `secret.key` or `state.db`. Re-running it is always safe; `--dry-run` previews.
+
+Host-level upgrades run through a uniform migration framework:
 
 ```bash
-cargo install cross
-cross build --release --target aarch64-unknown-linux-gnu
-scp target/aarch64-unknown-linux-gnu/release/rpi pi-user@pi-host.local:/tmp/rpi
+rpi agent migrate --list        # every migration and whether it's applied
+rpi agent migrate --dry-run     # plan only
+rpi agent migrate --run <id>    # apply a specific (disruptive) migration
+rpi agent migrate --all --yes   # apply everything pending
 ```
 
-On the Pi:
+Applied migrations are recorded in `state.db` and never re-run. Non-disruptive ones run automatically during `rpi agent setup`; disruptive ones are only reported there and must be applied explicitly. (Currently registered: `pi-to-rpi`, renaming a legacy `pi-agent` install.)
 
-```bash
-sudo install -m 755 /tmp/rpi /usr/local/bin/rpi
-rpi --help
-```
+<details>
+<summary><b>Manual agent install</b> (what <code>rpi agent setup</code> does for you)</summary>
 
-## Quick Setup
-
-On the Pi, after the binary is installed (see above):
-
-```bash
-sudo rpi agent setup
-```
-
-This is idempotent: it creates the `rpi-agent` user, directories, the systemd
-unit, and `/etc/rpi/agent.toml` if missing, repairs `/var/log/rpi`, and never
-touches `secret.key` or `state.db`. On a Pi still running the old `pi-agent`
-identity (v0.5 and earlier v0.6 pre-releases), it converts it to `rpi-agent`
-in place first — renaming the Linux user/group and moving `/var/lib/pi`,
-`/etc/pi`, `/var/log/pi` to their `rpi`-named equivalents (all owned files
-move with their directories, nothing is deleted) — before running the steps
-above. Re-running it is safe. Use `--dry-run` to
-preview, `--with-cloudflared` to scaffold cloudflared.
-
-On the developer machine:
-
-```bash
-rpi setup            # wizard: server profile + SSH key + config.toml
-rpi init             # wizard: generate rpi.toml in the current project
-```
-
-## Install `rpi-agent`
-
-Create the service user:
+Create the service user and directories:
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin rpi-agent || true
 sudo usermod -aG docker rpi-agent
-sudo usermod -aG rpi-agent "$USER"
-```
+sudo usermod -aG rpi-agent "$USER"   # tunnel access to the socket; re-login after
 
-`rpi-agent` runs Docker. The login user is added to the `rpi-agent` group so the
-SSH tunnel can connect to the agent's Unix socket.
-
-Create directories:
-
-```bash
 sudo mkdir -p /var/lib/rpi /etc/rpi
 sudo chown -R rpi-agent:rpi-agent /var/lib/rpi
 ```
 
 Create `/etc/rpi/agent.toml`:
 
-```bash
-sudo tee /etc/rpi/agent.toml >/dev/null <<'EOF'
+```toml
 data_dir = "/var/lib/rpi"
 socket = "/run/rpi/agent.sock"
 port_min = 8000
@@ -415,13 +459,11 @@ up = "5m"
 
 [gc]
 disk_threshold_percent = 85
-EOF
 ```
 
-Create the `systemd` unit:
+Create `/etc/systemd/system/rpi-agent.service`:
 
-```bash
-sudo tee /etc/systemd/system/rpi-agent.service >/dev/null <<'EOF'
+```ini
 [Unit]
 Description=pi deploy agent
 After=network-online.target docker.service
@@ -441,794 +483,108 @@ WorkingDirectory=/var/lib/rpi
 
 [Install]
 WantedBy=multi-user.target
-EOF
+```
 
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now rpi-agent
-systemctl status rpi-agent
 ```
 
-Agent logs:
+`rpi-agent` is intentionally created without a home directory; the `HOME`/`XDG_*` variables keep Docker/BuildKit from writing to a missing `/home/rpi-agent`.
 
-```bash
-journalctl -u rpi-agent -f
-```
-
-After adding the login user to the `rpi-agent` group, open a new SSH session.
-
-`rpi-agent` is intentionally created without a home directory. Agent state lives
-in `/var/lib/rpi`, and the `HOME` and `XDG_*` variables prevent Docker/BuildKit
-from trying to write to a missing `/home/rpi-agent`.
-
-## Install The CLI On A Developer Machine
-
-Run these commands from the root of this repository.
-
-PowerShell:
-
-```powershell
-cargo install --path .\crates\bin --locked
-rpi --help
-```
-
-If `rpi` is not found in the current PowerShell session:
-
-```powershell
-$env:PATH += ";$env:USERPROFILE\.cargo\bin"
-```
-
-Unix shell:
-
-```bash
-cargo install --path crates/bin --locked
-rpi --help
-```
-
-If `rpi` is not found:
-
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-```
-
-For a permanent setup, add that line to your shell startup file.
-
-## Configure A Client Profile
-
-The CLI reads config from the user config directory:
-
-- Windows: `%APPDATA%\pi\config.toml`;
-- macOS/Linux: `~/.config/pi/config.toml`.
-
-PowerShell:
-
-```powershell
-New-Item -ItemType Directory -Force "$env:APPDATA\pi"
-notepad "$env:APPDATA\pi\config.toml"
-```
-
-Unix shell:
-
-```bash
-mkdir -p ~/.config/pi
-nano ~/.config/pi/config.toml
-```
-
-Example:
-
-```toml
-default = "home"
-
-[servers.home]
-host = "pi-host.local"
-user = "pi-user"
-key = "~/.ssh/id_ed25519_pi"
-```
-
-Check it:
-
-```bash
-rpi ls
-```
-
-If no projects have been deployed yet, the expected output is:
-
-```text
-▸ no projects deployed yet
-```
-
-For CI or a one-off command, you can skip the config file:
-
-```bash
-rpi ls --host pi-host.local --user pi-user --key ~/.ssh/id_ed25519_pi
-rpi deploy --host pi-host.local --user pi-user --key ~/.ssh/id_ed25519_pi
-```
-
-Select a specific profile:
-
-```bash
-rpi ls --server home
-PI_SERVER=home rpi ls
-```
-
-### Console theme
-
-`rpi` output uses the brand theme: a raspberry `▸` marker on every message
-line, site green/amber for success/warn. Set `PI_THEME=classic` for the
-pre-brand look (cyan accent, `●` marker). `NO_COLOR`, piping, and non-TTY
-output disable styling entirely, as before.
-
-`rpi deploy`, bare `rpi`, and `rpi --version` show a raspberry triangle logo
-with a vertical gradient. The banner appears only on an interactive terminal —
-piped or CI output stays plain, and `rpi --version | cat` prints just
-`rpi <version>`. On truecolor terminals (`COLORTERM=truecolor`) the logo and
-table colours render as the exact brand `#C51A4A`; elsewhere they use the
-nearest 256-colour. The logo is always raspberry, independent of `PI_THEME`.
-
-## Prepare A Project For Deployment
-
-Add `rpi.toml` to the root of the project you want to deploy.
-
-### Web Service
-
-```toml
-schema = 1
-
-[project]
-name = "example-web"
-
-[source]
-repo = "<git-repository-url>"
-branch = "main"
-
-[build]
-compose = "docker-compose.yml"
-
-[ingress]
-hostname = "app.example.com"
-service = "web"
-port = 3000
-
-[healthcheck]
-path = "/health"
-expect = "200"
-timeout = "60s"
-
-[secrets]
-env = ".env"                     # optional, default ".env"
-files = [                        # optional; recreated at the same paths on the Pi
-  "certs/server.pem",
-]
-```
-
-### Worker, Bot, Or Internal Service
-
-If the service does not need public HTTP ingress, omit `hostname`.
-
-```toml
-schema = 1
-
-[project]
-name = "example-worker"
-
-[source]
-repo = "<git-repository-url>"
-branch = "main"
-
-[build]
-compose = "docker-compose.yml"
-
-[ingress]
-service = "app"
-port = 3000
-
-[healthcheck]
-path = "/health"
-expect = "200"
-timeout = "60s"
-
-[secrets]
-env = ".env"                     # optional, default ".env"
-files = [                        # optional; recreated at the same paths on the Pi
-  "certs/server.pem",
-]
-```
-
-Fields:
-
-- `project.name` is the Compose project name and the state key used by the
-  agent.
-- `source.repo` is the Git URL cloned by the Pi.
-- `source.branch` is the default ref used by `rpi deploy`.
-- `build.compose` is the Compose file inside the project repository.
-- `ingress.service` is the service name in Compose.
-- `ingress.port` is the port inside the container.
-- `ingress.hostname` is optional; use it for public ingress.
-- `healthcheck.path` is the HTTP endpoint checked through the allocated host
-  port. If the path is not set, the agent uses a TCP probe.
-- `secrets.env` is the optional local file read by `rpi secrets send` (default `.env`).
-- `secrets.files` are optional secret files (certs, keys) recreated at the same paths
-  on the Pi on every deploy. Secret files are sent encrypted, stored age-encrypted
-  on the agent, and written 0600 into the checkout; paths are relative, use forward
-  slashes, and `..` is rejected.
-
-Optional per-project timeouts:
-
-```toml
-[timeouts]
-fetch = "3m"
-build = "45m"
-up = "2m"
-```
-
-### `[commands]` — admin commands (optional)
-
-One-off admin commands runnable inside the service container with `rpi command`:
-
-```toml
-[commands]
-create-invite = "node scripts/create-invite.js"
-migrate = ["npx", "prisma", "migrate", "deploy"]
-backup = "sh -c 'pg_dump mydb | gzip > /data/backup.gz'"
-```
-
-- Value: string (split with shell-word rules — quotes work, no variables/pipes/redirects) or an explicit argv array. Need a shell? Spell it out: `sh -c '...'`.
-- Names must match `[a-z0-9][a-z0-9_-]*`.
-- Commands are registered on the agent **at deploy time** and run in the `ingress.service` container by default via `docker compose exec -T`. To run a command in a different compose service, use the table form:
-
-```toml
-[commands.create-invite]
-run     = "node dist/scripts/create-invite.cjs"   # string or array, same rules as the shorthand
-service = "server"                                 # optional; omitted => ingress service
-```
-
-`rpi command` (list mode, no name given) shows the target service for commands that pin one.
-
-- The agent only executes deployed commands — there is no generic remote exec.
-- Timeout: 10 minutes by default; override with `command = "30m"` in `[timeouts]`.
-
-## Docker Compose Requirements
-
-`rpi-agent` writes an override file roughly like this:
-
-```yaml
-services:
-  web:
-    ports:
-      - "127.0.0.1:8000:3000"
-```
-
-For that reason, the production Compose file usually should not set a fixed
-host port manually.
-
-Recommended:
-
-```yaml
-services:
-  web:
-    build:
-      context: .
-    expose:
-      - "3000"
-```
-
-Avoid this for a service managed by `rpi`:
-
-```yaml
-services:
-  web:
-    ports:
-      - "127.0.0.1:3000:3000"
-```
-
-That `ports` mapping can conflict with the agent's port allocator or with
-another project on the same Pi.
-
-For runtime files, mount directories instead of individual files that may not
-exist in a fresh clone:
-
-```yaml
-services:
-  app:
-    environment:
-      APP_LOG_FILE: /app/logs/app.log
-    volumes:
-      - ./logs:/app/logs
-```
-
-Ignore runtime directories in the application repository:
-
-```gitignore
-logs/
-data/
-```
-
-```dockerignore
-/logs
-/data
-```
-
-For SQLite or other local state, mount a persistent directory:
-
-```yaml
-services:
-  app:
-    environment:
-      DATABASE_URL: file:///data/app.db
-    volumes:
-      - ./data:/data
-```
-
-## Secrets (Environment And Files)
-
-If `rpi.toml` contains:
-
-```toml
-[secrets]
-env = ".env"                     # optional, default ".env"
-files = [                        # optional; recreated at the same paths on the Pi
-  "certs/server.pem",
-]
-```
-
-send secrets (env bundle + files) from the root of the deployable project:
-
-```bash
-rpi secrets send
-```
-
-The CLI reads the local `.env` and files, sends them to the agent, and the agent
-stores an encrypted bundle in `/var/lib/rpi/secrets`. During `rpi deploy`, the
-agent writes them into the project workdir before running Docker Compose.
-
-Before the first deploy of a project that needs secrets:
-
-```bash
-rpi secrets send
-rpi deploy
-```
-
-After changing secrets for an already running project:
-
-```bash
-rpi secrets send --apply
-```
-
-`--apply` restarts the Compose stack with the new secrets. Without `--apply`, the
-values are only saved and will be applied by the next `rpi deploy`.
-
-List stored env keys and secret file paths (values are never transmitted):
-
-```bash
-rpi secrets ls
-```
-
-## Deploy
-
-From the root of the deployable project:
-
-```bash
-rpi deploy
-```
-
-Deploy a specific branch, tag, or commit SHA:
-
-```bash
-rpi deploy --ref <git-ref>
-```
-
-List projects:
-
-```bash
-rpi ls
-```
-
-Cancel active deployments for the current project:
-
-```bash
-rpi deploy --cancel
-```
-
-Prune Docker images and build cache on the Pi:
-
-```bash
-rpi gc
-```
-
-Run an admin command declared in `[commands]`:
-
-```bash
-rpi command                                   # list commands deployed on the agent
-rpi command create-invite                     # run a command in the service container
-rpi command create-invite -- --email x@y.com  # extra args are appended to the declared argv
-```
-
-The remote exit code becomes the `rpi` exit code. Ctrl+C detaches and best-effort
-kills the run on the agent (the in-container process may survive — standard
-`docker exec` behavior). A concurrent deploy is not blocked by a running command;
-if it restarts the container mid-run, the command fails.
-
-`rpi deploy` reads `./rpi.toml`, asks the agent to clone or fetch the configured
-repository, builds the Compose stack, starts containers, runs the health check,
-and prints the final status.
-
-## Private Git Repositories
-
-The Raspberry Pi must have access to `source.repo`.
-
-For a private repository, the first fetch may fail and print a public deploy
-key. Add that key to the repository as a read-only deploy key and retry:
-
-```bash
-rpi deploy
-```
-
-For GitHub, this is located at:
-
-```text
-Repository -> Settings -> Deploy keys -> Add deploy key
-```
-
-Write access is usually not needed.
-
-## Cloudflare Tunnel
-
-Cloudflare Tunnel is only needed when the service must be reachable from the
-internet. Services that only use outbound connections usually do not need public
-ingress.
-
-### Automatic Setup (recommended)
-
-With a Cloudflare API token and a domain, the whole tunnel is bootstrapped by
-one command:
-
-```bash
-sudo rpi agent setup --with-cloudflared --cf-token <token> --domain <zone>
-```
-
-This is fully automatic: it installs the `cloudflared` binary for the host's
-CPU architecture, creates (or adopts) the tunnel through the Cloudflare API,
-writes the credentials JSON and a validated `config.yml`, writes the
-`[cloudflare]`/`[cloudflared]` sections into `/etc/rpi/agent.toml`, and enables
-the `cloudflared` systemd `--user` service.
-
-No interactive `cloudflared tunnel login` and no `cert.pem` are needed — the
-running tunnel only uses the credentials JSON this command writes. Tunnel
-management and DNS records both go through the Cloudflare REST API using the
-token, not the `cloudflared` CLI.
-
-- `--cf-token` can be omitted if the `CLOUDFLARE_API_TOKEN` environment
-  variable is set.
-- `--tunnel <name>` overrides the tunnel name. By default it is derived from
-  the machine's hostname, falling back to `rpi` if that can't be read.
-- The Cloudflare account id is derived automatically from the token — there
-  is no account flag.
-- The token needs these scopes: `Zone:DNS:Edit`, `Zone:Zone:Read`,
-  `Account:Cloudflare Tunnel:Edit`.
-- The token is stored at `/var/lib/rpi/cloudflare/token`, owned
-  `root:rpi-secrets` with mode `0640`. `rpi-agent` reads it through the
-  `rpi-secrets` group.
-
-Omitting `--cf-token`/`--domain` is backward compatible: `--with-cloudflared`
-falls back to today's behavior — it scaffolds linger and the user unit and
-prints the manual completion steps below.
-
-### Adopting an existing tunnel
-
-If `/var/lib/rpi/cloudflared/config.yml` already exists (a hand-built tunnel),
-`sudo rpi agent setup --with-cloudflared --cf-token <token> --domain <zone>` adopts it
-instead of recreating anything:
-
-- the existing `config.yml` is **never rewritten** and cloudflared is **not
-  restarted** — hand-written routes and uptime are preserved;
-- the tunnel id is taken from the `tunnel:` key (a name is resolved via the
-  Cloudflare API); credentials are checked at the `credentials-file:` path;
-- `[cloudflare]`/`[cloudflared]` are appended to `/etc/rpi/agent.toml`, after
-  which every deploy manages routes and DNS by itself.
-
-Token scopes: `Zone:Zone:Read` + `Zone:DNS:Edit` are enough when `tunnel:` holds
-the tunnel id (UUID). `Account:Cloudflare Tunnel:Edit` is additionally needed for
-fresh installs and for adoption when `tunnel:` holds a name.
-
-If a project declares `[ingress] hostname` while the agent has no ingress
-configured, the deploy summary and `rpi doctor` now say so explicitly.
-
-### Manual Setup
-
-Without a token, configure `cloudflared` locally instead. A typical locally
-managed `cloudflared` config:
-
-```yaml
-tunnel: <tunnel-id-or-name>
-credentials-file: /var/lib/rpi/cloudflared/<tunnel-id>.json
-
-ingress:
-  - hostname: app.example.com
-    service: http://127.0.0.1:8000
-  - service: http_status:404
-```
-
-The final `http_status:404` rule must remain the catch-all.
-
-### Manual Ingress
-
-If `/etc/rpi/agent.toml` has no `[cloudflared]` section, deployment does not
-fail. The agent logs the address that must be routed manually:
-
-```text
-hostname -> http://127.0.0.1:<host-port>
-```
-
-You can see `host-port` with:
-
-```bash
-rpi ls
-```
-
-### Automatic Ingress
-
-To let the agent edit a local `cloudflared` config and manage DNS records for
-you, add both a `[cloudflared]` and a `[cloudflare]` section to
-`/etc/rpi/agent.toml`:
-
-```toml
-[cloudflared]
-config = "/var/lib/rpi/cloudflared/config.yml"
-tunnel = "home"
-restart = ["systemctl", "--user", "restart", "cloudflared"]
-
-[cloudflare]
-zone = "example.com"
-token_file = "/var/lib/rpi/cloudflare/token"
-```
-
-`rpi-agent` must be allowed to:
-
-- read and write the configured `config.yml`;
-- run the `restart` command without an interactive password prompt;
-- read `token_file` (a Cloudflare API token scoped to DNS edit + tunnel read
-  on the zone).
-
-DNS records (proxied CNAMEs to `<tunnel-id>.cfargotunnel.com`) are created
-through the Cloudflare API using the stored token — `rpi-agent` does not need
-permission to run `cloudflared tunnel route dns`.
-
-Both sections are required for automatic DNS: `[cloudflared]` alone is not
-enough. If `[cloudflare]` is missing, or its `token_file` cannot be read,
-ingress falls back to manual — deploys still succeed, but the agent logs a
-warning and you must route hostnames yourself as described above.
-
-If `cloudflared` runs as a system-wide service, it is usually simpler to keep
-ingress manual or configure the smallest necessary restart permission
-separately.
-
-## Migrations
-
-Host-level upgrades (for example, renaming a legacy install) are handled by
-`rpi agent migrate`:
-
-```bash
-rpi agent migrate [--list] [--dry-run] [--run <id>] [--all --yes]
-```
-
-- Migrations run uniformly and idempotently; each applied migration is
-  recorded so it is never re-applied.
-- `--list` shows every registered migration and whether it has been applied.
-- Non-disruptive migrations run automatically during `rpi agent setup`.
-  Disruptive ones are only reported there and must be applied explicitly with
-  `--run <id>` (or `--all --yes` to apply every pending migration).
-- `--dry-run` shows the plan without changing anything.
-
-The only migration currently registered is `pi-to-rpi`, which renames a
-legacy `pi-agent` install to `rpi-agent`.
+</details>
 
 ## Development
-
-Run tests:
 
 ```bash
 cargo test --workspace
 ```
 
-Run a local TCP agent:
+Run a local TCP agent and point the CLI at it:
 
 ```bash
 cargo run -p pi -- agent run --config dev/agent.toml
-```
-
-Point the CLI to the local dev agent.
-
-PowerShell:
-
-```powershell
-$env:PI_AGENT_URL = "http://127.0.0.1:7700"
-```
-
-Unix shell:
-
-```bash
-export PI_AGENT_URL="http://127.0.0.1:7700"
+export PI_AGENT_URL="http://127.0.0.1:7700"   # PowerShell: $env:PI_AGENT_URL = "http://127.0.0.1:7700"
 ```
 
 ## Troubleshooting
 
-### `npm warn allow-scripts ...` / `rpi: binary not built`
+### `npm warn allow-scripts …` / `rpi: binary not built`
 
-npm blocked the `postinstall` script that builds the Rust binary and skipped
-it instead of failing outright. Reinstall with the script explicitly allowed:
-
-```bash
-npm install -g --allow-scripts=rpi-deploy rpi-deploy   # add sudo for a system-wide (apt) npm
-```
-
-To avoid repeating the flag on every future update:
+npm blocked the `postinstall` script that installs the binary. Reinstall with the script allowed:
 
 ```bash
-npm config set allow-scripts=rpi-deploy --location=user
+npm install -g --allow-scripts=rpi-deploy rpi-deploy       # add sudo for a system-wide npm
+npm config set allow-scripts=rpi-deploy --location=user    # persist for future updates
 ```
 
-`npm approve-scripts <pkg>` does not work here — it writes to a project
-`package.json`, and a global install has none (`EGLOBAL`).
+`npm approve-scripts` does not work for a global install (`EGLOBAL` — no project `package.json`).
 
 ### `sudo: npm: command not found` / `sudo: rpi: command not found`
 
-Node.js is managed by `nvm` (or a similar per-user version manager); `sudo`
-resets `PATH` and does not see it. Install without `sudo` — the nvm prefix is
-already user-writable — and forward `PATH` only for the one command that
-needs root:
+Node.js is nvm-managed and `sudo` resets `PATH`. Install without `sudo`, then `sudo env "PATH=$PATH" rpi agent setup` once — see the note in [Installation](#installation).
 
-```bash
-npm install -g rpi-deploy
-sudo env "PATH=$PATH" rpi agent setup
-```
+### `rpi ls` does not connect
 
-`agent setup` self-installs a native binary to `/usr/local/bin/rpi`, already
-on root's default `PATH`; later `sudo rpi ...` calls work without the `env`
-wrapper.
-
-### `rpi ls` Does Not Connect
-
-Check SSH from the developer machine:
+Check SSH from the developer machine, then the agent on the Pi:
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_pi pi-user@pi-host.local true
-```
 
-Check the agent on the Pi:
-
-```bash
 systemctl status rpi-agent
 journalctl -u rpi-agent -n 100 --no-pager
 ls -l /run/rpi/agent.sock
-groups "$USER"
+groups "$USER"      # must include rpi-agent; open a new SSH session after adding
 ```
 
-After adding the login user to the `rpi-agent` group, open a new SSH session.
-
-On the Pi itself, you can check the agent directly:
+On the Pi itself the agent answers directly:
 
 ```bash
 curl --unix-socket /run/rpi/agent.sock http://localhost/v1/version
-curl --unix-socket /run/rpi/agent.sock http://localhost/v1/projects
 ```
 
-### Clone Fails With `Permission denied (publickey)`
+### Clone fails with `Permission denied (publickey)`
 
-The Pi cannot authenticate to `source.repo`. Add the deploy key printed by the
-agent, or configure another SSH key with read access to the repository.
+The Pi cannot authenticate to `source.repo`. Add the deploy key printed by the preflight (or the fetch stage), or configure another SSH key with read access, then rerun `rpi deploy`.
 
-After fixing access:
+### Docker build fails with `/home/rpi-agent` errors
+
+The systemd unit must set `HOME=/var/lib/rpi` and the `XDG_*` variables (see the manual install section above), then:
 
 ```bash
-rpi deploy
+sudo systemctl daemon-reload && sudo systemctl restart rpi-agent
 ```
 
-### Docker Build Fails With `/home/rpi-agent` Errors
-
-Check that the `systemd` unit contains:
-
-```ini
-Environment=HOME=/var/lib/rpi
-Environment=XDG_CONFIG_HOME=/var/lib/rpi/.config
-Environment=XDG_CACHE_HOME=/var/lib/rpi/.cache
-WorkingDirectory=/var/lib/rpi
-```
-
-Then run:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart rpi-agent
-```
-
-### Docker Permission Denied
-
-Check groups:
-
-```bash
-groups rpi-agent
-getent group docker
-```
-
-Add the service user to the Docker group and restart the agent:
+### Docker permission denied
 
 ```bash
 sudo usermod -aG docker rpi-agent
 sudo systemctl restart rpi-agent
 ```
 
-### Compose Does Not See Secrets
+### Compose does not see secrets
 
-Send the secrets bundle before deploying:
+Run `rpi secrets send` before `rpi deploy` (or `rpi secrets send --apply` for a running project).
 
-```bash
-rpi secrets send
-rpi deploy
-```
+### Health check fails
 
-For an already running project:
+The app must listen on `0.0.0.0` inside the container; `[ingress].port` must match the container port; `[healthcheck].path` must exist and answer with `[healthcheck].expect`. On the Pi: `docker compose -p <project> ps` and `curl http://127.0.0.1:<host-port>/health`.
 
-```bash
-rpi secrets send --apply
-```
+### Host port is in use
 
-### Health Check Fails
+A fixed host `ports:` mapping in the Compose file conflicts with the agent's allocator. Remove it and use `expose` — see [Docker Compose Requirements](#docker-compose-requirements).
 
-Check that:
+### CLI and agent versions differ
 
-- the application listens on `0.0.0.0` inside the container, not only on
-  loopback;
-- `[ingress].port` matches the container port;
-- `[healthcheck].path` exists;
-- `[healthcheck].expect` matches the HTTP status code.
+The CLI warns when its version differs from the agent's. Update both sides to the same release: `npm install -g rpi-deploy@latest` on both, plus `sudo rpi agent setup` on the Pi.
 
-On the Pi:
+## Documentation
 
-```bash
-docker compose -p <project-name> ps
-curl http://127.0.0.1:<host-port>/health
-```
+- [CI deploys with GitHub Actions](docs/ci-github-actions.md)
+- [Migration: `pi` → `rpi` (v0.5 → v0.6)](docs/migration-v0.5-to-v0.6.md)
+- [Migration: `[env]` → `[secrets]`](docs/migration-env-to-secrets.md)
+- [Release notes](https://github.com/khmilevoi/rpi-deploy/releases) — full version history
 
-### Host Port Is In Use
+## License
 
-The agent selects a port from `port_min..port_max` and stores it in SQLite. If
-the Compose file also defines a fixed host `ports:` mapping, it can conflict
-with the agent allocation. Remove the fixed host port and use `expose`.
-
-### CLI And Agent Versions Differ
-
-The CLI prints a warning if the local CLI version and the remote agent version
-differ. Rebuild and reinstall both binaries from the same repository revision.
-
-On the Pi:
-
-```bash
-cargo build --release
-sudo install -m 755 target/release/rpi /usr/local/bin/rpi
-sudo systemctl restart rpi-agent
-```
-
-On the developer machine:
-
-```bash
-cargo install --path crates/bin --locked
-```
-
-## Pre-Deploy Checklist
-
-1. On the Pi, `systemctl status rpi-agent` shows `active (running)`.
-2. From the developer machine, `ssh pi-user@pi-host.local true` works without a
-   password.
-3. From the developer machine, `rpi ls` responds.
-4. The deployable project contains `rpi.toml`.
-5. `[source].repo` is reachable from the Pi.
-6. `[source].branch` is the intended default branch.
-7. `[build].compose` points to an existing Compose file.
-8. `[ingress].service` matches the service name in Compose.
-9. `[ingress].port` matches the container port.
-10. Compose does not define a conflicting fixed host port.
-11. Mutable runtime files are stored in mounted directories.
-12. If the project needs secrets, `rpi secrets send` has been run.
-13. `rpi deploy` finishes with `deploy finished: success`.
-14. `rpi ls` shows the project, branch, host port, hostname if configured,
-    expose mode (`-` for private, `lan http://<lan-ip>:<port>` for
-    `expose = "lan"`), and service status.
+[MIT](LICENSE) © khmilevoi
