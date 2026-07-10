@@ -252,7 +252,6 @@ export async function runScenario({
   signal,
 }) {
   const startedAt = Date.now();
-  await mkdir(artifactDir, { recursive: true });
   const composeEnv = {
     ...env,
     RPI_E2E_ARTIFACT_DIR: artifactDir,
@@ -268,11 +267,24 @@ export async function runScenario({
     signal,
     ...options,
   });
+  // Best-effort: diagnostics are a nice-to-have on failure, never a reason to
+  // let runScenario reject and orphan sibling pool lanes.
+  const diagnostics = async () => {
+    try {
+      await collectDiagnostics(compose, artifactDir);
+    } catch (diagError) {
+      console.error(
+        `rpi e2e: diagnostics collection failed (${scenario}): ` +
+          `${diagError instanceof Error ? diagError.message : diagError}`,
+      );
+    }
+  };
 
   let code = 1;
   let timedOut = false;
   let attemptedStart = false;
   try {
+    await mkdir(artifactDir, { recursive: true });
     const config = await compose(['config', '--quiet'], { quiet: true });
     if (config.code !== 0) throw new Error(config.stderr || `compose config failed (${scenario})`);
 
@@ -284,7 +296,7 @@ export async function runScenario({
     if (dependencies.code !== 0) {
       timedOut = dependencies.timedOut;
       code = signal?.aborted ? 130 : (dependencies.timedOut ? 124 : (dependencies.code || 1));
-      await collectDiagnostics(compose, artifactDir);
+      await diagnostics();
     } else {
       const client = await compose(['run', '--rm', '--no-deps', 'client'], {
         logPath: path.join(artifactDir, 'scenario.log'),
@@ -292,7 +304,7 @@ export async function runScenario({
       });
       timedOut = client.timedOut;
       code = signal?.aborted ? 130 : (client.timedOut ? 124 : client.code);
-      if (code !== 0) await collectDiagnostics(compose, artifactDir);
+      if (code !== 0) await diagnostics();
     }
   } catch (error) {
     code = signal?.aborted ? 130 : 1;
@@ -305,7 +317,7 @@ export async function runScenario({
     } catch (writeError) {
       console.error(`rpi e2e: cannot write launcher error: ${writeError}`);
     }
-    if (attemptedStart) await collectDiagnostics(compose, artifactDir);
+    if (attemptedStart) await diagnostics();
   } finally {
     if (attemptedStart && keep) {
       console.warn(`rpi e2e: RPI_E2E_KEEP=1 — stack kept (project ${projectName})`);
@@ -313,10 +325,21 @@ export async function runScenario({
       console.warn(`rpi e2e:   clean up: node tests/e2e/run.mjs --down ${projectName}`);
     }
     if (attemptedStart && !keep) {
-      const down = await compose(['down', '-v', '--remove-orphans'], {
-        logPath: path.join(artifactDir, 'cleanup.log'),
-        timeoutMs: 120_000,
-      });
+      // Teardown failure fails a green scenario but never masks a red one —
+      // and, same as diagnostics, must never escape as a rejection.
+      let down;
+      try {
+        down = await compose(['down', '-v', '--remove-orphans'], {
+          logPath: path.join(artifactDir, 'cleanup.log'),
+          timeoutMs: 120_000,
+        });
+      } catch (downError) {
+        down = { code: 1 };
+        console.error(
+          `rpi e2e: teardown failed (${scenario}): ` +
+            `${downError instanceof Error ? downError.message : downError}`,
+        );
+      }
       if (code === 0 && down.code !== 0) code = down.code || 1;
     }
   }
@@ -341,7 +364,15 @@ export async function runE2E({
     : path.join(ROOT, 'target', 'e2e-artifacts', projectName),
   signal,
 } = {}) {
-  await mkdir(artifactDir, { recursive: true });
+  try {
+    await mkdir(artifactDir, { recursive: true });
+  } catch (error) {
+    console.error(
+      `rpi e2e: cannot create artifact directory ${artifactDir}: ` +
+        `${error instanceof Error ? error.message : error}`,
+    );
+    return signal?.aborted ? 130 : 1;
+  }
   if (signal?.aborted) return 130;
 
   const all = available ?? await discoverScenarios();

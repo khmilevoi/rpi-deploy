@@ -24,7 +24,9 @@ function fakeRunner(responses) {
   const calls = [];
   const runner = async (args, options = {}) => {
     calls.push({ args, options });
-    return responses.length ? responses.shift() : ok();
+    const next = responses.length ? responses.shift() : ok();
+    if (next instanceof Error) throw next;
+    return next;
   };
   return { calls, runner };
 }
@@ -240,6 +242,121 @@ test('cleanup failure fails a successful scenario but cannot mask a scenario fai
       available: ['happy-path'],
     }), 17);
   });
+});
+
+test('runScenario returns a nonzero-code result instead of throwing when the runner rejects', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([
+      ok(),                             // config --quiet
+      ok(),                             // up dependencies
+      new Error('run step exploded'),   // run --rm --no-deps client rejects
+      ok(), ok(), ok(),                 // diagnostics (ps, logs, exec)
+      ok(),                             // down
+    ]);
+    const result = await runScenario({
+      scenario: 'happy-path',
+      projectName: 'rpi-e2e-reject-run',
+      runtimeImage: 'img:x',
+      artifactDir,
+      runner,
+      env: {},
+    });
+    assert.equal(typeof result.code, 'number');
+    assert.notEqual(result.code, 0);
+    assert.equal(result.scenario, 'happy-path');
+    const joined = calls.map((c) => c.args.join(' ')).join('\n');
+    assert.match(joined, /down -v --remove-orphans/);
+  });
+});
+
+test('runScenario swallows a rejecting teardown, still fails green and never masks red', async () => {
+  await withArtifacts(async (artifactDir) => {
+    // Green scenario: run succeeds, but `down` rejects — teardown failure
+    // must fail the scenario (matches the nonzero-down-code behavior above)
+    // without throwing out of runScenario.
+    const greenWithBadTeardown = fakeRunner([
+      ok(), ok(), ok(),                 // config, up, run (all succeed)
+      new Error('down exploded'),       // down rejects
+    ]);
+    const green = await runScenario({
+      scenario: 'happy-path',
+      projectName: 'rpi-e2e-green-bad-down',
+      runtimeImage: 'img:x',
+      artifactDir,
+      runner: greenWithBadTeardown.runner,
+      env: {},
+    });
+    assert.equal(typeof green.code, 'number');
+    assert.notEqual(green.code, 0);
+
+    // Red scenario: run fails, and down also rejects — the run's exit code
+    // must win, not get replaced by the teardown failure.
+    const redWithBadTeardown = fakeRunner([
+      ok(), ok(),                                              // config, up
+      { code: 17, stdout: '', stderr: '', timedOut: false },   // run fails
+      ok(), ok(), ok(),                                        // diagnostics
+      new Error('down exploded'),                               // down rejects
+    ]);
+    const red = await runScenario({
+      scenario: 'happy-path',
+      projectName: 'rpi-e2e-red-bad-down',
+      runtimeImage: 'img:x',
+      artifactDir,
+      runner: redWithBadTeardown.runner,
+      env: {},
+    });
+    assert.equal(red.code, 17);
+  });
+});
+
+test('a teardown rejection does not throw out of the pool, mask a red scenario, or orphan siblings', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([
+      ok('2.33.1'), ok(),                                       // version, build
+      ok(), ok(),                                               // alpha: config, up
+      { code: 17, stdout: '', stderr: '', timedOut: false },    // alpha: run fails
+      ok(), ok(), ok(),                                         // alpha: diagnostics
+      new Error('teardown exploded'),                           // alpha: down rejects
+      ok(), ok(),                                               // beta: config, up
+      ok(),                                                     // beta: run succeeds
+      ok(),                                                     // beta: down
+      ok(),                                                     // image rm
+    ]);
+    const code = await runE2E({
+      runner,
+      artifactDir,
+      projectName: 'rpi-e2e-teardown-reject',
+      env: {},
+      available: ['alpha', 'beta'],
+      concurrency: 1,
+    });
+    // The first failing scenario's exit code wins — a rejecting teardown on
+    // alpha must not mask it, and beta must still have run (not orphaned).
+    assert.equal(code, 17);
+    const runCalls = calls.filter((c) => c.args.includes('run') && c.args.includes('client'));
+    assert.equal(runCalls.length, 2);
+    assert.equal(runCalls[0].options.env.RPI_E2E_SCENARIO, 'alpha');
+    assert.equal(runCalls[1].options.env.RPI_E2E_SCENARIO, 'beta');
+  });
+});
+
+test('runE2E converts an artifact-directory mkdir failure into a controlled exit code', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rpi-e2e-mkdir-'));
+  try {
+    const blocker = path.join(dir, 'blocker');
+    await writeFile(blocker, 'x');
+    const { calls, runner } = fakeRunner([]);
+    const code = await runE2E({
+      runner,
+      artifactDir: path.join(blocker, 'nested'),
+      env: {},
+      available: ['happy-path'],
+    });
+    assert.equal(code, 1);
+    assert.equal(calls.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('prebuilt mode skips local build and image removal', async () => {
