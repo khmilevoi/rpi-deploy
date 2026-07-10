@@ -1032,6 +1032,14 @@ mod tests {
             async fn cleanup(&self, _project_name: &str) -> Result<(), DomainError> {
                 Ok(())
             }
+
+            async fn check_access(
+                &self,
+                _project_name: &str,
+                _repo: &str,
+            ) -> Result<pi_domain::contracts::SourceAccess, DomainError> {
+                Ok(pi_domain::contracts::SourceAccess::Ok)
+            }
         }
 
         let dir = tempfile::tempdir().unwrap();
@@ -1198,6 +1206,14 @@ mod tests {
 
             async fn cleanup(&self, _project_name: &str) -> Result<(), DomainError> {
                 Ok(())
+            }
+
+            async fn check_access(
+                &self,
+                _project_name: &str,
+                _repo: &str,
+            ) -> Result<pi_domain::contracts::SourceAccess, DomainError> {
+                Ok(pi_domain::contracts::SourceAccess::Ok)
             }
         }
 
