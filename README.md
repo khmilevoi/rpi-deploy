@@ -8,7 +8,7 @@ containers.
 
 Website: https://rpi.iiskelo.com
 
-Status: v0.18.0 (deploy pipeline view + deploy-key preflight) —
+Status: v0.19.0 (deploy-key preflight watches for gh login) —
 everything from v0.1–v0.6 (deploy/secrets/
 ingress/CI, `rpi logs`, `rpi stats`, `rpi start|stop|restart`, `rpi rm`,
 `rpi status`, `rpi doctor`, `rpi agent status|logs`, one-command setup,
@@ -77,7 +77,11 @@ leaves your machine, the private key never leaves the Pi — or, without `gh`,
 prints the public key with instructions and continues by itself once you add
 it, polling every 5 s for up to 10 min; `--no-gh-key` skips the GitHub API
 path; old agents skip the preflight, and the fetch stage still prints the key
-hint there).
+hint there), and v0.19.0 a gh-login watch during that preflight (while
+`rpi deploy` waits for a manually-added deploy key, it now also watches for a
+background `gh auth login`; logging in mid-wait auto-registers the key and
+continues the deploy on the next poll, so you no longer have to cancel and
+re-run — `--no-gh-key` still skips the GitHub path).
 
 Supported features:
 
