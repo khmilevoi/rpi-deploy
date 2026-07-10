@@ -2,45 +2,7 @@
 set -euo pipefail
 
 source /opt/e2e/lib.sh
-
-ARTIFACTS=/artifacts
-KEY=/run/e2e-keys/id_ed25519
-CONNECT=(--host target --user deploy --key "$KEY")
-SSH=(ssh -i "$KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes deploy@target)
-
-fail() {
-  echo "rpi e2e: $*" >&2
-  exit 1
-}
-
-run_capture() {
-  local file=$1
-  shift
-  set +e
-  "$@" 2>&1 | tee "$ARTIFACTS/$file"
-  local status=${PIPESTATUS[0]}
-  set -e
-  [[ $status -eq 0 ]] || fail "$file command exited with $status"
-}
-
-assert_log() {
-  local file=$1
-  local text=$2
-  grep -F -- "$text" "$ARTIFACTS/$file" >/dev/null || \
-    fail "$file does not contain: $text"
-}
-
-assert_deploy_log() {
-  local file=$1
-  assert_log "$file" 'fetched '
-  assert_log "$file" 'docker compose build ...'
-  assert_log "$file" 'docker compose up -d ...'
-  assert_log "$file" 'healthcheck: passed'
-}
-
-mkdir -p "$ARTIFACTS"
-e2e_client_init || fail 'client init failed'
-"${SSH[@]}" true
+e2e_bootstrap
 
 rpi --version
 run_capture deploy-1.log rpi deploy "${CONNECT[@]}"

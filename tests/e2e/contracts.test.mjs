@@ -77,12 +77,23 @@ test('Compose service names match the launcher contract', async () => {
   }
 });
 
-test('scenario uses the production SSH path and covers deploy, redeploy, and remove', async () => {
+test('scenario drives deploy, redeploy, and remove through the shared library', async () => {
   const [scenario, lib] = await Promise.all([
     read('tests/e2e/scenario.sh'),
     read('tests/e2e/lib.sh'),
   ]);
   assert.match(scenario, /^source \/opt\/e2e\/lib\.sh$/m);
+  assert.match(scenario, /^e2e_bootstrap$/m);
+  for (const helper of [
+    'fail()',
+    'e2e_client_init()',
+    'e2e_bootstrap()',
+    'run_capture()',
+    'assert_log()',
+    'assert_deploy_log()',
+  ]) {
+    assert.ok(lib.includes(helper), `lib.sh defines ${helper}`);
+  }
   assert.match(lib, /unset PI_AGENT_URL/);
   assert.match(lib, /ssh-keyscan -H target/);
   assert.match(lib, /\/etc\/ssh\/ssh_known_hosts/);
@@ -100,7 +111,7 @@ test('scenario uses the production SSH path and covers deploy, redeploy, and rem
     'docker compose up -d ...',
     'healthcheck: passed',
   ]) {
-    assert.match(scenario, new RegExp(milestone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(lib, new RegExp(milestone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 });
 
