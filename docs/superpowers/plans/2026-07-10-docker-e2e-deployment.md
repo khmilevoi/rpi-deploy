@@ -4,7 +4,7 @@
 
 **Goal:** Add a Docker-isolated merge gate that runs the current `rpi` CLI through real SSH and the agent Unix socket, deploys a Git fixture into DinD, verifies health and stable redeploy, removes it, and cleans up deterministically.
 
-**Architecture:** A host-side Node launcher controls an outer Docker Compose project with a one-shot key generator, a local Git server, a target (`sshd` + `rpi-agent`), and an isolated privileged DinD daemon. Target and DinD share a network namespace so the agent's `127.0.0.1:<allocated-port>` healthcheck behaves exactly like a local Docker Engine; the terminal client runs separately with `docker compose run --rm --no-deps` so dependencies remain alive for diagnostics.
+**Architecture:** A host-side Node launcher controls an outer Docker Compose project with a one-shot key generator, a local Git server, a target (`sshd` + `rpi-agent`), and an isolated privileged DinD daemon. Target and DinD share a network namespace so the agent's `127.0.0.1:<allocated-port>` healthcheck behaves exactly like a local Docker Engine; the terminal client runs separately with `docker compose run --rm --no-deps` so dependencies remain alive for diagnostics. An optional Compose profile `dev` adds a long-lived `client-dev` container for manual `docker exec` sessions; CI never starts it.
 
 **Tech Stack:** Rust/Cargo workspace, Node.js 18+ (`node:test`, ESM), Docker Engine/Docker Desktop, Docker Compose v2.33.1+, Docker Buildx, Bash, OpenSSH, Git daemon, GitHub Actions.
 
@@ -23,7 +23,8 @@
 - Keep the full e2e job on `ubuntu-latest`; do not enable it on a self-hosted runner.
 - GitHub job timeout: 30 minutes. Dependency readiness: 120 seconds maximum. Client scenario: 15 minutes maximum after image construction.
 - Preserve the first meaningful failure code. Diagnostics and teardown failures are secondary; a teardown failure after an otherwise successful scenario must make the launcher fail.
-- Use `apply_patch` for edits. Run focused tests red then green, and commit after every task.
+- The dev profile (`client-dev`, `npm run e2e:dev:*`) and `RPI_E2E_KEEP=1` are local-only conveniences; `.github/workflows/ci.yml` must never reference them.
+- Use your harness's standard file-editing tools (Edit/Write) for edits. Run focused tests red then green, and commit after every task.
 
 ---
 
@@ -31,8 +32,8 @@
 
 | Path | Responsibility |
 | --- | --- |
-| `tests/e2e/run.mjs` | Cross-platform process runner, Compose lifecycle, timeouts, diagnostics, cleanup, CLI entrypoint. |
-| `tests/e2e/run.test.mjs` | Docker-free unit tests for lifecycle ordering, exit-code preservation, prebuilt mode, cleanup, and version validation. |
+| `tests/e2e/run.mjs` | Cross-platform process runner, Compose lifecycle, timeouts, diagnostics, cleanup, keep-on-exit flag, dev-stack mode, CLI entrypoint. |
+| `tests/e2e/run.test.mjs` | Docker-free unit tests for lifecycle ordering, exit-code preservation, prebuilt mode, cleanup, version validation, keep flag, and dev mode. |
 | `tests/e2e/contracts.test.mjs` | Docker-free structural tests for fixture, Dockerfile, Compose isolation, scenario commands, and CI wiring. |
 | `tests/e2e/Dockerfile` | Build the current `rpi` once and create the shared Linux runtime image. |
 | `.dockerignore` | Keep repository-local build context deterministic and small. |
@@ -40,10 +41,11 @@
 | `tests/e2e/agent.toml` | Unix-socket agent config and deterministic nested port/timeouts. |
 | `tests/e2e/target-entrypoint.sh` | Prepare users/permissions, start `rpi-agent` and `sshd`, propagate process failure. |
 | `tests/e2e/git-entrypoint.sh` | Turn the versioned fixture into a bare `main` repository and serve it with `git daemon`. |
-| `tests/e2e/compose.yaml` | Outer keygen/Git/target/DinD/client topology and health dependencies. |
-| `tests/e2e/scenario.sh` | SSH host-key setup, two deploys, CLI/HTTP assertions, and `rpi rm` verification. |
+| `tests/e2e/compose.yaml` | Outer keygen/Git/target/DinD/client topology, health dependencies, and the manual `dev` profile. |
+| `tests/e2e/lib.sh` | Shared client prologue: key mode check, env sanitization, target host key into `/etc/ssh/ssh_known_hosts`. |
+| `tests/e2e/scenario.sh` | Two deploys, CLI/HTTP assertions, and `rpi rm` verification on top of `lib.sh`. |
 | `tests/e2e/fixtures/app/*` | Minimal deployable project that forces the agent's HTTP host-port health probe. |
-| `package.json` | `test:node` and `test:e2e` commands; preserve all current package/version metadata. |
+| `package.json` | `test:node`, `test:e2e`, and `e2e:dev:*` commands; preserve all current package/version metadata. |
 | `.github/workflows/ci.yml` | Cross-platform Node tests plus cached Ubuntu full e2e merge gate. |
 | `README.md` | Local e2e command, prerequisites, privilege warning, scope, and artifact location. |
 | `docs/ci-github-actions.md` | Merge-gate topology, cache, security boundary, and failure artifacts. |
@@ -813,6 +815,11 @@ RUN sed -i 's/\r$//' /opt/e2e/*.sh && chmod 0755 /opt/e2e/*.sh
 
 If the official `docker:28-cli` image moves the Compose plugin path, stop and verify the current official image layout with `docker run --rm docker:28-cli sh -lc 'find /usr/local -name docker-compose -type f'`; then update both the Dockerfile and its contract assertion to the returned path. Do not install a Python Compose v1 package.
 
+If the workspace no longer compiles on `rust:1.88-bookworm` (the repository's CI
+builds with the latest stable toolchain via `dtolnay/rust-toolchain@stable`, so
+the code may drift ahead of this pin), bump the builder tag to the current
+stable Rust and change nothing else.
+
 - [ ] **Step 5: Create the deterministic agent configuration**
 
 Create `tests/e2e/agent.toml`:
@@ -1138,11 +1145,13 @@ git commit -m "test(e2e): define isolated DinD deployment topology"
 ### Task 5: Production-path client scenario and full local e2e
 
 **Files:**
+- Create: `tests/e2e/lib.sh`
 - Create: `tests/e2e/scenario.sh`
 - Modify: `tests/e2e/contracts.test.mjs`
 
 **Interfaces:**
 - Consumes `target` hostname, `deploy` user, key `/run/e2e-keys/id_ed25519`, fixture working directory, and artifacts bind `/artifacts`.
+- `lib.sh` produces `e2e_client_init`: private-key mode check, `unset PI_AGENT_URL`, and `ssh-keyscan` into `/etc/ssh/ssh_known_hosts`. The system-wide file is mandatory: OpenSSH resolves `~` through the passwd database (`pw_dir`), not `$HOME`, and the tunnel `ssh` the rpi CLI spawns accepts no extra flags — a known_hosts under the client's overridden `$HOME` would never be read.
 - Produces `deploy-1.log`, `ls-1.log`, `deploy-2.log`, `ls-2.log`, `rm.log`, and `ls-after-rm.log`.
 - Success exit code is 0 only after two deploys, stable port assertion, independent HTTP check, `rpi rm`, and no nested fixture containers.
 
@@ -1152,9 +1161,16 @@ Append to `tests/e2e/contracts.test.mjs`:
 
 ```js
 test('scenario uses the production SSH path and covers deploy, redeploy, and remove', async () => {
-  const scenario = await read('tests/e2e/scenario.sh');
-  assert.match(scenario, /unset PI_AGENT_URL/);
+  const [scenario, lib] = await Promise.all([
+    read('tests/e2e/scenario.sh'),
+    read('tests/e2e/lib.sh'),
+  ]);
+  assert.match(scenario, /^source \/opt\/e2e\/lib\.sh$/m);
+  assert.match(lib, /unset PI_AGENT_URL/);
+  assert.match(lib, /ssh-keyscan -H target/);
+  assert.match(lib, /\/etc\/ssh\/ssh_known_hosts/);
   assert.doesNotMatch(scenario, /PI_AGENT_URL=/);
+  assert.doesNotMatch(scenario, /\$HOME\/\.ssh/);
   assert.equal((scenario.match(/rpi deploy/g) || []).length, 2);
   assert.match(scenario, /rpi ls/);
   assert.match(scenario, /127\.0\.0\.1:18080\/health/);
@@ -1180,15 +1196,48 @@ Run:
 npm run test:node
 ```
 
-Expected: FAIL with `ENOENT` for `tests/e2e/scenario.sh`.
+Expected: FAIL with `ENOENT` for `tests/e2e/scenario.sh` or `tests/e2e/lib.sh`.
 
-- [ ] **Step 3: Implement the full scenario**
+- [ ] **Step 3: Implement the client prologue and the full scenario**
+
+Create `tests/e2e/lib.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Shared client prologue, sourced by scenario.sh and by interactive dev
+# shells. OpenSSH resolves `~` through the passwd database (pw_dir), not
+# $HOME, and the rpi CLI spawns plain `ssh` with no way to pass
+# -o UserKnownHostsFile — so the target host key must be recorded in the
+# system-wide /etc/ssh/ssh_known_hosts to cover both ssh paths.
+
+E2E_KEY=/run/e2e-keys/id_ed25519
+
+e2e_client_init() {
+  if [[ $(stat -c '%a' "$E2E_KEY") != '600' ]]; then
+    echo 'rpi e2e: private key mode is not 0600' >&2
+    return 1
+  fi
+  unset PI_AGENT_URL
+  local tmp=/etc/ssh/ssh_known_hosts.tmp
+  for _ in $(seq 1 30); do
+    if ssh-keyscan -H target >"$tmp" 2>/dev/null && [[ -s $tmp ]]; then
+      mv "$tmp" /etc/ssh/ssh_known_hosts
+      return 0
+    fi
+    sleep 1
+  done
+  echo 'rpi e2e: could not record target SSH host key' >&2
+  return 1
+}
+```
 
 Create `tests/e2e/scenario.sh`:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
+
+source /opt/e2e/lib.sh
 
 ARTIFACTS=/artifacts
 KEY=/run/e2e-keys/id_ed25519
@@ -1225,19 +1274,8 @@ assert_deploy_log() {
   assert_log "$file" 'healthcheck: passed'
 }
 
-mkdir -p "$ARTIFACTS" "$HOME/.ssh"
-chmod 0700 "$HOME/.ssh"
-[[ $(stat -c '%a' "$KEY") == '600' ]] || fail 'private key mode is not 0600'
-unset PI_AGENT_URL
-
-for _ in $(seq 1 30); do
-  if ssh-keyscan -H target >"$HOME/.ssh/known_hosts.tmp" 2>/dev/null; then
-    mv "$HOME/.ssh/known_hosts.tmp" "$HOME/.ssh/known_hosts"
-    break
-  fi
-  sleep 1
-done
-[[ -s "$HOME/.ssh/known_hosts" ]] || fail 'could not record target SSH host key'
+mkdir -p "$ARTIFACTS"
+e2e_client_init || fail 'client init failed'
 "${SSH[@]}" true
 
 rpi --version
@@ -1282,7 +1320,7 @@ Run:
 
 ```text
 docker build --file tests/e2e/Dockerfile --tag rpi-e2e-runtime:plan .
-docker run --rm rpi-e2e-runtime:plan bash -n /opt/e2e/scenario.sh
+docker run --rm rpi-e2e-runtime:plan bash -lc "bash -n /opt/e2e/lib.sh && bash -n /opt/e2e/scenario.sh"
 npm run test:node
 ```
 
@@ -1321,8 +1359,294 @@ Expected: all three commands produce no rows.
 - [ ] **Step 7: Commit the scenario**
 
 ```bash
-git add tests/e2e/scenario.sh tests/e2e/contracts.test.mjs
+git add tests/e2e/lib.sh tests/e2e/scenario.sh tests/e2e/contracts.test.mjs
 git commit -m "test(e2e): exercise SSH deploy redeploy and removal"
+```
+
+---
+
+### Task 5.5: Manual dev stack (Compose profile `dev`) and keep-on-exit flag
+
+**Files:**
+- Modify: `tests/e2e/compose.yaml`
+- Modify: `tests/e2e/run.mjs`
+- Modify: `tests/e2e/run.test.mjs`
+- Modify: `tests/e2e/contracts.test.mjs`
+- Modify: `package.json`
+
+**Interfaces:**
+- Produces Compose service `client-dev` under `profiles: ["dev"]`: same runtime image, mounts, env, and working directory as `client`, but `command: ["sleep", "infinity"]` with `init: true` so it stays alive for `docker exec`.
+- Produces `runDev(action, { runner, env, projectName, artifactDir, signal })` in `run.mjs`: action `'up'` builds the shared image and starts `dind target git-fixture client-dev` with `--profile dev`; action `'down'` removes the stack and its image. Default project name is the fixed `rpi-e2e-dev`.
+- Produces launcher env flag `RPI_E2E_KEEP=1`: `runE2E` skips `down` and image removal and prints exec/cleanup hints. Local-only; the CI workflow must never reference it (enforced by contract test).
+- Produces package scripts `e2e:dev:up` / `e2e:dev:down`; `run.mjs` CLI flags `--dev-up`, `--dev-down`, `--down [project]`.
+
+- [ ] **Step 1: Add the failing dev-mode tests**
+
+In `tests/e2e/run.test.mjs`, extend the import:
+
+```js
+import { makeProjectName, parseComposeVersion, runDev, runE2E } from './run.mjs';
+```
+
+Append to `tests/e2e/run.test.mjs`:
+
+```js
+test('RPI_E2E_KEEP=1 skips teardown and image removal', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([
+      ok('2.33.1'), ok(), ok(), ok(),
+      { code: 23, stdout: '', stderr: '', timedOut: false },
+      ok(), ok(), ok(), // diagnostics
+    ]);
+    assert.equal(await runE2E({
+      runner,
+      artifactDir,
+      projectName: 'rpi-e2e-keep',
+      env: { RPI_E2E_KEEP: '1' },
+    }), 23);
+    const joined = calls.map((call) => call.args.join(' ')).join('\n');
+    assert.doesNotMatch(joined, /down -v/);
+    assert.doesNotMatch(joined, /image rm/);
+  });
+});
+
+test('dev up builds the shared image once and waits for client-dev', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([ok(), ok()]);
+    assert.equal(await runDev('up', { runner, artifactDir, env: {} }), 0);
+    const commands = calls.map((call) => call.args.join(' '));
+    assert.match(commands[0], /--project-name rpi-e2e-dev/);
+    assert.match(commands[0], /--profile dev build client$/);
+    assert.match(
+      commands[1],
+      /up -d --no-build --wait --wait-timeout 120 dind target git-fixture client-dev$/,
+    );
+  });
+});
+
+test('dev down tears down the fixed dev project and removes its image', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([ok(), ok()]);
+    assert.equal(await runDev('down', { runner, artifactDir, env: {} }), 0);
+    const joined = calls.map((call) => call.args.join(' ')).join('\n');
+    assert.match(joined, /--project-name rpi-e2e-dev/);
+    assert.match(joined, /down -v --remove-orphans/);
+    assert.match(joined, /image rm rpi-e2e-runtime:rpi-e2e-dev/);
+  });
+});
+```
+
+Append to `tests/e2e/contracts.test.mjs`:
+
+```js
+test('dev profile provides an exec-able client and stays out of the CI path', async () => {
+  const compose = await read('tests/e2e/compose.yaml');
+  assert.match(compose, /^  client-dev:/m);
+  const devBlock = /^  client-dev:\s*$([\s\S]*?)^networks:/m.exec(compose)?.[1] || '';
+  assert.match(devBlock, /profiles: \["dev"\]/);
+  assert.match(devBlock, /command: \["sleep", "infinity"\]/);
+  assert.match(devBlock, /init: true/);
+  const workflow = await read('.github/workflows/ci.yml');
+  assert.doesNotMatch(workflow, /RPI_E2E_KEEP|client-dev|--profile dev/);
+  const pkg = await read('package.json');
+  assert.match(pkg, /"e2e:dev:up": "node tests\/e2e\/run\.mjs --dev-up"/);
+  assert.match(pkg, /"e2e:dev:down": "node tests\/e2e\/run\.mjs --dev-down"/);
+});
+```
+
+- [ ] **Step 2: Run the tests and confirm the red state**
+
+Run:
+
+```text
+npm run test:node
+```
+
+Expected: FAIL — `runDev` is not exported, `client-dev` is absent from the Compose file, and the dev scripts are missing from `package.json`.
+
+- [ ] **Step 3: Add the `client-dev` service**
+
+In `tests/e2e/compose.yaml`, immediately after the `client` service block (keep `client-dev` the last service, before the top-level `networks:` key), add:
+
+```yaml
+  client-dev:
+    <<: *runtime
+    profiles: ["dev"]
+    init: true
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      target:
+        condition: service_healthy
+      git-fixture:
+        condition: service_healthy
+    environment:
+      HOME: /tmp/rpi-e2e-home
+      NO_COLOR: "1"
+    working_dir: /opt/e2e/fixtures/app
+    command: ["sleep", "infinity"]
+    networks:
+      - e2e
+    volumes:
+      - ssh-private:/run/e2e-keys:ro
+      - type: bind
+        source: ${RPI_E2E_ARTIFACT_DIR:?RPI_E2E_ARTIFACT_DIR must be set by run.mjs}
+        target: /artifacts
+```
+
+`init: true` keeps `docker stop` fast: `sleep` as PID 1 would ignore SIGTERM and
+wait out the whole grace period.
+
+- [ ] **Step 4: Implement keep mode and `runDev` in the launcher**
+
+In `tests/e2e/run.mjs`, replace the `finally` block of `runE2E`:
+
+```js
+  } finally {
+    const keep = env.RPI_E2E_KEEP === '1';
+    if (attemptedStart && keep) {
+      console.warn(`rpi e2e: RPI_E2E_KEEP=1 — stack kept (project ${projectName})`);
+      console.warn(`rpi e2e:   docker exec -it ${projectName}-target-1 bash`);
+      console.warn(`rpi e2e:   clean up: node tests/e2e/run.mjs --down ${projectName}`);
+    }
+    if (attemptedStart && !keep) {
+      const down = await compose(['down', '-v', '--remove-orphans'], {
+        logPath: path.join(artifactDir, 'cleanup.log'),
+        timeoutMs: 120_000,
+      });
+      if (primaryCode === 0 && down.code !== 0) primaryCode = down.code || 1;
+    }
+    if (localImageTouched && !keep) {
+      await runner(['image', 'rm', runtimeImage], {
+        env: composeEnv,
+        quiet: true,
+        signal,
+      });
+    }
+  }
+```
+
+Append after `runE2E`:
+
+```js
+export async function runDev(action, {
+  runner = spawnDocker,
+  env = process.env,
+  projectName = 'rpi-e2e-dev',
+  artifactDir = path.join(ROOT, 'target', 'e2e-artifacts', projectName),
+  signal,
+} = {}) {
+  await mkdir(artifactDir, { recursive: true });
+  const runtimeImage = env.RPI_E2E_RUNTIME_IMAGE || `rpi-e2e-runtime:${projectName}`;
+  const composeEnv = {
+    ...env,
+    RPI_E2E_ARTIFACT_DIR: artifactDir,
+    RPI_E2E_RUNTIME_IMAGE: runtimeImage,
+  };
+  const base = [
+    'compose', '--ansi', 'never', '--project-name', projectName,
+    '--file', COMPOSE_FILE, '--profile', 'dev',
+  ];
+  const compose = (tail, options = {}) => runner([...base, ...tail], {
+    env: composeEnv,
+    signal,
+    ...options,
+  });
+  if (action === 'up') {
+    const build = await compose(['build', 'client'], { timeoutMs: BUILD_TIMEOUT_MS });
+    if (build.code !== 0) return build.code || 1;
+    const up = await compose([
+      'up', '-d', '--no-build', '--wait', '--wait-timeout', '120',
+      'dind', 'target', 'git-fixture', 'client-dev',
+    ]);
+    if (up.code !== 0) return up.code || 1;
+    console.log(`rpi e2e dev: stack is up (project ${projectName})`);
+    console.log(`  docker exec -it ${projectName}-client-dev-1 bash   # rpi CLI + SSH key`);
+    console.log(`  docker exec -it ${projectName}-target-1 bash       # agent + sshd + nested Docker`);
+    console.log('  in client-dev, once: source /opt/e2e/lib.sh && e2e_client_init');
+    return 0;
+  }
+  if (action === 'down') {
+    const down = await compose(['down', '-v', '--remove-orphans'], { timeoutMs: 120_000 });
+    await runner(['image', 'rm', runtimeImage], { env: composeEnv, quiet: true, signal });
+    return down.code || 0;
+  }
+  throw new Error(`unknown dev action: ${action}`);
+}
+```
+
+Replace the CLI entry block at the bottom:
+
+```js
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  const controller = new AbortController();
+  process.once('SIGINT', () => controller.abort());
+  process.once('SIGTERM', () => controller.abort());
+  const [flag, flagProject] = process.argv.slice(2);
+  if (flag === '--dev-up') {
+    process.exitCode = await runDev('up', { signal: controller.signal });
+  } else if (flag === '--dev-down' || flag === '--down') {
+    process.exitCode = await runDev('down', {
+      signal: controller.signal,
+      ...(flag === '--down' && flagProject ? { projectName: flagProject } : {}),
+    });
+  } else {
+    console.warn('rpi e2e: starting an isolated privileged Docker-in-Docker daemon');
+    process.exitCode = await runE2E({ signal: controller.signal });
+  }
+}
+```
+
+Dev mode intentionally skips the Compose version gate — `npm run test:e2e`
+remains the authoritative validated path. Keep mode intentionally suspends the
+teardown-failure rule; both are pinned out of CI by the contract test.
+
+- [ ] **Step 5: Add the dev package scripts**
+
+The final `scripts` object in `package.json`:
+
+```json
+"scripts": {
+  "postinstall": "node scripts/postinstall.js",
+  "prepublishOnly": "node scripts/check-version.js",
+  "test:node": "node --test",
+  "test:e2e": "node tests/e2e/run.mjs",
+  "e2e:dev:up": "node tests/e2e/run.mjs --dev-up",
+  "e2e:dev:down": "node tests/e2e/run.mjs --dev-down"
+}
+```
+
+- [ ] **Step 6: Make the tests green**
+
+Run:
+
+```text
+npm run test:node
+```
+
+Expected: all Node tests PASS, including the three new launcher tests and the dev-profile contract.
+
+- [ ] **Step 7: Smoke the dev stack manually**
+
+Run:
+
+```text
+npm run e2e:dev:up
+docker exec rpi-e2e-dev-client-dev-1 bash -c "source /opt/e2e/lib.sh && e2e_client_init && rpi deploy --host target --user deploy --key /run/e2e-keys/id_ed25519 && rpi ls --host target --user deploy --key /run/e2e-keys/id_ed25519"
+docker exec rpi-e2e-dev-target-1 bash -c "env DOCKER_HOST=tcp://127.0.0.1:2375 docker ps"
+npm run e2e:dev:down
+```
+
+Expected: deploy reaches `healthcheck: passed`, `rpi ls` shows `e2e-fixture` on
+port `18080`, the nested `docker ps` lists the fixture `web` container, and
+after `e2e:dev:down` the Task 5 Step 6 cleanup checks with filter
+`name=rpi-e2e-dev` produce no rows.
+
+- [ ] **Step 8: Commit the dev stack**
+
+```bash
+git add tests/e2e/compose.yaml tests/e2e/run.mjs tests/e2e/run.test.mjs tests/e2e/contracts.test.mjs package.json
+git commit -m "test(e2e): add manual dev stack profile and keep flag"
 ```
 
 ---
@@ -1351,14 +1675,14 @@ test('CI runs the e2e gate with Buildx cache and failure-only artifacts', async 
   assert.match(workflow, /needs: linux/);
   assert.match(workflow, /runs-on: ubuntu-latest/);
   assert.match(workflow, /timeout-minutes: 30/);
-  assert.match(workflow, /docker\/setup-buildx-action@v3/);
-  assert.match(workflow, /docker\/build-push-action@v6/);
+  assert.match(workflow, /docker\/setup-buildx-action@v4/);
+  assert.match(workflow, /docker\/build-push-action@v7/);
   assert.match(workflow, /cache-from: type=gha,scope=rpi-e2e/);
   assert.match(workflow, /cache-to: type=gha,mode=max,scope=rpi-e2e,ignore-error=true/);
   assert.match(workflow, /RPI_E2E_PREBUILT: "1"/);
   assert.match(workflow, /npm run test:e2e/);
   assert.match(workflow, /if: failure\(\)/);
-  assert.match(workflow, /actions\/upload-artifact@v6/);
+  assert.match(workflow, /actions\/upload-artifact@v7/);
   assert.doesNotMatch(workflow, /runs-on: self-hosted/);
 });
 ```
@@ -1405,9 +1729,9 @@ Append under `jobs:` in `.github/workflows/ci.yml`:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build cached e2e runtime
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: tests/e2e/Dockerfile
@@ -1419,12 +1743,20 @@ Append under `jobs:` in `.github/workflows/ci.yml`:
         run: npm run test:e2e
       - name: Upload e2e diagnostics
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: rpi-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rpi-e2e
           if-no-files-found: ignore
 ```
+
+The pinned action majors were verified against the latest releases on
+2026-07-10 (`docker/setup-buildx-action@v4` = v4.2.0,
+`docker/build-push-action@v7` = v7.3.0, `actions/upload-artifact@v7` = v7.0.1).
+If execution happens much later, re-check with
+`rtk gh api repos/docker/build-push-action/releases/latest --jq .tag_name`;
+if a major moved again, pin the current one and update the CI contract regexes
+in the same commit.
 
 Keep the workflow-level permissions exactly:
 
@@ -1496,7 +1828,23 @@ not cover systemd installation, Cloudflare, secrets, private Git, or ARM.
 
 On failure, inspect `target/e2e-artifacts/<run-id>`. The launcher records build,
 outer Compose, agent, nested Docker, scenario, and cleanup diagnostics before it
-removes the run's containers, networks, and volumes.
+removes the run's containers, networks, and volumes. Set `RPI_E2E_KEEP=1` to
+keep a run's stack around for inspection; the launcher prints the cleanup
+command.
+
+### Manual dev stack
+
+`npm run e2e:dev:up` starts the same topology plus a long-lived `client-dev`
+container (Compose profile `dev`, fixed project name `rpi-e2e-dev`):
+
+```bash
+docker exec -it rpi-e2e-dev-client-dev-1 bash   # rpi CLI + SSH key
+docker exec -it rpi-e2e-dev-target-1 bash       # agent + sshd + nested Docker
+```
+
+Inside `client-dev`, run `source /opt/e2e/lib.sh && e2e_client_init` once, then
+use `rpi <cmd> --host target --user deploy --key /run/e2e-keys/id_ed25519`.
+`npm run e2e:dev:down` removes the dev stack and its image.
 ````
 
 Use four backticks around the outer plan snippet when applying it so the inner
@@ -1531,11 +1879,11 @@ The cache is an optimization, not a correctness dependency. Cache export uses
 Run:
 
 ```text
-rg -n "npm run test:e2e|Compose 2.33.1|privileged|e2e-artifacts" README.md docs/ci-github-actions.md
+rg -n "npm run test:e2e|npm run e2e:dev:up|Compose 2.33.1|privileged|e2e-artifacts" README.md docs/ci-github-actions.md
 rg -n "^\.superpowers$" .gitignore
 ```
 
-Expected: README and CI docs contain all four required concepts; `.gitignore`
+Expected: README and CI docs contain all five required concepts; `.gitignore`
 contains exactly the `.superpowers` ignore entry already present before this
 feature.
 
@@ -1561,7 +1909,8 @@ npm run test:e2e
 ```
 
 Expected: `rpi e2e: PASS`, exit 0, no `rpi-e2e-*` containers, networks, or
-volumes, and artifacts under `target/e2e-artifacts/<run-id>`.
+volumes (tear down any manual dev stack first with `npm run e2e:dev:down`),
+and artifacts under `target/e2e-artifacts/<run-id>`.
 
 - [ ] **Step 5: Review the final diff against the design**
 
