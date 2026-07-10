@@ -37,6 +37,7 @@ pub struct HostSystemProbe {
     disk_threshold_percent: u8,
     cloudflared_enabled: bool,
     ingress_active: bool,
+    cloudflared_config: Option<String>,
     started_at: i64,
 }
 
@@ -50,6 +51,7 @@ impl HostSystemProbe {
         disk_threshold_percent: u8,
         cloudflared_enabled: bool,
         ingress_active: bool,
+        cloudflared_config: Option<String>,
         started_at: i64,
     ) -> Arc<HostSystemProbe> {
         Arc::new(HostSystemProbe {
@@ -60,6 +62,7 @@ impl HostSystemProbe {
             disk_threshold_percent,
             cloudflared_enabled,
             ingress_active,
+            cloudflared_config,
             started_at,
         })
     }
@@ -203,6 +206,65 @@ impl SystemProbe for HostSystemProbe {
             }
         }
 
+        if self.ingress_active {
+            // (a) connector-alive: ingress configured but no cloudflared process.
+            match self.runner.run("pgrep", &["-x", "cloudflared"]).await {
+                Ok(_) => {}                             // connector up — healthy
+                Err(e) if e.starts_with("spawn ") => {} // pgrep unavailable — can't tell, skip
+                Err(_) => checks.push(DiagnosticCheck {
+                    name: "cloudflared connector".into(),
+                    passed: false,
+                    detail: "ingress is configured but no cloudflared process is running".into(),
+                    hint: Some(
+                        "start it: sudo -u rpi-agent XDG_RUNTIME_DIR=/run/user/<uid> \
+                         systemctl --user start cloudflared (or check its logs)"
+                            .into(),
+                    ),
+                }),
+            }
+
+            // (b) route-missing: declared hostname with no route in config.yml.
+            if let Some(path) = &self.cloudflared_config {
+                if let Ok(text) = self.runner.run("cat", &[path]).await {
+                    if let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+                        let routed: std::collections::HashSet<String> = doc
+                            .get("ingress")
+                            .and_then(|v| v.as_sequence())
+                            .map(|rules| {
+                                rules
+                                    .iter()
+                                    .filter_map(|r| {
+                                        r.get("hostname").and_then(|h| h.as_str()).map(String::from)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Ok(projects) = self.projects.list().await {
+                            let missing: Vec<String> = projects
+                                .iter()
+                                .filter_map(|p| p.config.hostname.clone())
+                                .filter(|h| !routed.contains(h))
+                                .collect();
+                            if !missing.is_empty() {
+                                checks.push(DiagnosticCheck {
+                                    name: "ingress route".into(),
+                                    passed: false,
+                                    detail: format!(
+                                        "hostname(s) declared with a running ingress but no route in config.yml: {}",
+                                        missing.join(", ")
+                                    ),
+                                    hint: Some(
+                                        "re-deploy the project(s) to (re)create the route, or check config.yml"
+                                            .into(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         checks.push(match self.disk.used_percent() {
             Ok(percent) => DiagnosticCheck {
                 name: "disk space".into(),
@@ -290,6 +352,43 @@ mod tests {
             85,
             false, // cloudflared binary/service checks off — not under test
             ingress_active,
+            None,
+            0,
+        )
+    }
+
+    struct ScriptedRunner(std::collections::HashMap<String, Result<String, String>>);
+
+    #[async_trait]
+    impl ProbeRunner for ScriptedRunner {
+        async fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
+            let key = std::iter::once(program)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.0.get(&key).cloned().unwrap_or_else(|| Ok("ok".into()))
+        }
+    }
+
+    fn probe_with(
+        runner: Arc<dyn ProbeRunner>,
+        ingress_active: bool,
+        cloudflared_config: Option<String>,
+        projects: Vec<Project>,
+    ) -> Arc<HostSystemProbe> {
+        let mut repo = MockProjectRepository::new();
+        repo.expect_list().returning(move || Ok(projects.clone()));
+        let mut disk = MockDiskProbe::new();
+        disk.expect_used_percent().returning(|| Ok(10));
+        HostSystemProbe::new(
+            runner,
+            Arc::new(disk),
+            Arc::new(repo),
+            "0.0.0".into(),
+            85,
+            false,
+            ingress_active,
+            cloudflared_config,
             0,
         )
     }
@@ -322,5 +421,115 @@ mod tests {
                 "unexpected check for active={active} host={host:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn active_ingress_without_running_connector_fails_the_connector_check() {
+        let mut responses = std::collections::HashMap::new();
+        // pgrep ran, no match (non-"spawn " error) -> connector is down.
+        responses.insert("pgrep -x cloudflared".to_string(), Err(String::new()));
+        let report = probe_with(Arc::new(ScriptedRunner(responses)), true, None, vec![])
+            .diagnostics()
+            .await;
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "cloudflared connector")
+            .expect("connector check present");
+        assert!(!check.passed);
+        assert!(check.detail.contains("no cloudflared process is running"));
+    }
+
+    #[tokio::test]
+    async fn active_ingress_with_running_connector_adds_no_connector_check() {
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("pgrep -x cloudflared".to_string(), Ok("4321".to_string()));
+        let report = probe_with(Arc::new(ScriptedRunner(responses)), true, None, vec![])
+            .diagnostics()
+            .await;
+        assert!(report
+            .checks
+            .iter()
+            .all(|c| c.name != "cloudflared connector"));
+    }
+
+    #[tokio::test]
+    async fn connector_check_skipped_when_pgrep_unavailable() {
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "pgrep -x cloudflared".to_string(),
+            Err("spawn pgrep: No such file or directory".to_string()),
+        );
+        let report = probe_with(Arc::new(ScriptedRunner(responses)), true, None, vec![])
+            .diagnostics()
+            .await;
+        assert!(report
+            .checks
+            .iter()
+            .all(|c| c.name != "cloudflared connector"));
+    }
+
+    #[tokio::test]
+    async fn active_ingress_missing_route_fails_the_route_check() {
+        let config = "tunnel: t\ningress:\n  - hostname: a.example.com\n    service: http://127.0.0.1:8001\n  - service: http_status:404\n";
+        let mut responses = std::collections::HashMap::new();
+        // connector up, so the route check is what fires (isolate it).
+        responses.insert("pgrep -x cloudflared".to_string(), Ok("4321".to_string()));
+        responses.insert(
+            "cat /etc/rpi/config.yml".to_string(),
+            Ok(config.to_string()),
+        );
+        let report = probe_with(
+            Arc::new(ScriptedRunner(responses)),
+            true,
+            Some("/etc/rpi/config.yml".into()),
+            vec![
+                project(Some("a.example.com")),
+                project(Some("b.example.com")),
+            ],
+        )
+        .diagnostics()
+        .await;
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "ingress route")
+            .expect("ingress route check present");
+        assert!(!check.passed);
+        assert!(check.detail.contains("b.example.com"));
+        assert!(
+            !check.detail.contains("a.example.com"),
+            "routed hostname must not be listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_check_skipped_when_config_absent_or_unreadable() {
+        // config path is None -> route check skipped.
+        let report = probe_with(
+            Arc::new(ScriptedRunner(std::collections::HashMap::new())),
+            true,
+            None,
+            vec![project(Some("a.example.com"))],
+        )
+        .diagnostics()
+        .await;
+        assert!(report.checks.iter().all(|c| c.name != "ingress route"));
+
+        // config path set but `cat` fails -> route check skipped silently.
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(
+            "cat /etc/rpi/config.yml".to_string(),
+            Err("No such file".to_string()),
+        );
+        let report = probe_with(
+            Arc::new(ScriptedRunner(responses)),
+            true,
+            Some("/etc/rpi/config.yml".into()),
+            vec![project(Some("a.example.com"))],
+        )
+        .diagnostics()
+        .await;
+        assert!(report.checks.iter().all(|c| c.name != "ingress route"));
     }
 }

@@ -823,6 +823,7 @@ mod tests {
             85,
             false,
             false,
+            None,
             100,
         );
         let diagnostics = RunDiagnostics::new(probe.clone());

@@ -171,6 +171,10 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
         config.gc.disk_threshold_percent,
         config.cloudflared.is_some(),
         ingress_active,
+        config
+            .cloudflared
+            .as_ref()
+            .map(|c| c.config.to_string_lossy().into_owned()),
         now,
     );
     let diagnostics = RunDiagnostics::new(probe.clone());
