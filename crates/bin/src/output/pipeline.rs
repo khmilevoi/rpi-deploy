@@ -4,23 +4,17 @@ use console::Emoji;
 
 use super::{console_style, LogPane, Sem};
 
-#[allow(dead_code)] // wired into `deploy()` by a later task
 const MAX_VISIBLE: usize = 10;
 
-#[allow(dead_code)] // wired into `deploy()` by a later task
 static CHECK: Emoji<'_, '_> = Emoji("✓", "ok");
-#[allow(dead_code)] // wired into `deploy()` by a later task
 static CROSS: Emoji<'_, '_> = Emoji("✗", "x");
-#[allow(dead_code)] // wired into `deploy()` by a later task
 static DOT: Emoji<'_, '_> = Emoji("·", "-");
-#[allow(dead_code)] // wired into `deploy()` by a later task
 static MARKER: Emoji<'_, '_> = Emoji("▸", ">");
 
 /// Deploy stream orchestrator (deploy-stages spec): starts as today's single
 /// `deploy '<project>'` pane and, on the first stage event from the agent,
 /// switches to pipeline mode — one collapsing pane per stage. Old agents never
 /// send stage events, so legacy behaviour is preserved byte-for-byte.
-#[allow(dead_code)] // wired into `deploy()` by a later task
 pub struct Pipeline {
     pane: Option<LogPane>,
     /// Name of the currently open stage pane (None: legacy pane or between stages).
@@ -33,7 +27,6 @@ pub struct Pipeline {
     recording: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
-#[allow(dead_code)] // wired into `deploy()` by a later task
 impl Pipeline {
     pub fn new(project: &str) -> Pipeline {
         let interactive = console::Term::stdout().features().is_attended();

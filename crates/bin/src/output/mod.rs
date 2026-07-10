@@ -10,7 +10,6 @@ mod logpane;
 pub use logpane::LogPane;
 
 mod pipeline;
-#[allow(unused_imports)] // wired into `deploy()` by a later task
 pub use pipeline::Pipeline;
 
 mod banner;

@@ -132,6 +132,7 @@ fn deploy_stamp_inner(
     outcome: StampOutcome,
     project: &str,
     url: Option<&str>,
+    services: Option<usize>,
     elapsed: Duration,
 ) -> String {
     let elapsed = crate::duration::format_elapsed(elapsed);
@@ -140,7 +141,10 @@ fn deploy_stamp_inner(
             let check = if unicode { "✓" } else { "ok" };
             let arrow = if unicode { "→" } else { "->" };
             let dest = url.map(|u| format!("  {arrow}  {u}")).unwrap_or_default();
-            format!("deployed {check} {project}{dest} ({elapsed})")
+            let svc = services
+                .map(|n| format!(" · {n} {}", if n == 1 { "service" } else { "services" }))
+                .unwrap_or_default();
+            format!("deployed {check} {project}{dest}{svc} ({elapsed})")
         }
         StampOutcome::Superseded => {
             format!("deploy superseded — {project} (a newer deploy replaced this one) ({elapsed})")
@@ -156,9 +160,10 @@ pub fn deploy_stamp(
     outcome: StampOutcome,
     project: &str,
     url: Option<&str>,
+    services: Option<usize>,
     elapsed: Duration,
 ) -> String {
-    deploy_stamp_inner(wants_unicode(), outcome, project, url, elapsed)
+    deploy_stamp_inner(wants_unicode(), outcome, project, url, services, elapsed)
 }
 
 #[cfg(test)]
@@ -219,6 +224,7 @@ mod tests {
             StampOutcome::Success,
             "myboard",
             Some("rpi.iiskelo.com"),
+            None,
             Duration::from_millis(12_400),
         );
         assert!(uni.contains("✓"), "{uni:?}");
@@ -230,6 +236,7 @@ mod tests {
             false,
             StampOutcome::Success,
             "myboard",
+            None,
             None,
             Duration::from_secs(1),
         );
@@ -263,6 +270,7 @@ mod tests {
             StampOutcome::Failed,
             "api",
             None,
+            None,
             Duration::from_secs(2),
         );
         assert!(
@@ -274,8 +282,43 @@ mod tests {
             StampOutcome::Superseded,
             "api",
             None,
+            None,
             Duration::from_secs(2),
         );
         assert!(sup.to_lowercase().contains("superseded"), "{sup:?}");
+    }
+
+    #[test]
+    fn stamp_success_includes_service_count_when_known() {
+        let with = deploy_stamp_inner(
+            true,
+            StampOutcome::Success,
+            "myboard",
+            Some("rpi.iiskelo.com"),
+            Some(2),
+            Duration::from_secs(64),
+        );
+        assert!(with.contains("· 2 services"), "{with:?}");
+
+        let one = deploy_stamp_inner(
+            true,
+            StampOutcome::Success,
+            "myboard",
+            None,
+            Some(1),
+            Duration::from_secs(5),
+        );
+        assert!(one.contains("· 1 service"), "{one:?}");
+        assert!(!one.contains("1 services"), "{one:?}");
+
+        let without = deploy_stamp_inner(
+            true,
+            StampOutcome::Success,
+            "myboard",
+            None,
+            None,
+            Duration::from_secs(5),
+        );
+        assert!(!without.contains("service"), "{without:?}");
     }
 }
