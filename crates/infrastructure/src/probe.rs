@@ -9,15 +9,35 @@ use tokio::process::Command;
 #[async_trait]
 pub trait ProbeRunner: Send + Sync {
     async fn run(&self, program: &str, args: &[&str]) -> Result<String, String>;
+
+    /// Like `run`, but with extra environment variables set on the child
+    /// process. Defaults to plain `run` (env ignored) so existing test
+    /// mocks don't need to implement it.
+    async fn run_with_env(
+        &self,
+        program: &str,
+        args: &[&str],
+        _envs: &[(&str, String)],
+    ) -> Result<String, String> {
+        self.run(program, args).await
+    }
 }
 
 pub struct SystemRunner;
 
-#[async_trait]
-impl ProbeRunner for SystemRunner {
-    async fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
-        let output = Command::new(program)
-            .args(args)
+impl SystemRunner {
+    async fn exec(
+        &self,
+        program: &str,
+        args: &[&str],
+        envs: &[(&str, String)],
+    ) -> Result<String, String> {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let output = cmd
             .output()
             .await
             .map_err(|e| format!("spawn {program}: {e}"))?;
@@ -26,6 +46,22 @@ impl ProbeRunner for SystemRunner {
         } else {
             Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
         }
+    }
+}
+
+#[async_trait]
+impl ProbeRunner for SystemRunner {
+    async fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
+        self.exec(program, args, &[]).await
+    }
+
+    async fn run_with_env(
+        &self,
+        program: &str,
+        args: &[&str],
+        envs: &[(&str, String)],
+    ) -> Result<String, String> {
+        self.exec(program, args, envs).await
     }
 }
 
@@ -74,7 +110,24 @@ impl HostSystemProbe {
         args: &[&str],
         hint: &str,
     ) -> DiagnosticCheck {
-        match self.runner.run(program, args).await {
+        self.command_check_with_env(name, program, args, &[], hint)
+            .await
+    }
+
+    /// Same as `command_check`, but with extra environment variables set on
+    /// the probed command. Needed for `systemctl --user` checks: the agent's
+    /// own process environment may lack XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS
+    /// even when the user unit is healthy, which would otherwise report a
+    /// false failure (see the same env fixup in `cloudflared::restart_extra_env`).
+    async fn command_check_with_env(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        envs: &[(&str, String)],
+        hint: &str,
+    ) -> DiagnosticCheck {
+        match self.runner.run_with_env(program, args, envs).await {
             Ok(out) => DiagnosticCheck {
                 name: name.into(),
                 passed: true,
@@ -171,11 +224,17 @@ impl SystemProbe for HostSystemProbe {
                 )
                 .await,
             );
+            let current_runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok();
+            let user_bus_env = crate::cloudflared::restart_extra_env(
+                current_runtime_dir.as_deref(),
+                crate::cloudflared::current_uid(),
+            );
             checks.push(
-                self.command_check(
+                self.command_check_with_env(
                     "cloudflared service",
                     "systemctl",
                     &["--user", "is-active", "cloudflared"],
+                    &user_bus_env,
                     "enable and start cloudflared service: systemctl --user enable --now cloudflared",
                 )
                 .await,
@@ -376,6 +435,17 @@ mod tests {
         cloudflared_config: Option<String>,
         projects: Vec<Project>,
     ) -> Arc<HostSystemProbe> {
+        probe_with_cloudflared(runner, false, ingress_active, cloudflared_config, projects)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn probe_with_cloudflared(
+        runner: Arc<dyn ProbeRunner>,
+        cloudflared_enabled: bool,
+        ingress_active: bool,
+        cloudflared_config: Option<String>,
+        projects: Vec<Project>,
+    ) -> Arc<HostSystemProbe> {
         let mut repo = MockProjectRepository::new();
         repo.expect_list().returning(move || Ok(projects.clone()));
         let mut disk = MockDiskProbe::new();
@@ -386,11 +456,80 @@ mod tests {
             Arc::new(repo),
             "0.0.0".into(),
             85,
-            false,
+            cloudflared_enabled,
             ingress_active,
             cloudflared_config,
             0,
         )
+    }
+
+    type RecordedCall = (String, Vec<(String, String)>);
+
+    struct RecordingRunner {
+        seen_envs: std::sync::Mutex<Vec<RecordedCall>>,
+    }
+
+    impl RecordingRunner {
+        fn new() -> Self {
+            Self {
+                seen_envs: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProbeRunner for RecordingRunner {
+        async fn run(&self, _program: &str, _args: &[&str]) -> Result<String, String> {
+            Ok("active".into())
+        }
+
+        async fn run_with_env(
+            &self,
+            program: &str,
+            args: &[&str],
+            envs: &[(&str, String)],
+        ) -> Result<String, String> {
+            let key = std::iter::once(program)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.seen_envs.lock().unwrap().push((
+                key,
+                envs.iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+            ));
+            Ok("active".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn cloudflared_service_check_passes_the_same_user_bus_env_as_restart() {
+        let runner = Arc::new(RecordingRunner::new());
+        let report = probe_with_cloudflared(runner.clone(), true, true, None, vec![])
+            .diagnostics()
+            .await;
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "cloudflared service")
+            .expect("cloudflared service check present");
+        assert!(check.passed, "expected the check to succeed: {check:?}");
+
+        let expected = crate::cloudflared::restart_extra_env(
+            std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
+            crate::cloudflared::current_uid(),
+        )
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect::<Vec<_>>();
+
+        let seen = runner.seen_envs.lock().unwrap();
+        let call = seen
+            .iter()
+            .find(|(key, _)| key == "systemctl --user is-active cloudflared")
+            .expect("systemctl --user is-active cloudflared was invoked");
+        assert_eq!(call.1, expected);
     }
 
     #[tokio::test]

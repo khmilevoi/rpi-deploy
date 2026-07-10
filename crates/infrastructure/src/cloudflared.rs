@@ -85,7 +85,7 @@ pub(crate) fn remove_ingress_rule(
 /// DBUS_SESSION_BUS_ADDRESS) to reach the user manager; the rpi-agent unit sets
 /// neither. Compute the variables to add to the restart command when the
 /// agent's own environment lacks a non-empty XDG_RUNTIME_DIR.
-fn restart_extra_env(current: Option<&str>, uid: u32) -> Vec<(&'static str, String)> {
+pub(crate) fn restart_extra_env(current: Option<&str>, uid: u32) -> Vec<(&'static str, String)> {
     match current {
         Some(v) if !v.is_empty() => Vec::new(),
         _ => vec![
@@ -99,13 +99,13 @@ fn restart_extra_env(current: Option<&str>, uid: u32) -> Vec<(&'static str, Stri
 }
 
 #[cfg(unix)]
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     // SAFETY: getuid has no preconditions and cannot fail.
     unsafe { libc::getuid() }
 }
 
 #[cfg(not(unix))]
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     0
 }
 
