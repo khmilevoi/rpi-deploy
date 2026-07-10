@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use pi_domain::contracts::LogSink;
-use pi_domain::entities::DeploymentStatus;
+use pi_domain::entities::{DeploymentStatus, StageEvent};
 use tokio::sync::broadcast;
 
 pub(crate) const HUB_BACKLOG: usize = 1000;
@@ -10,18 +10,20 @@ pub(crate) const HUB_BACKLOG: usize = 1000;
 #[derive(Debug, Clone)]
 pub enum DeployEvent {
     Line(String),
+    Stage(StageEvent),
+    Summary(usize),
     Finished(DeploymentStatus),
 }
 
 struct StreamState {
-    lines: VecDeque<String>,
+    backlog: VecDeque<DeployEvent>,
     tx: broadcast::Sender<DeployEvent>,
 }
 
 /// Snapshot of an in-flight deployment's log stream. Finished deployments have
 /// no hub entry (subscribe returns None); their logs come from the DB log_tail.
 pub struct Subscription {
-    pub backlog: Vec<String>,
+    pub backlog: Vec<DeployEvent>,
     pub live: broadcast::Receiver<DeployEvent>,
 }
 
@@ -42,7 +44,7 @@ impl DeployEventsHub {
             streams.insert(
                 deployment_id.to_string(),
                 StreamState {
-                    lines: VecDeque::new(),
+                    backlog: VecDeque::new(),
                     tx,
                 },
             );
@@ -57,7 +59,7 @@ impl DeployEventsHub {
         let streams = self.streams.lock().ok()?;
         let s = streams.get(deployment_id)?;
         Some(Subscription {
-            backlog: s.lines.iter().cloned().collect(),
+            backlog: s.backlog.iter().cloned().collect(),
             live: s.tx.subscribe(),
         })
     }
@@ -68,25 +70,39 @@ pub struct HubSink {
     id: String,
 }
 
-impl LogSink for HubSink {
-    fn line(&self, line: &str) {
+impl HubSink {
+    fn push(&self, ev: DeployEvent) {
         if let Ok(mut streams) = self.hub.streams.lock() {
             if let Some(s) = streams.get_mut(&self.id) {
-                if s.lines.len() == HUB_BACKLOG {
-                    s.lines.pop_front();
+                if s.backlog.len() == HUB_BACKLOG {
+                    s.backlog.pop_front();
                 }
-                s.lines.push_back(line.to_string());
-                let _ = s.tx.send(DeployEvent::Line(line.to_string()));
+                s.backlog.push_back(ev.clone());
+                let _ = s.tx.send(ev);
             }
         }
     }
+}
+
+impl LogSink for HubSink {
+    fn line(&self, line: &str) {
+        self.push(DeployEvent::Line(line.to_string()));
+    }
+
+    fn stage(&self, ev: &StageEvent) {
+        self.push(DeployEvent::Stage(ev.clone()));
+    }
+
+    fn summary(&self, services: usize) {
+        self.push(DeployEvent::Summary(services));
+    }
 
     fn finished(&self, status: DeploymentStatus) {
+        // Remove the entry so its backlog (up to HUB_BACKLOG events) is freed.
+        // Active live subscribers already hold a Receiver; they get the
+        // Finished event from the buffered channel before it closes.
+        // New subscribers after this point fall back to the DB log_tail path.
         if let Ok(mut streams) = self.hub.streams.lock() {
-            // Remove the entry so its backlog (up to HUB_BACKLOG lines) is freed.
-            // Active live subscribers already hold a Receiver; they get the
-            // Finished event from the buffered channel before it closes.
-            // New subscribers after this point fall back to the DB log_tail path.
             if let Some(s) = streams.remove(&self.id) {
                 let _ = s.tx.send(DeployEvent::Finished(status));
             }
@@ -106,10 +122,8 @@ mod tests {
         sink.line("early-2");
 
         let mut sub = hub.subscribe("d1").unwrap();
-        assert_eq!(
-            sub.backlog,
-            vec!["early-1".to_string(), "early-2".to_string()]
-        );
+        assert!(matches!(&sub.backlog[0], DeployEvent::Line(l) if l == "early-1"));
+        assert!(matches!(&sub.backlog[1], DeployEvent::Line(l) if l == "early-2"));
 
         sink.line("live-1");
         sink.finished(DeploymentStatus::Success);
@@ -146,6 +160,32 @@ mod tests {
         }
         let sub = hub.subscribe("d1").unwrap();
         assert_eq!(sub.backlog.len(), HUB_BACKLOG);
-        assert_eq!(sub.backlog.first().unwrap(), "line-5");
+        assert!(matches!(&sub.backlog[0], DeployEvent::Line(l) if l == "line-5"));
+    }
+
+    #[tokio::test]
+    async fn backlog_replays_lines_stages_and_summary_in_order() {
+        use pi_domain::entities::{StageEvent, StageStatus};
+        let hub = DeployEventsHub::new();
+        let sink = hub.register("d1");
+        sink.stage(&StageEvent::started("fetch"));
+        sink.line("cloning");
+        sink.stage(&StageEvent::ok(
+            "fetch",
+            std::time::Duration::from_millis(2100),
+        ));
+        sink.summary(2);
+
+        let sub = hub.subscribe("d1").unwrap();
+        match &sub.backlog[..] {
+            [DeployEvent::Stage(s0), DeployEvent::Line(l), DeployEvent::Stage(s1), DeployEvent::Summary(n)] =>
+            {
+                assert_eq!(s0.status, StageStatus::Started);
+                assert_eq!(l, "cloning");
+                assert_eq!(s1.elapsed_ms, Some(2100));
+                assert_eq!(*n, 2);
+            }
+            other => panic!("unexpected backlog: {other:?}"),
+        }
     }
 }

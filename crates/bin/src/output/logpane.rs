@@ -173,7 +173,7 @@ impl LogPane {
     }
 
     #[cfg(test)]
-    fn new_recording(
+    pub(crate) fn new_recording(
         label: impl Into<String>,
         max_visible: usize,
         interactive: bool,
@@ -242,12 +242,22 @@ impl LogPane {
         crate::output::note(summary);
     }
 
-    pub fn finish_err(self, summary: &str) {
+    /// Erase the live frame without printing anything — used by the deploy
+    /// pipeline to collapse a stage pane before printing its own summary line.
+    #[allow(dead_code)]
+    pub fn clear(self) {
+        if self.interactive {
+            let _ = self.term.clear_last_lines(self.rendered);
+        }
+    }
+
+    /// Failure treatment without a summary line: recolour the frame red in
+    /// place and dump the full captured log under a `— {dump_label} —`
+    /// separator. Non-interactive runs already streamed every line.
+    pub fn abort(self, dump_label: &str) {
         if self.interactive {
             let (_, cols) = self.term.size();
             let width = (cols as usize).max(20);
-            // Recolour the final frame red in place and leave it on screen as
-            // the "here it stopped" marker (no clear).
             let frame = render_frame(
                 &self.label,
                 &self.visible,
@@ -257,17 +267,19 @@ impl LogPane {
             );
             let _ = self.term.write_str(&frame);
             let _ = self.term.flush();
-            // Full captured log below the framed tail — the complete record,
-            // since there is no log file. A dim separator marks it as such.
             (self.print_line)(
                 &console_style(Sem::Muted)
-                    .apply_to("— full log —")
+                    .apply_to(format!("— {dump_label} —"))
                     .to_string(),
             );
             for l in &self.full {
                 (self.print_line)(l);
             }
         }
+    }
+
+    pub fn finish_err(self, summary: &str) {
+        self.abort("full log");
         crate::output::error(summary);
     }
 }
@@ -433,5 +445,36 @@ mod tests {
             !side_line("hi", 10, &fs).contains('\u{1b}'),
             "no ANSI in side"
         );
+    }
+
+    #[test]
+    fn clear_prints_nothing_through_print_line() {
+        let printed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut pane = LogPane::new_recording("test", 3, true, printed.clone());
+        pane.push_line("one");
+        pane.clear();
+        assert!(printed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn abort_dumps_history_under_a_custom_label() {
+        let printed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut pane = LogPane::new_recording("build", 3, true, printed.clone());
+        pane.push_line("step 1");
+        pane.push_line("boom");
+        pane.abort("build log");
+        assert_eq!(
+            *printed.lock().unwrap(),
+            vec!["— build log —", "step 1", "boom"]
+        );
+    }
+
+    #[test]
+    fn abort_non_interactive_adds_nothing_lines_already_streamed() {
+        let printed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut pane = LogPane::new_recording("build", 3, false, printed.clone());
+        pane.push_line("one");
+        pane.abort("build log");
+        assert_eq!(*printed.lock().unwrap(), vec!["one"]);
     }
 }

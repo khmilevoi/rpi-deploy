@@ -5,7 +5,8 @@ use pi_domain::contracts::{
     LogSink, OverrideStore, ProjectRepository, SecretStore, SecretsWriter, Source,
 };
 use pi_domain::entities::{
-    ComposeStack, DeployRef, Deployment, DeploymentStatus, ExposeMode, ProjectConfig, StageTimeouts,
+    ComposeStack, DeployRef, Deployment, DeploymentStatus, ExposeMode, ProjectConfig, StageEvent,
+    StageTimeouts,
 };
 use pi_domain::error::DomainError;
 use tokio::sync::Semaphore;
@@ -76,6 +77,28 @@ async fn staged<T>(
             stage: stage.to_string(),
             secs,
         }),
+    }
+}
+
+/// Emits `started` / `ok` / `failed` stage events around a deploy stage,
+/// measuring wall-clock elapsed. The stage name is the wire name the CLI
+/// renders (deploy-stages spec).
+async fn tracked<T>(
+    log: &Arc<dyn LogSink>,
+    stage: &str,
+    fut: impl std::future::Future<Output = Result<T, DomainError>>,
+) -> Result<T, DomainError> {
+    log.stage(&StageEvent::started(stage));
+    let t0 = std::time::Instant::now();
+    match fut.await {
+        Ok(v) => {
+            log.stage(&StageEvent::ok(stage, t0.elapsed()));
+            Ok(v)
+        }
+        Err(e) => {
+            log.stage(&StageEvent::failed(stage, t0.elapsed()));
+            Err(e)
+        }
     }
 }
 
@@ -218,10 +241,14 @@ impl DeployProject {
             project.config.name, project.host_port
         ));
 
-        let fetched = staged(
+        let fetched = tracked(
+            &log,
             "fetch",
-            timeouts.fetch_secs,
-            self.source.fetch(config, git_ref, log.clone()),
+            staged(
+                "fetch",
+                timeouts.fetch_secs,
+                self.source.fetch(config, git_ref, log.clone()),
+            ),
         )
         .await?;
         log.line(&format!("fetched {}", fetched.commit_sha));
@@ -261,19 +288,41 @@ impl DeployProject {
                 .acquire()
                 .await
                 .map_err(|_| DomainError::Runtime("build semaphore closed".into()))?;
-            staged(
+            tracked(
+                &log,
                 "build",
-                timeouts.build_secs,
-                self.runtime.build(&stack, log.clone()),
+                staged(
+                    "build",
+                    timeouts.build_secs,
+                    self.runtime.build(&stack, log.clone()),
+                ),
             )
             .await?;
         }
-        staged("up", timeouts.up_secs, self.runtime.up(&stack, log.clone())).await?;
+        tracked(
+            &log,
+            "start",
+            staged(
+                "start",
+                timeouts.up_secs,
+                self.runtime.up(&stack, log.clone()),
+            ),
+        )
+        .await?;
 
         // §8: health gate — on failure the deploy is failed, stack stays up
-        self.health
-            .check(config, project.host_port, log.clone())
-            .await?;
+        tracked(
+            &log,
+            "health",
+            self.health.check(config, project.host_port, log.clone()),
+        )
+        .await?;
+
+        // deploy-stages spec: service count for the CLI stamp; ps failure is
+        // non-fatal — the summary is simply not sent.
+        if let Ok(services) = self.runtime.ps(&config.name).await {
+            log.summary(services.len());
+        }
 
         if config.expose == ExposeMode::Lan {
             let hn = Arc::clone(&self.host_network);
@@ -300,24 +349,39 @@ impl DeployProject {
         // §11: route hostname only when configured
         let mut ingress_warning: Option<String> = None;
         if let Some(hostname) = &config.hostname {
+            log.stage(&StageEvent::started("route"));
+            let t0 = std::time::Instant::now();
             match self
                 .ingress
                 .upsert(hostname, project.host_port, log.clone())
-                .await?
+                .await
             {
-                IngressOutcome::Applied => {}
-                IngressOutcome::Skipped => {
+                Ok(IngressOutcome::Applied) => {
+                    log.stage(&StageEvent::ok("route", t0.elapsed()));
+                }
+                Ok(IngressOutcome::Skipped) => {
+                    log.stage(&StageEvent::skipped("route", t0.elapsed()));
                     ingress_warning = Some(format!(
                         "warning: hostname {hostname} is declared but ingress is disabled \
                          on the agent; the app is not publicly reachable — enable it with: \
                          sudo rpi agent setup --with-cloudflared --cf-token-file <path> --domain <zone>"
                     ));
                 }
+                Err(e) => {
+                    log.stage(&StageEvent::failed("route", t0.elapsed()));
+                    return Err(e);
+                }
             }
         }
 
-        if let Err(err) = staged("gc", GC_TIMEOUT_SECS, self.gc.execute(log.clone())).await {
-            log.line(&format!("gc skipped: {err}"));
+        log.stage(&StageEvent::started("gc"));
+        let t0 = std::time::Instant::now();
+        match staged("gc", GC_TIMEOUT_SECS, self.gc.execute(log.clone())).await {
+            Ok(_) => log.stage(&StageEvent::ok("gc", t0.elapsed())),
+            Err(err) => {
+                log.stage(&StageEvent::skipped("gc", t0.elapsed()));
+                log.line(&format!("gc skipped: {err}"));
+            }
         }
 
         // Emitted last so it sits next to the final summary, not mid-stream.
@@ -564,6 +628,20 @@ mod tests {
                 stage_order.lock().unwrap().push("finished");
                 Ok(())
             });
+        m.runtime.expect_ps().times(1).returning(|_| {
+            Ok(vec![
+                pi_domain::entities::ServiceState {
+                    service: "web".into(),
+                    state: "running".into(),
+                    health: None,
+                },
+                pi_domain::entities::ServiceState {
+                    service: "worker".into(),
+                    state: "running".into(),
+                    health: None,
+                },
+            ])
+        });
 
         let deploy = build(m);
         let sink = CollectSink::new();
@@ -592,6 +670,42 @@ mod tests {
                 "ingress", "gc", "finished"
             ]
         );
+
+        use pi_domain::entities::StageStatus::{Ok as SOk, Started};
+        let stages: Vec<(String, pi_domain::entities::StageStatus)> = sink
+            .stages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| (e.stage.clone(), e.status))
+            .collect();
+        assert_eq!(
+            stages,
+            vec![
+                ("fetch".into(), Started),
+                ("fetch".into(), SOk),
+                ("build".into(), Started),
+                ("build".into(), SOk),
+                ("start".into(), Started),
+                ("start".into(), SOk),
+                ("health".into(), Started),
+                ("health".into(), SOk),
+                ("route".into(), Started),
+                ("route".into(), SOk),
+                ("gc".into(), Started),
+                ("gc".into(), SOk),
+            ]
+        );
+        assert!(
+            sink.stages
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|e| (e.status == pi_domain::entities::StageStatus::Started)
+                    == e.elapsed_ms.is_none()),
+            "elapsed_ms present exactly on completions"
+        );
+        assert_eq!(*sink.summaries.lock().unwrap(), vec![2]);
     }
 
     #[tokio::test]
@@ -627,6 +741,7 @@ mod tests {
             .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().times(0);
         m.host_network.expect_primary_ipv4().returning(|| None);
@@ -659,6 +774,7 @@ mod tests {
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().times(0);
         m.host_network
@@ -699,6 +815,7 @@ mod tests {
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().times(0);
         m.host_network.expect_primary_ipv4().returning(|| None);
@@ -737,6 +854,7 @@ mod tests {
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().times(0);
         m.host_network
@@ -962,6 +1080,7 @@ mod tests {
             Ok(())
         });
         m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress
             .expect_upsert()
@@ -1046,6 +1165,7 @@ mod tests {
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress.expect_upsert().times(0);
 
@@ -1092,6 +1212,7 @@ mod tests {
             .returning(|_, _, _, _, _| Ok(PathBuf::from("/o.yml")));
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress
             .expect_upsert()
@@ -1168,6 +1289,12 @@ mod tests {
         assert_eq!(
             *sink.finished.lock().unwrap(),
             vec![DeploymentStatus::Failed]
+        );
+        let stages = sink.stages.lock().unwrap();
+        assert_eq!(stages.last().unwrap().stage, "fetch");
+        assert_eq!(
+            stages.last().unwrap().status,
+            pi_domain::entities::StageStatus::Failed
         );
     }
 
@@ -1406,6 +1533,7 @@ mod tests {
         m.secrets_writer.expect_write().times(0);
         m.runtime.expect_build().returning(|_, _| Ok(()));
         m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
         m.health.expect_check().returning(|_, _, _| Ok(()));
         m.ingress
             .expect_upsert()
@@ -1433,5 +1561,150 @@ mod tests {
             "tail: {}",
             result.log_tail
         );
+    }
+
+    #[tokio::test]
+    async fn build_failure_emits_build_failed_stage_event() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.runtime
+            .expect_build()
+            .returning(|_, _| Err(DomainError::Runtime("compose build exited with 1".into())));
+
+        let deploy = build(m);
+        let sink = CollectSink::new();
+        deploy
+            .execute(
+                "dep-bf".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        let stages = sink.stages.lock().unwrap();
+        let last = stages.last().unwrap();
+        assert_eq!(last.stage, "build");
+        assert_eq!(last.status, pi_domain::entities::StageStatus::Failed);
+        assert!(last.elapsed_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn skipped_ingress_emits_route_skipped_event() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .returning(|_, _, _| Ok(IngressOutcome::Skipped));
+
+        let deploy = build(m);
+        let sink = CollectSink::new();
+        deploy
+            .execute(
+                "dep-rs".into(),
+                sample_config(), // hostname = rateme.isskelo.com
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(sink
+            .stages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.stage == "route" && e.status == pi_domain::entities::StageStatus::Skipped));
+    }
+
+    #[tokio::test]
+    async fn gc_failure_emits_gc_skipped_event() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .returning(|_, _, _| Ok(IngressOutcome::Applied));
+        m.gc_runtime.checkpoint();
+        m.gc_runtime
+            .expect_prune_images()
+            .returning(|_| Err(DomainError::Runtime("docker daemon hiccup".into())));
+
+        let deploy = build(m);
+        let sink = CollectSink::new();
+        let result = deploy
+            .execute(
+                "dep-gs".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+        assert!(sink
+            .stages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.stage == "gc" && e.status == pi_domain::entities::StageStatus::Skipped));
+    }
+
+    #[tokio::test]
+    async fn project_without_hostname_emits_no_route_stage() {
+        let mut m = mocks();
+        ok_pre_stages(&mut m);
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress.expect_upsert().times(0);
+
+        let mut config = sample_config();
+        config.hostname = None;
+
+        let deploy = build(m);
+        let sink = CollectSink::new();
+        deploy
+            .execute(
+                "dep-nr".into(),
+                config,
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!sink
+            .stages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.stage == "route"));
     }
 }

@@ -62,9 +62,13 @@ install is refused when a foreign tunnel is already running on the host;
 `rpi doctor` now flags ingress half-states such as a connector that's down or
 a route that's missing; and the agent injects `DBUS_SESSION_BUS_ADDRESS`
 alongside `XDG_RUNTIME_DIR` so `cloudflared` restarts no longer fail on
-systems that need it), and v0.17.1 fixes `rpi doctor`'s `cloudflared service`
+systems that need it), v0.17.1 fixes `rpi doctor`'s `cloudflared service`
 check reporting a false failure over SSH sessions that don't already export
-`XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`, even when the unit is active.
+`XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`, even when the unit is active,
+and v0.17.2 a deploy pipeline view (`rpi deploy` now renders each stage
+(`fetch → build → start → health → route → gc`) as a collapsing timed pane
+with a `✓ build (48.3s)` summary per stage and a service count in the final
+stamp; older CLI/agent combinations keep the previous single-pane view).
 
 Supported features:
 

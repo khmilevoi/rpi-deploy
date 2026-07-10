@@ -3,7 +3,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 
-use crate::cli::api::ApiClient;
+use crate::cli::api::{ApiClient, DeployStreamEvent};
 use crate::cli::config::ConnectOpts;
 use crate::cli::rpitoml::{RpiToml, SecretsSection};
 use crate::cli::ssh::SshExec;
@@ -45,37 +45,47 @@ pub async fn deploy(git_ref: Option<String>, connect: ConnectOpts) -> anyhow::Re
         ));
     }
 
-    let mut pane = output::LogPane::new(format!("deploy '{}'", rpitoml.project.name), 10);
+    let mut pipeline = output::Pipeline::new(&rpitoml.project.name);
     let mut warnings: Vec<String> = Vec::new();
     let status = api
-        .follow_logs(&accepted.deployment_id, |line| {
-            if let Some(w) = deploy_warning(line) {
-                warnings.push(w.to_string());
+        .follow_logs(&accepted.deployment_id, |ev| match ev {
+            DeployStreamEvent::Line(line) => {
+                if let Some(w) = deploy_warning(line) {
+                    warnings.push(w.to_string());
+                }
+                pipeline.push_line(line)
             }
-            pane.push_line(line)
+            DeployStreamEvent::Stage(dto) => {
+                pipeline.stage(&dto.stage, &dto.status, dto.elapsed_ms)
+            }
+            DeployStreamEvent::Summary { services } => pipeline.summary(services),
         })
         .await?;
     let elapsed = started.elapsed();
     let name = &rpitoml.project.name;
     let url = rpitoml.ingress.hostname.as_deref();
+    let services = pipeline.services();
     match status.as_str() {
-        "success" => pane.finish_ok(&output::deploy_stamp(
+        "success" => pipeline.finish_ok(&output::deploy_stamp(
             output::StampOutcome::Success,
             name,
             url,
+            services,
             elapsed,
         )),
-        "superseded" => pane.finish_neutral(&output::deploy_stamp(
+        "superseded" => pipeline.finish_neutral(&output::deploy_stamp(
             output::StampOutcome::Superseded,
             name,
             url,
+            services,
             elapsed,
         )),
         _ => {
-            pane.finish_err(&output::deploy_stamp(
+            pipeline.finish_err(&output::deploy_stamp(
                 output::StampOutcome::Failed,
                 name,
                 url,
+                services,
                 elapsed,
             ));
             for w in &warnings {

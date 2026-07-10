@@ -493,6 +493,32 @@ fn sse_finished(status: &str) -> Result<Event, Infallible> {
     Ok(Event::default().event("finished").data(status))
 }
 
+fn sse_stage(ev: &pi_domain::entities::StageEvent) -> Result<Event, Infallible> {
+    // Field order is part of the wire contract tests; a derive struct keeps
+    // it stable regardless of serde_json map ordering.
+    #[derive(serde::Serialize)]
+    struct StageDto<'a> {
+        stage: &'a str,
+        status: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+    }
+    let dto = StageDto {
+        stage: &ev.stage,
+        status: ev.status.as_str(),
+        elapsed_ms: ev.elapsed_ms,
+    };
+    Ok(Event::default()
+        .event("stage")
+        .data(serde_json::to_string(&dto).unwrap_or_default()))
+}
+
+fn sse_summary(services: usize) -> Result<Event, Infallible> {
+    Ok(Event::default()
+        .event("summary")
+        .data(format!("{{\"services\":{services}}}")))
+}
+
 /// Terminal event of a command run: the in-container exit code.
 fn sse_exit(code: i32) -> Result<Event, Infallible> {
     Ok(Event::default().event("exit").data(code.to_string()))
@@ -504,13 +530,23 @@ async fn deployment_logs(
 ) -> Result<Response, ApiError> {
     if let Some(sub) = state.hub.subscribe(&id) {
         let stream = async_stream::stream! {
-            for line in sub.backlog {
-                yield sse_log(line);
+            for ev in sub.backlog {
+                match ev {
+                    DeployEvent::Line(line) => yield sse_log(line),
+                    DeployEvent::Stage(ev) => yield sse_stage(&ev),
+                    DeployEvent::Summary(n) => yield sse_summary(n),
+                    DeployEvent::Finished(status) => {
+                        yield sse_finished(status.as_str());
+                        return;
+                    }
+                }
             }
             let mut live = sub.live;
             loop {
                 match live.recv().await {
                     Ok(DeployEvent::Line(line)) => yield sse_log(line),
+                    Ok(DeployEvent::Stage(ev)) => yield sse_stage(&ev),
+                    Ok(DeployEvent::Summary(n)) => yield sse_summary(n),
                     Ok(DeployEvent::Finished(status)) => {
                         yield sse_finished(status.as_str());
                         break;
@@ -1381,6 +1417,45 @@ mod tests {
 
         let (status, _) = request(app, get_req("/v1/projects/ghost/commands")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn deployment_logs_carry_stage_and_summary_sse_events() {
+        use pi_domain::entities::StageEvent;
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with(dir.path(), Arc::new(ok_source()), Arc::new(ok_runtime()));
+        let app = router(state.clone());
+
+        let sink = state.hub.register("dep-sse");
+        sink.line("cloning");
+        sink.stage(&StageEvent::started("fetch"));
+        sink.stage(&StageEvent::ok(
+            "fetch",
+            std::time::Duration::from_millis(2100),
+        ));
+        sink.summary(2);
+        let closer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            sink.finished(DeploymentStatus::Success);
+        });
+
+        let (status, body) = request_text(app, get_req("/v1/deployments/dep-sse/logs")).await;
+        closer.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("event: log"), "{body}");
+        assert!(body.contains("event: stage"), "{body}");
+        assert!(
+            body.contains(r#"{"stage":"fetch","status":"started"}"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"{"stage":"fetch","status":"ok","elapsed_ms":2100}"#),
+            "{body}"
+        );
+        assert!(body.contains("event: summary"), "{body}");
+        assert!(body.contains(r#"{"services":2}"#), "{body}");
+        assert!(body.contains("event: finished"), "{body}");
+        assert!(body.contains("data: success"), "{body}");
     }
 
     #[tokio::test]
