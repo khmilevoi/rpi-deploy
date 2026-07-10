@@ -29,3 +29,23 @@ test('fixture uses local Git, managed port allocation, HTTP fallback, and LF con
   assert.doesNotMatch(dockerfile, /^HEALTHCHECK/m);
   assert.equal(health.trim(), 'ok');
 });
+
+test('runtime builds one current rpi binary and contains required target tools', async () => {
+  const [dockerfile, agent, target, git] = await Promise.all([
+    read('tests/e2e/Dockerfile'),
+    read('tests/e2e/agent.toml'),
+    read('tests/e2e/target-entrypoint.sh'),
+    read('tests/e2e/git-entrypoint.sh'),
+  ]);
+  assert.match(dockerfile, /cargo build --locked -p pi/);
+  assert.match(dockerfile, /COPY --from=builder \/out\/rpi \/usr\/local\/bin\/rpi/);
+  assert.match(dockerfile, /FROM docker:28-cli AS docker_cli/);
+  assert.match(dockerfile, /docker-compose/);
+  assert.match(agent, /socket = "\/run\/rpi\/agent\.sock"/);
+  assert.match(agent, /port_min = 18080/);
+  assert.match(agent, /port_max = 18089/);
+  assert.match(target, /runuser -u rpi-agent/);
+  assert.match(target, /AllowStreamLocalForwarding=yes/);
+  assert.match(git, /git daemon/);
+  assert.match(git, /fixture\.git/);
+});
