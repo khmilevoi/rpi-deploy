@@ -8,7 +8,7 @@ use mockall::automock;
 use crate::entities::{
     AgentOverview, ComposeStack, DeployRef, Deployment, DeploymentStatus, DiagnosticReport,
     FetchedSource, LifecycleAction, Project, ProjectConfig, SecretsBundle, ServiceState,
-    ServiceStats, StatsReport,
+    ServiceStats, StageEvent, StatsReport,
 };
 use crate::error::DomainError;
 
@@ -17,6 +17,11 @@ use crate::error::DomainError;
 pub trait LogSink: Send + Sync {
     fn line(&self, line: &str);
     fn finished(&self, status: DeploymentStatus);
+    /// Deploy pipeline stage marker (deploy-stages spec). Default no-op: only
+    /// the deploy chain (masker → tail → hub) forwards these.
+    fn stage(&self, _ev: &StageEvent) {}
+    /// Service count after the health gate, for the CLI's result stamp.
+    fn summary(&self, _services: usize) {}
 }
 
 /// Fetch code by DeployRef (§6). v1 adapter — GitSource.

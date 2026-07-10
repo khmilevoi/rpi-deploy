@@ -322,6 +322,66 @@ impl std::str::FromStr for DeploymentStatus {
     }
 }
 
+/// Per-stage progress marker for the deploy pipeline view (deploy-stages
+/// spec). Travels through `LogSink` alongside log lines so ordering with the
+/// surrounding output is guaranteed by the channel itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageStatus {
+    Started,
+    Ok,
+    Failed,
+    Skipped,
+}
+
+impl StageStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StageStatus::Started => "started",
+            StageStatus::Ok => "ok",
+            StageStatus::Failed => "failed",
+            StageStatus::Skipped => "skipped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageEvent {
+    pub stage: String,
+    pub status: StageStatus,
+    /// Present on completions (`ok`/`failed`/`skipped`), absent on `started`.
+    pub elapsed_ms: Option<u64>,
+}
+
+impl StageEvent {
+    pub fn started(stage: &str) -> StageEvent {
+        StageEvent {
+            stage: stage.to_string(),
+            status: StageStatus::Started,
+            elapsed_ms: None,
+        }
+    }
+
+    fn done(stage: &str, status: StageStatus, elapsed: std::time::Duration) -> StageEvent {
+        StageEvent {
+            stage: stage.to_string(),
+            status,
+            elapsed_ms: Some(elapsed.as_millis() as u64),
+        }
+    }
+
+    pub fn ok(stage: &str, elapsed: std::time::Duration) -> StageEvent {
+        StageEvent::done(stage, StageStatus::Ok, elapsed)
+    }
+
+    pub fn failed(stage: &str, elapsed: std::time::Duration) -> StageEvent {
+        StageEvent::done(stage, StageStatus::Failed, elapsed)
+    }
+
+    pub fn skipped(stage: &str, elapsed: std::time::Duration) -> StageEvent {
+        StageEvent::done(stage, StageStatus::Skipped, elapsed)
+    }
+}
+
 /// One deployment action (§4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deployment {
@@ -632,6 +692,33 @@ mod tests {
             DiagnosticReport::default().all_passed(),
             "no checks - nothing failed"
         );
+    }
+
+    #[test]
+    fn stage_event_constructors_carry_status_and_elapsed_ms() {
+        use std::time::Duration;
+        let s = StageEvent::started("fetch");
+        assert_eq!(s.stage, "fetch");
+        assert_eq!(s.status, StageStatus::Started);
+        assert_eq!(s.elapsed_ms, None);
+
+        let ok = StageEvent::ok("build", Duration::from_millis(48_231));
+        assert_eq!(ok.status, StageStatus::Ok);
+        assert_eq!(ok.elapsed_ms, Some(48_231));
+
+        assert_eq!(
+            StageEvent::failed("start", Duration::from_secs(2)).status,
+            StageStatus::Failed
+        );
+        assert_eq!(
+            StageEvent::skipped("gc", Duration::from_millis(400)).status,
+            StageStatus::Skipped
+        );
+
+        assert_eq!(StageStatus::Started.as_str(), "started");
+        assert_eq!(StageStatus::Ok.as_str(), "ok");
+        assert_eq!(StageStatus::Failed.as_str(), "failed");
+        assert_eq!(StageStatus::Skipped.as_str(), "skipped");
     }
 }
 
