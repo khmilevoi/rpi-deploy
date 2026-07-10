@@ -1,15 +1,22 @@
 use std::time::Duration;
 
-use console::Emoji;
-
 use super::{console_style, LogPane, Sem};
 
 const MAX_VISIBLE: usize = 10;
 
-static CHECK: Emoji<'_, '_> = Emoji("✓", "ok");
-static CROSS: Emoji<'_, '_> = Emoji("✗", "x");
-static DOT: Emoji<'_, '_> = Emoji("·", "-");
-static MARKER: Emoji<'_, '_> = Emoji("▸", ">");
+const CHECK: (&str, &str) = ("✓", "ok");
+const CROSS: (&str, &str) = ("✗", "x");
+const DOT: (&str, &str) = ("·", "-");
+const MARKER: (&str, &str) = ("▸", ">");
+
+/// Does this terminal render the glyphs above? Queried once at construction
+/// (mirrors `banner::wants_unicode`) rather than at each `Display`, so a
+/// forced `unicode` value in tests is honoured deterministically instead of
+/// re-querying the live terminal — the two disagree in CI, where stdout is
+/// piped (no real console) even though the test fixes `interactive=true`.
+fn wants_unicode() -> bool {
+    console::Term::stdout().features().wants_emoji()
+}
 
 /// Deploy stream orchestrator (deploy-stages spec): starts as today's single
 /// `deploy '<project>'` pane and, on the first stage event from the agent,
@@ -21,6 +28,7 @@ pub struct Pipeline {
     current: Option<String>,
     staged_mode: bool,
     interactive: bool,
+    unicode: bool,
     services: Option<usize>,
     print_line: Box<dyn Fn(&str)>,
     #[cfg(test)]
@@ -35,6 +43,7 @@ impl Pipeline {
             current: None,
             staged_mode: false,
             interactive,
+            unicode: wants_unicode(),
             services: None,
             print_line: Box::new(|l: &str| println!("{l}")),
             #[cfg(test)]
@@ -59,6 +68,11 @@ impl Pipeline {
             current: None,
             staged_mode: false,
             interactive,
+            // Tests assert on the unicode glyph form regardless of the host
+            // terminal (fixed true, unlike `wants_unicode()` in `new()`) —
+            // see `wants_unicode`'s doc comment for why this must not query
+            // the live terminal.
+            unicode: true,
             services: None,
             print_line: Box::new(move |l: &str| sink.lock().unwrap().push(l.to_string())),
             #[cfg(test)]
@@ -100,24 +114,39 @@ impl Pipeline {
             .unwrap_or_default()
     }
 
+    fn glyph(&self, pair: (&'static str, &'static str)) -> &'static str {
+        if self.unicode {
+            pair.0
+        } else {
+            pair.1
+        }
+    }
+
     fn print_done(&self, stage: &str, status: &str, elapsed_ms: Option<u64>) {
         let elapsed = Self::elapsed_suffix(elapsed_ms);
         let line = if !self.interactive {
-            format!("{MARKER} {stage} {status}{elapsed}")
+            let marker = self.glyph(MARKER);
+            format!("{marker} {stage} {status}{elapsed}")
         } else {
             match status {
                 "ok" => format!(
                     "{} {stage}{}",
-                    console_style(Sem::Success).apply_to(CHECK.to_string()),
+                    console_style(Sem::Success).apply_to(self.glyph(CHECK)),
                     console_style(Sem::Muted).apply_to(elapsed),
                 ),
-                "failed" => console_style(Sem::Error)
-                    .apply_to(format!("{CROSS} {stage}{elapsed}"))
-                    .to_string(),
+                "failed" => {
+                    let cross = self.glyph(CROSS);
+                    console_style(Sem::Error)
+                        .apply_to(format!("{cross} {stage}{elapsed}"))
+                        .to_string()
+                }
                 // skipped
-                _ => console_style(Sem::Muted)
-                    .apply_to(format!("{DOT} {stage} skipped{elapsed}"))
-                    .to_string(),
+                _ => {
+                    let dot = self.glyph(DOT);
+                    console_style(Sem::Muted)
+                        .apply_to(format!("{dot} {stage} skipped{elapsed}"))
+                        .to_string()
+                }
             }
         };
         (self.print_line)(&line);
