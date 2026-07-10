@@ -198,7 +198,7 @@ impl SystemProbe for HostSystemProbe {
                         ),
                         hint: Some(
                             "enable it: sudo rpi agent setup --with-cloudflared \
-                             --cf-token <token> --domain <zone>"
+                             --cf-token-file <path> --domain <zone>"
                                 .into(),
                         ),
                     });

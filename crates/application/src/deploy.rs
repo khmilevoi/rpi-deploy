@@ -310,7 +310,7 @@ impl DeployProject {
                     ingress_warning = Some(format!(
                         "warning: hostname {hostname} is declared but ingress is disabled \
                          on the agent; the app is not publicly reachable — enable it with: \
-                         sudo rpi agent setup --with-cloudflared --cf-token <token> --domain <zone>"
+                         sudo rpi agent setup --with-cloudflared --cf-token-file <path> --domain <zone>"
                     ));
                 }
             }
