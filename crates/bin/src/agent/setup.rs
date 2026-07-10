@@ -1013,7 +1013,8 @@ pub(crate) async fn cloudflared_user_service(sys: &dyn Sys, dry: bool, rep: &mut
         .await;
     let _ = sys.run("loginctl", &["enable-linger", "rpi-agent"]).await;
     let runtime = format!("XDG_RUNTIME_DIR=/run/user/{uid}");
-    // enable+start the user unit as rpi-agent with the runtime dir set
+    let dbus = format!("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus");
+    // enable+start the user unit as rpi-agent with the runtime dir + bus set
     let _ = sys
         .run(
             "sudo",
@@ -1021,6 +1022,7 @@ pub(crate) async fn cloudflared_user_service(sys: &dyn Sys, dry: bool, rep: &mut
                 "-u",
                 "rpi-agent",
                 &runtime,
+                &dbus,
                 "systemctl",
                 "--user",
                 "enable",
@@ -2023,6 +2025,27 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c == "loginctl enable-linger rpi-agent"));
+    }
+
+    #[tokio::test]
+    async fn cloudflared_user_service_enable_passes_dbus_address() {
+        let mut sys = fresh_sys();
+        // fresh_sys() seeds `id -u rpi-agent` to fail; this function assumes the
+        // user exists, so make it succeed with a known uid.
+        sys.err.remove(&FakeSys::key("id", &["-u", "rpi-agent"]));
+        sys.ok
+            .insert(FakeSys::key("id", &["-u", "rpi-agent"]), "999".into());
+        let mut rep = SetupReport::default();
+        cloudflared_user_service(&sys, false, &mut rep).await;
+        assert!(
+            sys.calls().iter().any(|c| c
+                .contains("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/999/bus")
+                && c.contains("enable")
+                && c.contains("--now")
+                && c.contains("cloudflared")),
+            "enable --now must pass the DBUS session bus address: {:?}",
+            sys.calls()
+        );
     }
 
     #[tokio::test]

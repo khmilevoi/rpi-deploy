@@ -81,13 +81,20 @@ pub(crate) fn remove_ingress_rule(
     Ok(true)
 }
 
-/// `systemctl --user` needs XDG_RUNTIME_DIR to reach the user manager; the
-/// rpi-agent unit does not set it. Compute the variable to add to the restart
-/// command when the agent's own environment lacks it.
-fn restart_extra_env(current: Option<&str>, uid: u32) -> Option<(&'static str, String)> {
+/// `systemctl --user` needs XDG_RUNTIME_DIR (and, on non-standard setups,
+/// DBUS_SESSION_BUS_ADDRESS) to reach the user manager; the rpi-agent unit sets
+/// neither. Compute the variables to add to the restart command when the
+/// agent's own environment lacks a non-empty XDG_RUNTIME_DIR.
+fn restart_extra_env(current: Option<&str>, uid: u32) -> Vec<(&'static str, String)> {
     match current {
-        Some(v) if !v.is_empty() => None,
-        _ => Some(("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))),
+        Some(v) if !v.is_empty() => Vec::new(),
+        _ => vec![
+            ("XDG_RUNTIME_DIR", format!("/run/user/{uid}")),
+            (
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path=/run/user/{uid}/bus"),
+            ),
+        ],
     }
 }
 
@@ -104,7 +111,7 @@ fn current_uid() -> u32 {
 
 fn apply_restart_env(cmd: &mut Command) {
     let current = std::env::var("XDG_RUNTIME_DIR").ok();
-    if let Some((k, v)) = restart_extra_env(current.as_deref(), current_uid()) {
+    for (k, v) in restart_extra_env(current.as_deref(), current_uid()) {
         cmd.env(k, v);
     }
 }
@@ -465,15 +472,16 @@ mod tests {
 
     #[test]
     fn restart_env_added_only_when_missing() {
-        assert_eq!(
-            restart_extra_env(None, 999),
-            Some(("XDG_RUNTIME_DIR", "/run/user/999".into()))
-        );
-        assert_eq!(restart_extra_env(Some("/run/user/1000"), 999), None);
-        assert_eq!(
-            restart_extra_env(Some(""), 999),
-            Some(("XDG_RUNTIME_DIR", "/run/user/999".into()))
-        );
+        let both = vec![
+            ("XDG_RUNTIME_DIR", "/run/user/999".to_string()),
+            (
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/run/user/999/bus".to_string(),
+            ),
+        ];
+        assert_eq!(restart_extra_env(None, 999), both);
+        assert!(restart_extra_env(Some("/run/user/1000"), 999).is_empty());
+        assert_eq!(restart_extra_env(Some(""), 999), both);
     }
 
     #[cfg(unix)]
