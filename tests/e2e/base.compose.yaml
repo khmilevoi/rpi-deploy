@@ -42,6 +42,14 @@ services:
     command: ["dockerd", "--host=tcp://127.0.0.1:2375"]
     volumes:
       - dind-data:/var/lib/docker
+      # Shared with `target`'s agent-data mount below (same volume, same
+      # path) so a bind-mount source dir that `docker compose` on `target`
+      # resolves under the agent's workdir (/var/lib/rpi/workdirs/<project>)
+      # is materialized by this daemon on the *same* underlying volume,
+      # instead of on dind's own ephemeral overlay fs. Without this, any
+      # scenario relying on bind-mount-created files landing in the
+      # agent-visible workdir (e.g. rm-root-owned) would silently no-op.
+      - agent-data:/var/lib/rpi
     networks:
       e2e:
         aliases:
