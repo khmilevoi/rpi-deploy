@@ -340,6 +340,46 @@ test('a teardown rejection does not throw out of the pool, mask a red scenario, 
   });
 });
 
+test('a rejecting image rm in runE2E teardown does not mask the exit code', async () => {
+  await withArtifacts(async (artifactDir) => {
+    // Success path: the scenario passes, but the shared-image rm rejects —
+    // the finally block must not let that rejection override a green exit code.
+    const successRun = fakeRunner([
+      ok('2.33.1'), // version
+      ok(),         // build client
+      ok(),         // config --quiet
+      ok(),         // up dependencies
+      ok(),         // run client
+      ok(),         // down
+      new Error('image rm exploded'),
+    ]);
+    assert.equal(await runE2E({
+      runner: successRun.runner,
+      artifactDir,
+      projectName: 'rpi-e2e-imgrm-a',
+      env: {},
+      available: ['happy-path'],
+    }), 0);
+
+    // Failure path: the scenario fails and image rm also rejects — the
+    // scenario's exit code must win, not get replaced by the rejection.
+    const failureRun = fakeRunner([
+      ok('2.33.1'), ok(), ok(), ok(),
+      { code: 17, stdout: '', stderr: '', timedOut: false },
+      ok(), ok(), ok(), // diagnostics
+      ok(),             // down
+      new Error('image rm exploded'),
+    ]);
+    assert.equal(await runE2E({
+      runner: failureRun.runner,
+      artifactDir,
+      projectName: 'rpi-e2e-imgrm-b',
+      env: {},
+      available: ['happy-path'],
+    }), 17);
+  });
+});
+
 test('runE2E converts an artifact-directory mkdir failure into a controlled exit code', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'rpi-e2e-mkdir-'));
   try {
@@ -491,8 +531,46 @@ test('dev up builds the shared image once and waits for client-dev', async () =>
 test('dev up accepts a scenario argument', async () => {
   await withArtifacts(async (artifactDir) => {
     const { calls, runner } = fakeRunner([ok(), ok()]);
-    assert.equal(await runDev('up', { runner, artifactDir, env: {}, scenario: 'custom' }), 0);
+    assert.equal(await runDev('up', {
+      runner,
+      artifactDir,
+      env: {},
+      scenario: 'custom',
+      available: ['custom'],
+    }), 0);
     assert.equal(calls[0].options.env.RPI_E2E_SCENARIO, 'custom');
+  });
+});
+
+test('dev up rejects an unknown scenario before touching Docker', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([]);
+    const code = await runDev('up', {
+      runner,
+      artifactDir,
+      env: {},
+      scenario: 'nope',
+      available: ['happy-path'],
+    });
+    assert.equal(code, 2);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('dev up rejects a scenario name that fails the naming contract', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([]);
+    // Even if it were somehow discoverable, an invalid name must still be
+    // rejected — the regex check is independent of list membership.
+    const code = await runDev('up', {
+      runner,
+      artifactDir,
+      env: {},
+      scenario: 'Bad_Name',
+      available: ['happy-path', 'Bad_Name'],
+    });
+    assert.equal(code, 2);
+    assert.equal(calls.length, 0);
   });
 });
 
@@ -505,6 +583,18 @@ test('dev down tears down the fixed dev project and removes its image', async ()
     assert.match(joined, /down -v --remove-orphans/);
     assert.match(joined, /image rm rpi-e2e-runtime:rpi-e2e-dev/);
     assert.equal(calls[0].options.env.RPI_E2E_SCENARIO, 'happy-path');
+  });
+});
+
+test('dev down does not throw when compose down or image rm rejects', async () => {
+  await withArtifacts(async (artifactDir) => {
+    const { calls, runner } = fakeRunner([
+      new Error('compose down exploded'),
+      new Error('image rm exploded'),
+    ]);
+    const code = await runDev('down', { runner, artifactDir, env: {} });
+    assert.equal(code, 1);
+    assert.equal(calls.length, 2);
   });
 });
 
@@ -528,6 +618,32 @@ test('discoverScenarios returns empty for a missing directory', async () => {
     await discoverScenarios(path.join(os.tmpdir(), 'rpi-e2e-none-such')),
     [],
   );
+});
+
+test('discoverScenarios drops folders with names that fail the scenario-name contract, and warns', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rpi-e2e-scenarios-invalid-'));
+  try {
+    await mkdir(path.join(dir, 'good-one'), { recursive: true });
+    await writeFile(path.join(dir, 'good-one', 'scenario.sh'), '#!/usr/bin/env bash\n');
+    await mkdir(path.join(dir, 'Bad_Name'), { recursive: true });
+    await writeFile(path.join(dir, 'Bad_Name', 'scenario.sh'), '#!/usr/bin/env bash\n');
+
+    const originalWarn = console.warn;
+    const warnings = [];
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+    let names;
+    try {
+      names = await discoverScenarios(dir);
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    assert.deepEqual(names, ['good-one']);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /Bad_Name/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('runPool caps concurrency and preserves result order', async () => {

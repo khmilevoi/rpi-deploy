@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -13,6 +13,8 @@ const MIN_COMPOSE = [2, 33, 1];
 const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
 const SCENARIO_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_CONCURRENCY = 2;
+/** Valid Docker Compose project-name component: also the scenario-folder-name contract. */
+const SCENARIO_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 export function parseComposeVersion(text) {
   const match = /(?:^|\s)v?(\d+)\.(\d+)\.(\d+)(?:[-+][^\s]+)?(?:\s|$)/.exec(text.trim());
@@ -36,7 +38,13 @@ export function makeProjectName({
   return `rpi-e2e-${pid}-${now.toString(36)}-${suffix}`.toLowerCase();
 }
 
-/** Scenario folders under tests/e2e/scenarios that contain a scenario.sh. */
+/**
+ * Scenario folders under tests/e2e/scenarios that contain a scenario.sh.
+ * Only folder names matching SCENARIO_NAME_RE (a valid Docker Compose
+ * project-name component) are returned; a scenario folder with an invalid
+ * name is skipped but reported via console.warn so a typo is discoverable
+ * instead of silently dropped.
+ */
 export async function discoverScenarios(dir = SCENARIOS_DIR) {
   let entries;
   try {
@@ -47,7 +55,19 @@ export async function discoverScenarios(dir = SCENARIOS_DIR) {
   const names = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    if (existsSync(path.join(dir, entry.name, 'scenario.sh'))) names.push(entry.name);
+    try {
+      await access(path.join(dir, entry.name, 'scenario.sh'));
+    } catch {
+      continue;
+    }
+    if (SCENARIO_NAME_RE.test(entry.name)) {
+      names.push(entry.name);
+    } else {
+      console.warn(
+        `rpi e2e: ignoring scenario folder with invalid name: ${entry.name} ` +
+          `(must match ${SCENARIO_NAME_RE})`,
+      );
+    }
   }
   return names.sort();
 }
@@ -464,7 +484,17 @@ export async function runE2E({
     return signal?.aborted ? 130 : 1;
   } finally {
     if (localImageTouched && !keep) {
-      await runner(['image', 'rm', runtimeImage], { env: buildEnv, quiet: true, signal });
+      // Best-effort, same as the diagnostics/teardown paths above: a rejecting
+      // runner here must never override the code computed above by throwing
+      // out of this finally block.
+      try {
+        await runner(['image', 'rm', runtimeImage], { env: buildEnv, quiet: true, signal });
+      } catch (imageRmError) {
+        console.error(
+          `rpi e2e: image rm failed (${runtimeImage}): ` +
+            `${imageRmError instanceof Error ? imageRmError.message : imageRmError}`,
+        );
+      }
     }
   }
   if (signal?.aborted) return 130;
@@ -478,9 +508,19 @@ export async function runDev(action, {
   scenario = 'happy-path',
   projectName = 'rpi-e2e-dev',
   artifactDir = path.join(ROOT, 'target', 'e2e-artifacts', projectName),
+  available,
   signal,
 } = {}) {
   await mkdir(artifactDir, { recursive: true });
+
+  const knownScenarios = available ?? await discoverScenarios();
+  if (!SCENARIO_NAME_RE.test(scenario) || !knownScenarios.includes(scenario)) {
+    console.error(
+      `rpi e2e dev: unknown scenario: ${scenario} (available: ${knownScenarios.join(', ')})`,
+    );
+    return 2;
+  }
+
   const runtimeImage = env.RPI_E2E_RUNTIME_IMAGE || `rpi-e2e-runtime:${projectName}`;
   const composeEnv = {
     ...env,
@@ -515,8 +555,26 @@ export async function runDev(action, {
     return 0;
   }
   if (action === 'down') {
-    const down = await compose(['down', '-v', '--remove-orphans'], { timeoutMs: 120_000 });
-    await runner(['image', 'rm', runtimeImage], { env: composeEnv, quiet: true, signal });
+    // Same defensive symmetry as runScenario/runE2E's teardown: a rejecting
+    // runner on either call must not throw out of runDev.
+    let down;
+    try {
+      down = await compose(['down', '-v', '--remove-orphans'], { timeoutMs: 120_000 });
+    } catch (downError) {
+      down = { code: 1 };
+      console.error(
+        `rpi e2e dev: teardown failed: ` +
+          `${downError instanceof Error ? downError.message : downError}`,
+      );
+    }
+    try {
+      await runner(['image', 'rm', runtimeImage], { env: composeEnv, quiet: true, signal });
+    } catch (imageRmError) {
+      console.error(
+        `rpi e2e dev: image rm failed (${runtimeImage}): ` +
+          `${imageRmError instanceof Error ? imageRmError.message : imageRmError}`,
+      );
+    }
     return down.code || 0;
   }
   throw new Error(`unknown dev action: ${action}`);
