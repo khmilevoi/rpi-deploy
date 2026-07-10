@@ -29,3 +29,7 @@ RUN groupadd --system rpi-agent && \
 
 COPY tests/e2e /opt/e2e
 RUN find /opt/e2e -name '*.sh' -exec sed -i 's/\r$//' {} + -exec chmod 0755 {} +
+RUN set -eu; for d in /opt/e2e/scenarios/*/; do \
+      mkdir -p "$d/app"; \
+      cp -rn /opt/e2e/app.default/. "$d/app/"; \
+    done

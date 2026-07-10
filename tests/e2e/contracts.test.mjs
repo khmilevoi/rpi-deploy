@@ -10,19 +10,26 @@ const read = (relative) => readFile(path.join(ROOT, relative), 'utf8');
 
 test('happy-path satisfies the scenario folder contract', async () => {
   await access(path.join(ROOT, 'tests/e2e/scenarios/happy-path/scenario.sh'));
-  await access(path.join(ROOT, 'tests/e2e/scenarios/happy-path/app/rpi.toml'));
+  // happy-path has no app/ dir of its own -- it inherits the full default
+  // skeleton (its project name equals the default's) via the Dockerfile's
+  // build-time overlay step.
+  await access(path.join(ROOT, 'tests/e2e/app.default/rpi.toml'));
+  await access(path.join(ROOT, 'tests/e2e/app.default/compose.yaml'));
+  await access(path.join(ROOT, 'tests/e2e/app.default/Dockerfile'));
+  await access(path.join(ROOT, 'tests/e2e/app.default/health'));
 });
 
-test('happy-path fixture uses local Git, managed port allocation, HTTP fallback, and LF content', async () => {
+test('default app skeleton uses local Git, managed port allocation, HTTP fallback, and LF content', async () => {
   const [attributes, config, compose, dockerfile, health] = await Promise.all([
     read('.gitattributes'),
-    read('tests/e2e/scenarios/happy-path/app/rpi.toml'),
-    read('tests/e2e/scenarios/happy-path/app/compose.yaml'),
-    read('tests/e2e/scenarios/happy-path/app/Dockerfile'),
-    read('tests/e2e/scenarios/happy-path/app/health'),
+    read('tests/e2e/app.default/rpi.toml'),
+    read('tests/e2e/app.default/compose.yaml'),
+    read('tests/e2e/app.default/Dockerfile'),
+    read('tests/e2e/app.default/health'),
   ]);
   assert.match(attributes, /tests\/e2e\/\*\*\/\*\.sh text eol=lf/);
   assert.match(attributes, /tests\/e2e\/scenarios\/\*\/app\/health text eol=lf/);
+  assert.match(attributes, /tests\/e2e\/app\.default\/health text eol=lf/);
   assert.match(config, /name = "e2e-fixture"/);
   assert.match(config, /repo = "git:\/\/git-fixture\/fixture\.git"/);
   assert.match(config, /service = "web"/);
@@ -47,6 +54,7 @@ test('runtime builds one current rpi binary, ships target tools, and normalizes 
   assert.match(dockerfile, /FROM docker:28-cli AS docker_cli/);
   assert.match(dockerfile, /docker-compose/);
   assert.match(dockerfile, /find \/opt\/e2e -name '\*\.sh'/);
+  assert.match(dockerfile, /cp -rn \/opt\/e2e\/app\.default\//);
   assert.match(agent, /socket = "\/run\/rpi\/agent\.sock"/);
   assert.match(agent, /port_min = 18080/);
   assert.match(agent, /port_max = 18089/);
