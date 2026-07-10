@@ -64,6 +64,10 @@ test('outer Compose isolates DinD and preserves the target loopback model', asyn
   const targetBlock = /^  target:\s*$([\s\S]*?)^  git-fixture:\s*$/m.exec(compose)?.[1] || '';
   assert.match(targetBlock, /ssh-public:\/run\/e2e-public:ro/);
   assert.doesNotMatch(targetBlock, /ssh-private/);
+  const dindBlock = /^  dind:\s*$([\s\S]*?)^  target:\s*$/m.exec(compose)?.[1] || '';
+  assert.notEqual(dindBlock, '', 'dind service block must be present');
+  assert.match(dindBlock, /command:\s*\["dockerd", "--host=tcp:\/\/127\.0\.0\.1:2375"\]/);
+  assert.doesNotMatch(dindBlock, /0\.0\.0\.0:2375/);
 });
 
 test('Compose service names match the launcher contract', async () => {

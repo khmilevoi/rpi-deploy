@@ -27,14 +27,19 @@ services:
     environment:
       DOCKER_TLS_CERTDIR: ""
       DOCKER_HOST: tcp://127.0.0.1:2375
-    # No explicit `command:` here: the docker:28-dind entrypoint script always
-    # injects its own `--host=tcp://0.0.0.0:2375` default whenever the first
-    # command argument starts with `-` (which any `--host=...` override does),
-    # so passing --host=tcp://127.0.0.1:2375 as `command` made dockerd try to
-    # bind port 2375 twice and fail with "port is already allocated". The
-    # image's default (0.0.0.0:2375, unauthenticated, no TLS) already covers
-    # 127.0.0.1 access from the `target` container, which shares this
-    # container's network namespace via `network_mode: service:dind`.
+    # The docker:28-dind entrypoint script injects its own all-interfaces
+    # default host binding only when `$#` is 0 or the *first* command
+    # argument starts with `-`. Passing a bare `--host=tcp://127.0.0.1:2375`
+    # as `command` triggered that guard and made dockerd try to bind port
+    # 2375 twice ("port is already allocated"). Prefixing the command with
+    # the literal `dockerd` executable name as argument 0 (which does not
+    # start with `-`) skips the guard, so `exec "$@"` runs
+    # `dockerd --host=tcp://127.0.0.1:2375` exactly once, bound to loopback
+    # only. This keeps the Docker API unreachable from sibling containers
+    # (`git-fixture`, `client`) on the shared `e2e` bridge network; only
+    # `target`, which shares this container's network namespace via
+    # `network_mode: service:dind`, can reach it.
+    command: ["dockerd", "--host=tcp://127.0.0.1:2375"]
     volumes:
       - dind-data:/var/lib/docker
     networks:
