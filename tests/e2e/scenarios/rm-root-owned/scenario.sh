@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reproduces: `rpi rm <project>` fails with `source error: Permission denied
-# (os error 13)` and leaves the project half-removed when the deployed
-# project left root-owned files in its workdir (docker-created bind-mount
-# dirs, owned by root, that the non-root rpi-agent cannot delete). This
-# scenario asserts the CORRECT outcome -- rm succeeds and the project is
-# fully gone -- so it is expected to fail against the current buggy code.
+# Regression guard for the `rpi rm` root-owned-workdir bug: `rpi rm <project>`
+# used to fail with `source error: Permission denied (os error 13)` and leave
+# the project half-removed when the deployed project left root-owned files in
+# its workdir (docker-created bind-mount dirs, owned by root, that the
+# non-root rpi-agent cannot delete). The fix (GitSource::remove_tree) falls
+# back to a one-shot root container that force-removes the leftovers. This
+# scenario asserts the CORRECT outcome -- rm succeeds and the project is fully
+# gone -- so it passes with the fix in place and fails if that fix regresses.
 
 source /opt/e2e/lib.sh
 e2e_bootstrap
