@@ -44,7 +44,6 @@ jobs:
     env:
       RPI_E2E_RUNTIME_IMAGE: rpi-e2e-runtime:ci
       RPI_E2E_PREBUILT: "1"
-      RPI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/rpi-e2e
       RPI_E2E_CONCURRENCY: "3"
     steps:
       - uses: actions/checkout@v6
@@ -62,6 +61,9 @@ jobs:
           cache-from: type=gha,scope=rpi-e2e
           cache-to: type=gha,mode=max,scope=rpi-e2e,ignore-error=true
       - name: Production-path Docker e2e
+        # runner.temp is only valid in step context, not job-level env.
+        env:
+          RPI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/rpi-e2e
         run: npm run test:e2e
       - name: Upload e2e diagnostics
         if: failure()
