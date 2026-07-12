@@ -495,6 +495,34 @@ mod tests {
         }))
     }
 
+    async fn stats_extended() -> impl IntoResponse {
+        axum::Json(serde_json::json!({
+            "host": {
+                "cpu_percent": 12.5,
+                "mem_used_bytes": 1024,
+                "mem_total_bytes": 4096,
+                "disk_used_percent": 40,
+                "uptime_secs": 3600,
+                "temp_celsius": 47.5
+            },
+            "projects": [],
+            "host_history": [
+                {"at_ms": 1, "cpu_percent": 10.0, "mem_used_bytes": 1000, "mem_total_bytes": 4096, "temp_celsius": 45.0},
+                {"at_ms": 2, "cpu_percent": 12.5, "mem_used_bytes": 1024, "mem_total_bytes": 4096, "temp_celsius": 47.5}
+            ]
+        }))
+    }
+
+    #[tokio::test]
+    async fn stats_decodes_temp_and_history() {
+        let app = Router::new().route("/v1/stats", get(stats_extended));
+        let client = ApiClient::new(spawn_app(app).await);
+        let resp = client.stats(None).await.unwrap();
+        assert_eq!(resp.host.temp_celsius, Some(47.5));
+        assert_eq!(resp.host_history.len(), 2);
+        assert_eq!(resp.host_history[1].cpu_percent, 12.5);
+    }
+
     #[tokio::test]
     async fn source_check_returns_typed_payload() {
         let app = Router::new().route("/v1/projects/demo/source/check", post(source_check_denied));
