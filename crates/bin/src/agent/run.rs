@@ -46,7 +46,8 @@ pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .with(file_layer)
         .init();
 
-    let state = build_state(&config, log_dir_available)?;
+    let (state, sampler) = build_state(&config, log_dir_available)?;
+    sampler.start(); // spawn the 2s host-metrics loop inside the tokio runtime
     let hn = Arc::clone(&state.host_network);
     let ip = tokio::task::spawn_blocking(move || hn.primary_ipv4())
         .await

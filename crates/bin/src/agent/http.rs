@@ -781,6 +781,37 @@ mod tests {
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
+    struct StubMetrics;
+    impl pi_domain::contracts::HostMetricsStore for StubMetrics {
+        fn latest(&self) -> Option<pi_domain::entities::HostSample> {
+            Some(pi_domain::entities::HostSample {
+                at_ms: 1,
+                cpu_percent: 12.5,
+                mem_used_bytes: 1024,
+                mem_total_bytes: 4096,
+                temp_celsius: Some(42.0),
+            })
+        }
+        fn history(&self) -> Vec<pi_domain::entities::HostSample> {
+            vec![
+                pi_domain::entities::HostSample {
+                    at_ms: 1,
+                    cpu_percent: 10.0,
+                    mem_used_bytes: 1000,
+                    mem_total_bytes: 4096,
+                    temp_celsius: Some(40.0),
+                },
+                pi_domain::entities::HostSample {
+                    at_ms: 2,
+                    cpu_percent: 12.5,
+                    mem_used_bytes: 1024,
+                    mem_total_bytes: 4096,
+                    temp_celsius: Some(42.0),
+                },
+            ]
+        }
+    }
+
     fn ok_source() -> MockSource {
         let mut source = MockSource::new();
         source.expect_fetch().returning(|p, _, _| {
@@ -870,7 +901,9 @@ mod tests {
             Arc::new(UdpHostNetwork::new()),
         );
         let stream_logs = StreamLogs::new(projects.clone(), secrets.clone(), Arc::clone(&runtime));
-        let stats_provider = CompositeStats::new(Arc::clone(&runtime), disk.clone());
+        let metrics: Arc<dyn pi_domain::contracts::HostMetricsStore> = Arc::new(StubMetrics);
+        let stats_provider =
+            CompositeStats::new(Arc::clone(&runtime), disk.clone(), Arc::clone(&metrics));
         let stats = GetStats::new(projects.clone(), Arc::clone(&history), stats_provider);
         let lifecycle = ControlLifecycle::new(
             projects.clone(),
@@ -935,6 +968,7 @@ mod tests {
             host_network: Arc::new(UdpHostNetwork::new()),
             log_dir: dir.join("logs"),
             log_dir_available: true,
+            metrics,
         }
     }
 
@@ -1209,6 +1243,28 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["disk_used_percent"], 10);
         assert_eq!(json["builder_pruned"], false);
+    }
+
+    #[tokio::test]
+    async fn stats_endpoint_returns_history_and_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, body) = request(
+            app,
+            axum::http::Request::builder()
+                .uri("/v1/stats")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["host"]["temp_celsius"], 42.0);
+        assert_eq!(body["host"]["cpu_percent"], 12.5);
+        assert!(body["host_history"].as_array().unwrap().len() >= 2);
     }
 
     #[tokio::test]

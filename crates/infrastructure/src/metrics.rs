@@ -89,6 +89,16 @@ impl HostMetricsSampler {
         }
     }
 
+    /// Convenience constructor that owns a fresh `sysinfo::System`, so callers
+    /// (the agent's `build_state`) need not depend on `sysinfo` directly.
+    pub fn with_defaults(
+        temp: Arc<dyn TempProbe>,
+        window: Duration,
+        interval: Duration,
+    ) -> HostMetricsSampler {
+        HostMetricsSampler::new(System::new(), temp, window, interval)
+    }
+
     pub fn handle(&self) -> Arc<dyn HostMetricsStore> {
         Arc::new(HostMetricsHandle {
             buf: Arc::clone(&self.buf),

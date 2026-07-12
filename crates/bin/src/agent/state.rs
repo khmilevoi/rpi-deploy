@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use pi_application::command::RunCommand;
@@ -14,7 +16,9 @@ use pi_application::remove::RemoveProject;
 use pi_application::scheduler::{DeployRunner, DeployScheduler};
 use pi_application::secrets::{ListSecrets, SendSecrets};
 use pi_application::stats::GetStats;
-use pi_domain::contracts::{DeploymentHistory, HostNetwork, IdGen, Ingress, Source};
+use pi_domain::contracts::{
+    DeploymentHistory, HostMetricsStore, HostNetwork, IdGen, Ingress, Source, TempProbe,
+};
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
 use pi_infrastructure::disk::SysinfoDiskProbe;
 use pi_infrastructure::docker::DockerComposeRuntime;
@@ -23,6 +27,7 @@ use pi_infrastructure::git::GitSource;
 use pi_infrastructure::health::HybridHealthGate;
 use pi_infrastructure::history::SqliteHistory;
 use pi_infrastructure::hostnet::UdpHostNetwork;
+use pi_infrastructure::metrics::HostMetricsSampler;
 use pi_infrastructure::overrides::FsOverrideStore;
 use pi_infrastructure::probe::{HostSystemProbe, SystemRunner};
 use pi_infrastructure::repo::SqliteProjectRepo;
@@ -31,6 +36,7 @@ use pi_infrastructure::secretsfile::FsSecretsWriter;
 use pi_infrastructure::sqlite::Db;
 use pi_infrastructure::stats::CompositeStats;
 use pi_infrastructure::sys::{SystemClock, UuidGen};
+use pi_infrastructure::temp::ThermalZoneTempProbe;
 
 use crate::agent::config::AgentConfig;
 
@@ -55,9 +61,17 @@ pub struct AppState {
     pub host_network: Arc<dyn HostNetwork>,
     pub log_dir: PathBuf,
     pub log_dir_available: bool,
+    // Not read directly today — `stats` already holds its own clone via
+    // `CompositeStats`. Kept on `AppState` as the shared handle for handlers
+    // added by later stats-modes work (e.g. a live/SSE metrics endpoint).
+    #[allow(dead_code)]
+    pub metrics: Arc<dyn HostMetricsStore>,
 }
 
-pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Result<AppState> {
+pub fn build_state(
+    config: &AgentConfig,
+    log_dir_available: bool,
+) -> anyhow::Result<(AppState, HostMetricsSampler)> {
     std::fs::create_dir_all(&config.data_dir)?;
     let db = Db::open(&config.data_dir.join("state.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -137,7 +151,14 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     );
     let list = ListProjects::new(projects.clone(), runtime.clone(), Arc::clone(&host_network));
     let stream_logs = StreamLogs::new(projects.clone(), secrets.clone(), runtime.clone());
-    let stats_provider = CompositeStats::new(runtime.clone(), disk.clone());
+    let temp_probe: Arc<dyn TempProbe> = ThermalZoneTempProbe::new(Path::new("/"));
+    let sampler = HostMetricsSampler::with_defaults(
+        temp_probe,
+        Duration::from_secs(300),
+        Duration::from_secs(2),
+    );
+    let metrics = sampler.handle();
+    let stats_provider = CompositeStats::new(runtime.clone(), disk.clone(), Arc::clone(&metrics));
     let stats = GetStats::new(projects.clone(), Arc::clone(&history), stats_provider);
     let lifecycle = ControlLifecycle::new(
         projects.clone(),
@@ -190,25 +211,29 @@ pub fn build_state(config: &AgentConfig, log_dir_available: bool) -> anyhow::Res
     );
     let list_secrets = ListSecrets::new(secrets);
 
-    Ok(AppState {
-        scheduler,
-        list,
-        history,
-        hub: DeployEventsHub::new(),
-        ids: UuidGen::new(),
-        source: source as Arc<dyn Source>,
-        send_secrets,
-        list_secrets,
-        gc,
-        stream_logs,
-        stats,
-        lifecycle,
-        commands,
-        remove,
-        diagnostics,
-        agent_status,
-        host_network: Arc::clone(&host_network),
-        log_dir: config.logs.dir.clone(),
-        log_dir_available,
-    })
+    Ok((
+        AppState {
+            scheduler,
+            list,
+            history,
+            hub: DeployEventsHub::new(),
+            ids: UuidGen::new(),
+            source: source as Arc<dyn Source>,
+            send_secrets,
+            list_secrets,
+            gc,
+            stream_logs,
+            stats,
+            lifecycle,
+            commands,
+            remove,
+            diagnostics,
+            agent_status,
+            host_network: Arc::clone(&host_network),
+            log_dir: config.logs.dir.clone(),
+            log_dir_available,
+            metrics,
+        },
+        sampler,
+    ))
 }
