@@ -20,5 +20,6 @@ pub mod secretsfile;
 pub mod sqlite;
 pub mod stats;
 pub mod sys;
+pub mod temp;
 #[cfg(test)]
 pub(crate) mod test_sink;
