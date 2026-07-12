@@ -87,6 +87,7 @@ async fn version() -> Json<VersionInfo> {
     Json(VersionInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         api: "v1".to_string(),
+        features: Some(crate::compat::Feature::advertised()),
     })
 }
 
@@ -1038,6 +1039,28 @@ mod tests {
         let (status, json) = request(app, get_req("/v1/version")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["api"], "v1");
+    }
+
+    /// Drift guard (spec 2026-07-12): the agent must advertise exactly the
+    /// registered feature set — shipping a feature without registering it, or
+    /// hand-editing the handler, fails here.
+    #[tokio::test]
+    async fn version_advertises_every_registered_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+        let (status, json) = request(app, get_req("/v1/version")).await;
+        assert_eq!(status, StatusCode::OK);
+        let advertised: Vec<String> = json["features"]
+            .as_array()
+            .expect("features array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(advertised, crate::compat::Feature::advertised());
     }
 
     #[tokio::test]

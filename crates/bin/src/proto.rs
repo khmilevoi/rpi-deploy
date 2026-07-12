@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 pub struct VersionInfo {
     pub version: String,
     pub api: String,
+    /// `None`: the agent predates the capability handshake (spec
+    /// 2026-07-12) — reconstruct via `compat::legacy_capabilities`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
