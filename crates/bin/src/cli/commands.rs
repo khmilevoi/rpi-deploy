@@ -5,6 +5,7 @@ use base64::Engine as _;
 
 use crate::cli::api::{ApiClient, DeployStreamEvent};
 use crate::cli::config::ConnectOpts;
+use crate::cli::connect::AgentConn;
 use crate::cli::rpitoml::{RpiToml, SecretsSection};
 use crate::cli::ssh::SshExec;
 use crate::cli::tunnel::SshTunnel;
@@ -21,24 +22,27 @@ pub async fn deploy(
     let project = rpitoml.to_project_config();
     output::show_deploy_banner(&rpitoml.project.name);
 
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
+    output::status(format!(
+        "agent {} (api {})",
+        compat.agent_version(),
+        compat.agent_api()
+    ));
 
-    let version = api.version().await?;
-    output::status(format!("agent {} (api {})", version.version, version.api));
-    if let Some(warning) = version_mismatch_warning(env!("CARGO_PKG_VERSION"), &version.version) {
-        output::warn(warning);
+    if compat.gate(crate::compat::Feature::SourceCheck)? {
+        crate::cli::sourcekey::preflight(
+            &crate::cli::sourcekey::GhCli,
+            &api,
+            &rpitoml.project.name,
+            &project.repo,
+            no_gh_key,
+        )
+        .await?;
     }
-
-    crate::cli::sourcekey::preflight(
-        &crate::cli::sourcekey::GhCli,
-        &api,
-        &rpitoml.project.name,
-        &project.repo,
-        no_gh_key,
-    )
-    .await?;
 
     let req = DeployRequest {
         project: (&project).into(),
@@ -104,7 +108,7 @@ pub async fn deploy(
             for w in &warnings {
                 output::warn(w);
             }
-            drop(tunnel);
+            drop(_tunnel);
             std::process::exit(1);
         }
     }
@@ -118,9 +122,11 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
     let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
     let project_name = rpitoml.project.name.clone();
 
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat: _compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
 
     let active = api.active_deployments(&project_name).await?;
     if active.is_empty() {
@@ -160,9 +166,12 @@ pub async fn secrets_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<(
         anyhow::bail!("no secrets to send: env file has no variables and [secrets].files is empty");
     }
 
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
+    compat.gate(crate::compat::Feature::Secrets)?;
 
     let (n, m) = (vars.len(), files.len());
     let resp = api.send_secrets(&project_name, vars, files, apply).await?;
@@ -254,9 +263,11 @@ fn collect_secrets(
 }
 
 pub async fn gc(connect: ConnectOpts) -> anyhow::Result<()> {
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat: _compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
 
     let resp = api.gc().await?;
     output::success(format!(
@@ -271,9 +282,12 @@ pub async fn secrets_ls(connect: ConnectOpts) -> anyhow::Result<()> {
     let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
     let project_name = rpitoml.project.name.clone();
 
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
+    compat.gate(crate::compat::Feature::Secrets)?;
 
     let resp = api.list_secrets(&project_name).await?;
     if resp.keys.is_empty() && resp.files.is_empty() {
@@ -316,9 +330,11 @@ fn expose_cell(expose: &str, lan_ip: Option<&str>, host_port: u16) -> String {
 }
 
 pub async fn ls(connect: ConnectOpts) -> anyhow::Result<()> {
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat: _compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
 
     let projects = api.projects().await?;
     if projects.is_empty() {
@@ -365,9 +381,11 @@ pub async fn logs(
     tail: usize,
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat: _compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
     api.stream_sse(
         &format!("/v1/projects/{project}/logs?tail={tail}&follow={follow}"),
         |line| println!("{line}"),
@@ -382,13 +400,16 @@ pub async fn stats(
     interval: u64,
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
+    compat.gate(crate::compat::Feature::Stats)?;
 
     if watch {
-        // Keep the SSH tunnel alive for the duration of the watch loop.
-        let _tunnel = tunnel;
+        // `_tunnel` from the destructure above keeps the SSH tunnel alive
+        // for the duration of the watch loop.
         return crate::cli::stats_tui::stats_watch(api, project, interval).await;
     }
 
@@ -418,9 +439,11 @@ pub async fn stats(
 }
 
 pub async fn lifecycle(project: String, action: &str, connect: ConnectOpts) -> anyhow::Result<()> {
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat: _compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
     api.lifecycle(&project, action).await?;
     output::success(format!("{action} '{project}': done"));
     Ok(())
@@ -442,9 +465,12 @@ pub async fn command(
     let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
     let project_name = rpitoml.project.name.clone();
 
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel,
+        api,
+        compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
+    compat.gate(crate::compat::Feature::Commands)?;
 
     let Some(name) = name else {
         // List mode: the agent's answer is the deployed reality; the local
@@ -508,9 +534,11 @@ pub async fn rm(
         }
     }
 
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat: _compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
     let resp = api.remove_project(&project, volumes).await?;
     output::success(format!(
         "project '{}' removed{}",
@@ -530,9 +558,11 @@ pub async fn rm(
 }
 
 pub async fn status(json: bool, connect: ConnectOpts) -> anyhow::Result<()> {
-    let profile = connect.resolve()?;
-    let tunnel = SshTunnel::open(&profile).await?;
-    let api = ApiClient::new(tunnel.base_url.clone());
+    let AgentConn {
+        tunnel: _tunnel,
+        api,
+        compat: _compat,
+    } = crate::cli::connect::connect_agent(connect).await?;
     let resp = api.agent_status().await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -771,16 +801,6 @@ pub(crate) fn human_duration(secs: u64) -> String {
     }
 }
 
-/// §9.1: differing CLI/agent binary versions are a warning, not an error.
-fn version_mismatch_warning(cli_version: &str, agent_version: &str) -> Option<String> {
-    (cli_version != agent_version).then(|| {
-        format!(
-            "CLI v{cli_version} and agent v{agent_version} differ - \
-rebuild/update the agent on the Pi (`rpi agent update` ships in v0.5)"
-        )
-    })
-}
-
 /// A deploy log line the agent marked as a warning — re-surfaced next to the
 /// final summary so it cannot scroll away with the stream.
 fn deploy_warning(line: &str) -> Option<&str> {
@@ -945,13 +965,6 @@ mod tests {
         assert_eq!(vars["DB"], "postgres://u:p@db/x");
         assert_eq!(vars.len(), 3);
         assert!(parse_env_file("1BAD=x").is_err());
-    }
-
-    #[test]
-    fn version_mismatch_produces_warning_only_on_difference() {
-        assert!(version_mismatch_warning("0.3.0", "0.3.0").is_none());
-        let warning = version_mismatch_warning("0.3.0", "0.2.0").unwrap();
-        assert!(warning.contains("0.3.0") && warning.contains("0.2.0"));
     }
 
     #[test]

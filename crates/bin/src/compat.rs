@@ -4,17 +4,22 @@
 //! capability string each one advertises in the `/v1/version` handshake,
 //! and what happens when the other side lacks one.
 
-#![allow(dead_code)] // TODO(task-5): remove
-
 use std::collections::BTreeSet;
 
 /// What happens when a feature is missing on the other side.
+///
+/// A third variant, `Degradable` (one-shot warning banner, then the caller
+/// takes its fallback path), existed here through Task 1-4 but was removed
+/// in Task 5: no `Feature` ever mapped to it, so after the call-site
+/// migration nothing constructed it and it tripped `dead_code` under
+/// `-D warnings`. Re-add it (`git log -p -- crates/bin/src/compat.rs` around
+/// the Task 5 commit has the exact diff) the day a feature's `policy()`
+/// actually needs it — e.g. per spec, "flipping \[source-check\] to
+/// Degradable later is a one-line registry change".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {
     /// Error out with an update hint.
     Required,
-    /// One-shot warning banner, then the caller takes its fallback path.
-    Degradable,
     /// Skip quietly (spec 2026-07-10 mandates this for source-check).
     Silent,
 }
@@ -200,26 +205,14 @@ impl CompatSession {
     }
 
     /// Apply the feature's declared policy. `Ok(true)` — go ahead;
-    /// `Ok(false)` — take the fallback path (Degradable already warned once,
-    /// Silent stayed quiet); `Err` — Required feature missing.
+    /// `Ok(false)` — take the fallback path (Silent stayed quiet); `Err` —
+    /// Required feature missing.
     pub fn gate(&self, feature: Feature) -> anyhow::Result<bool> {
-        if self.supports(feature) {
+        if self.pick(&[feature]).is_some() {
             return Ok(true);
         }
         match feature.policy() {
             Policy::Required => Err(self.missing_error(feature)),
-            Policy::Degradable => {
-                self.warn_once(
-                    feature.capability(),
-                    &format!(
-                        "{} is not available on agent v{} (requires agent >= {}) - skipping",
-                        feature.label(),
-                        self.agent_version,
-                        feature.since()
-                    ),
-                );
-                Ok(false)
-            }
             Policy::Silent => Ok(false),
         }
     }

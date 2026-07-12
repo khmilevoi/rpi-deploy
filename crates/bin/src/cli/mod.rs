@@ -1,6 +1,7 @@
 pub mod api;
 pub mod commands;
 pub mod config;
+pub mod connect;
 pub mod init;
 pub mod keys;
 pub mod prompt;
