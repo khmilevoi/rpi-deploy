@@ -42,9 +42,106 @@ pub fn sparkline(values: &[f64], width: usize) -> String {
         .collect()
 }
 
+use crate::output;
+use crate::proto::StatsReportDto;
+
+/// Assemble the whole static `rpi stats` view as a String (colours applied
+/// only on a TTY via comfy-table; plain text under tests/pipes).
+pub fn render_stats_static(report: &StatsReportDto) -> String {
+    use std::fmt::Write as _;
+
+    let h = &report.host;
+    let mem_pct = if h.mem_total_bytes > 0 {
+        h.mem_used_bytes as f64 / h.mem_total_bytes as f64 * 100.0
+    } else {
+        0.0
+    };
+    let temp_cell = match h.temp_celsius {
+        Some(c) => format!("{c:.1}°C"),
+        None => "n/a".to_string(),
+    };
+
+    let mut host_table = output::table();
+    host_table.set_header(output::header(["CPU", "MEM", "TEMP", "DISK", "UPTIME"]));
+    host_table.add_row(vec![
+        output::cell_sem(
+            format!("{:.1}%", h.cpu_percent),
+            output::usage_sem(h.cpu_percent),
+        ),
+        output::cell_sem(
+            format!(
+                "{}/{} ({:.0}%)",
+                human_bytes(h.mem_used_bytes),
+                human_bytes(h.mem_total_bytes),
+                mem_pct
+            ),
+            output::usage_sem(mem_pct),
+        ),
+        output::cell(temp_cell),
+        output::cell_sem(
+            format!("{}%", h.disk_used_percent),
+            output::usage_sem(h.disk_used_percent as f64),
+        ),
+        output::cell(crate::cli::commands::human_duration(h.uptime_secs)),
+    ]);
+
+    let mut out = String::new();
+    let _ = writeln!(out, "{host_table}");
+    // uptime cell above uses crate::cli::commands::human_duration (see Step 3).
+
+    if !report.host_history.is_empty() {
+        let width = 60;
+        let cpu: Vec<f64> = report.host_history.iter().map(|s| s.cpu_percent).collect();
+        let _ = writeln!(out, "CPU%  {}", sparkline(&cpu, width));
+        let temps: Vec<f64> = report
+            .host_history
+            .iter()
+            .filter_map(|s| s.temp_celsius)
+            .collect();
+        if !temps.is_empty() {
+            let _ = writeln!(out, "TEMP  {}", sparkline(&temps, width));
+        }
+    }
+
+    if !report.projects.is_empty() {
+        let mut services = output::table();
+        services.set_header(output::header(["PROJECT", "SERVICE", "CPU", "MEM"]));
+        for p in &report.projects {
+            for s in &p.services {
+                let mem = if s.mem_limit_bytes == 0 {
+                    "n/a".to_string()
+                } else {
+                    let pct = s.mem_used_bytes as f64 / s.mem_limit_bytes as f64 * 100.0;
+                    format!(
+                        "{}/{} ({:.0}%)",
+                        human_bytes(s.mem_used_bytes),
+                        human_bytes(s.mem_limit_bytes),
+                        pct
+                    )
+                };
+                services.add_row(vec![
+                    output::cell(p.project.clone()),
+                    output::cell(s.service.clone()),
+                    output::cell_sem(
+                        format!("{:.1}%", s.cpu_percent),
+                        output::usage_sem(s.cpu_percent),
+                    ),
+                    output::cell(mem),
+                ]);
+            }
+        }
+        let _ = writeln!(out, "{services}");
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::{
+        HostSampleDto, HostStatsDto, ProjectStatsDto, ServiceStatsDto, StatsReportDto,
+    };
 
     #[test]
     fn human_bytes_boundaries() {
@@ -78,5 +175,58 @@ mod tests {
     fn sparkline_keeps_the_newest_values_when_over_width() {
         // width 2 → drops the oldest (0.0); remaining [5.0,10.0] scale to ▁█
         assert_eq!(sparkline(&[0.0, 5.0, 10.0], 2), "▁█");
+    }
+
+    fn report(temp: Option<f64>, history: Vec<HostSampleDto>, mem_limit: u64) -> StatsReportDto {
+        StatsReportDto {
+            host: HostStatsDto {
+                cpu_percent: 12.5,
+                mem_used_bytes: 1024 * 1024 * 1024,
+                mem_total_bytes: 8 * 1024 * 1024 * 1024,
+                disk_used_percent: 40,
+                uptime_secs: 3661,
+                temp_celsius: temp,
+            },
+            projects: vec![ProjectStatsDto {
+                project: "app".into(),
+                services: vec![ServiceStatsDto {
+                    service: "valkey".into(),
+                    cpu_percent: 0.2,
+                    mem_used_bytes: 0,
+                    mem_limit_bytes: mem_limit,
+                }],
+                last_deploy: None,
+            }],
+            host_history: history,
+        }
+    }
+
+    fn sample(cpu: f64, temp: Option<f64>) -> HostSampleDto {
+        HostSampleDto {
+            at_ms: 1,
+            cpu_percent: cpu,
+            mem_used_bytes: 1,
+            mem_total_bytes: 2,
+            temp_celsius: temp,
+        }
+    }
+
+    #[test]
+    fn static_view_shows_na_for_missing_temp_and_zero_mem_limit() {
+        let out = render_stats_static(&report(None, vec![], 0));
+        assert!(out.contains("n/a"), "temp n/a and mem n/a: {out}");
+        assert!(out.contains("1.0 GiB"), "human bytes used: {out}");
+    }
+
+    #[test]
+    fn static_view_renders_sparkline_rows_when_history_present() {
+        let history = vec![sample(0.0, Some(40.0)), sample(10.0, Some(45.0))];
+        let out = render_stats_static(&report(Some(45.0), history, 1024 * 1024 * 512));
+        assert!(out.contains("CPU"), "cpu sparkline label: {out}");
+        assert!(
+            out.chars().any(|c| ('▁'..='█').contains(&c)),
+            "sparkline glyph present: {out}"
+        );
+        assert!(out.contains("45.0"), "temp shown: {out}");
     }
 }
