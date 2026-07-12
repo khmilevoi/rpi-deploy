@@ -8,3 +8,4 @@
 /dist
 /node_modules
 .superpowers
+/tests/e2e/.legacy-src.tar

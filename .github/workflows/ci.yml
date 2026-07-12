@@ -50,6 +50,10 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+      - name: Prepare legacy agent source (cross-version e2e)
+        run: |
+          git fetch --no-tags --depth=1 origin +refs/tags/v0.17.1:refs/tags/v0.17.1
+          node tests/e2e/prepare-legacy.mjs
       - uses: docker/setup-buildx-action@v4
       - name: Build cached e2e runtime
         uses: docker/build-push-action@v7

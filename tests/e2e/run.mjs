@@ -4,6 +4,7 @@ import { createWriteStream, existsSync } from 'node:fs';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { prepareLegacyTar } from './prepare-legacy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
@@ -440,6 +441,7 @@ export async function runE2E({
     }
 
     if (!prebuilt) {
+      await prepareLegacyTar();
       localImageTouched = true;
       const build = await runner([...base, 'build', 'client'], {
         env: buildEnv,
