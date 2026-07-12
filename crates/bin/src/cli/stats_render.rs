@@ -1,3 +1,6 @@
+use crate::output;
+use crate::proto::StatsReportDto;
+
 /// Format a byte count as IEC units (÷1024), one decimal above bytes.
 pub fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -42,9 +45,6 @@ pub fn sparkline(values: &[f64], width: usize) -> String {
         .collect()
 }
 
-use crate::output;
-use crate::proto::StatsReportDto;
-
 /// Assemble the whole static `rpi stats` view as a String (colours applied
 /// only on a TTY via comfy-table; plain text under tests/pipes).
 pub fn render_stats_static(report: &StatsReportDto) -> String {
@@ -87,7 +87,6 @@ pub fn render_stats_static(report: &StatsReportDto) -> String {
 
     let mut out = String::new();
     let _ = writeln!(out, "{host_table}");
-    // uptime cell above uses crate::cli::commands::human_duration (see Step 3).
 
     if !report.host_history.is_empty() {
         let width = 60;
