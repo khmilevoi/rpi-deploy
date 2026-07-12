@@ -109,9 +109,13 @@ pub struct CompatSession {
 }
 ```
 
-API: `supports(Feature) -> bool`, `require(Feature) -> Result<()>`,
-`gate(Feature) -> Result<bool>` (applies the declared policy),
-`pick(&[Feature]) -> Option<Feature>`.
+API: `supports(Feature) -> bool` (raw membership, no side effects),
+`gate(Feature) -> Result<bool>` (applies the declared policy: `Required` →
+`Err` with the update hint, `Degradable` → one-shot warning banner +
+`Ok(false)`, `Silent` → `Ok(false)`; available → `Ok(true)`), and
+`pick(&[Feature]) -> Option<Feature>` (best available generation). Call
+sites use `gate`/`pick`; `supports` exists for branches that need the raw
+fact without triggering policy output.
 
 ### Agent side
 
@@ -160,7 +164,8 @@ fallback).
 - **Agent replaced between handshake and call** (upgraded/rolled back
   mid-command): the bare-404 interpretation stays as a safety net, but
   centralized — one `ApiClient` helper `expect_feature(resp, Feature)` turns
-  a bodyless 404 into the *same* error `require()` would have produced. The
+  a bodyless 404 into the *same* error `gate()` produces for a missing
+  `Required` feature. The
   ad-hoc helpers (`commands_not_found`, the secrets 404 helper, the
   `source_check` special case) are replaced by it. A 404 *with* a JSON
   `{"error"}` body remains a domain not-found and passes through unchanged.
@@ -178,7 +183,7 @@ fallback).
 
 `version_mismatch_warning`, `commands_not_found`, the secrets 404 helper, and
 `source_check`'s inline 404 handling all dissolve into `compat.rs` +
-`expect_feature`. Call sites shrink to `session.require(...)` /
+`expect_feature`. Call sites shrink to `session.gate(...)` /
 `session.supports(...)` / `session.pick(...)`.
 
 ## Testing
