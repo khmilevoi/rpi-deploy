@@ -9,4 +9,5 @@ pub mod setup;
 pub mod sourcekey;
 pub mod sse;
 pub mod ssh;
+pub mod stats_render;
 pub mod tunnel;
