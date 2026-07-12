@@ -52,6 +52,33 @@ async fn extract_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Respo
     anyhow::bail!("{msg}")
 }
 
+/// The {"error"} message of a JSON 404 body, or `None` for a bare 404.
+/// Every rpi-agent error carries a JSON body; axum's bare 404 (route not
+/// registered) does not — that is how an old agent reveals itself.
+async fn json_404_error(resp: reqwest::Response) -> Option<String> {
+    let bytes = resp.bytes().await.unwrap_or_default();
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_string))
+}
+
+/// Race safety net (spec 2026-07-12): the agent may have been swapped
+/// between the handshake and this call. A bare 404 means the running agent
+/// does not serve `feature`; a JSON 404 is a domain not-found and passes
+/// through verbatim.
+async fn expect_feature(
+    resp: reqwest::Response,
+    feature: crate::compat::Feature,
+) -> anyhow::Result<reqwest::Response> {
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return match json_404_error(resp).await {
+            Some(msg) => Err(anyhow::anyhow!("{msg}")),
+            None => Err(crate::compat::feature_unavailable_error(feature)),
+        };
+    }
+    extract_error(resp).await
+}
+
 pub struct ApiClient {
     http: reqwest::Client,
     base: String,
@@ -91,7 +118,10 @@ impl ApiClient {
     /// 404): callers skip the preflight and deploy as before. Deliberate
     /// deviation from the usual bail-on-404 pattern (spec 2026-07-10): old
     /// agents still print the key hint inside the fetch stage, so degrading
-    /// silently keeps first deploys working instead of blocking them.
+    /// silently keeps first deploys working instead of blocking them. The
+    /// blanket `Ok(None)`-on-any-404 stays as the Silent policy's
+    /// transport-level fallback (spec 2026-07-12) — unlike `expect_feature`,
+    /// this method never distinguishes bare vs. JSON 404.
     pub async fn source_check(
         &self,
         project: &str,
@@ -148,7 +178,10 @@ impl ApiClient {
             None => format!("{}/v1/stats", self.base),
         };
         let resp = self.http.get(url).send().await?;
-        Ok(extract_error(resp).await?.json().await?)
+        Ok(expect_feature(resp, crate::compat::Feature::Stats)
+            .await?
+            .json()
+            .await?)
     }
 
     pub async fn agent_status(&self) -> anyhow::Result<AgentOverviewDto> {
@@ -306,7 +339,10 @@ impl ApiClient {
             .json(&req)
             .send()
             .await?;
-        Ok(extract_secrets_error(resp).await?.json().await?)
+        Ok(expect_feature(resp, crate::compat::Feature::Secrets)
+            .await?
+            .json()
+            .await?)
     }
 
     pub async fn list_secrets(&self, project: &str) -> anyhow::Result<SecretsListResponse> {
@@ -315,24 +351,10 @@ impl ApiClient {
             .get(format!("{}/v1/projects/{project}/secrets", self.base))
             .send()
             .await?;
-        Ok(extract_secrets_error(resp).await?.json().await?)
-    }
-
-    /// 404 on this route can mean two very different things: an old agent
-    /// without the feature (bare 404, no JSON body) or a domain "not found"
-    /// (JSON error). Distinguish them for a usable message.
-    async fn commands_not_found(resp: reqwest::Response) -> anyhow::Error {
-        match resp
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| v["error"].as_str().map(str::to_string))
-        {
-            Some(msg) => anyhow::anyhow!("{msg}"),
-            None => {
-                anyhow::anyhow!("agent does not support [commands]; update rpi-agent on the Pi")
-            }
-        }
+        Ok(expect_feature(resp, crate::compat::Feature::Secrets)
+            .await?
+            .json()
+            .await?)
     }
 
     pub async fn list_commands(&self, project: &str) -> anyhow::Result<CommandsResponse> {
@@ -341,10 +363,10 @@ impl ApiClient {
             .get(format!("{}/v1/projects/{project}/commands", self.base))
             .send()
             .await?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(Self::commands_not_found(resp).await);
-        }
-        Ok(extract_error(resp).await?.json().await?)
+        Ok(expect_feature(resp, crate::compat::Feature::Commands)
+            .await?
+            .json()
+            .await?)
     }
 
     /// Streams command output; returns the in-container exit code.
@@ -366,10 +388,7 @@ impl ApiClient {
             })
             .send()
             .await?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(Self::commands_not_found(resp).await);
-        }
-        let resp = extract_error(resp).await?;
+        let resp = expect_feature(resp, crate::compat::Feature::Commands).await?;
         let mut stream = resp.bytes_stream();
         let mut parser = SseParser::default();
         let mut buf: Vec<u8> = Vec::new();
@@ -401,28 +420,12 @@ impl ApiClient {
     }
 }
 
-/// Old agents have no /secrets route. axum's bare 404 carries no {"error"}
-/// JSON body (every rpi-agent error does), so an error-less 404 means
-/// "route not found" -> the agent predates the secrets API.
-async fn extract_secrets_error(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        let bytes = resp.bytes().await.unwrap_or_default();
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            if let Some(msg) = v["error"].as_str() {
-                anyhow::bail!("{msg}");
-            }
-        }
-        anyhow::bail!("agent does not support the secrets API; update the agent on the Pi");
-    }
-    extract_error(resp).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
-    use axum::routing::{get, post};
+    use axum::routing::{get, post, put};
     use axum::Router;
 
     /// Binds an ephemeral port, serves `app` in the background, and returns
@@ -524,6 +527,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_bare_404_means_old_agent_and_prompts_update() {
+        let app = Router::new(); // no /v1/stats route -> bare 404
+        let api = ApiClient::new(spawn_app(app).await);
+        let err = api.stats(None).await.unwrap_err().to_string();
+        assert!(err.contains("stats"), "{err}");
+        assert!(err.contains("update the agent on the Pi"), "{err}");
+    }
+
+    #[tokio::test]
     async fn source_check_returns_typed_payload() {
         let app = Router::new().route("/v1/projects/demo/source/check", post(source_check_denied));
         let client = ApiClient::new(spawn_app(app).await);
@@ -622,11 +634,11 @@ mod tests {
     #[tokio::test]
     async fn list_commands_404_without_body_prompts_agent_update() {
         let app = Router::new().route("/v1/projects/demo/commands", get(not_found_plain));
-        let client = ApiClient::new(spawn_app(app).await);
-
-        let err = client.list_commands("demo").await.unwrap_err();
-
-        assert!(err.to_string().contains("update rpi-agent"), "got: {err}");
+        let api = ApiClient::new(spawn_app(app).await);
+        let err = api.list_commands("demo").await.unwrap_err().to_string();
+        assert!(err.contains("container commands"), "{err}");
+        assert!(err.contains(">= 0.9.0"), "{err}");
+        assert!(err.contains("update the agent on the Pi"), "{err}");
     }
 
     #[tokio::test]
@@ -640,6 +652,41 @@ mod tests {
             err.to_string(),
             "command 'nope' not found; available: create-invite"
         );
+    }
+
+    #[tokio::test]
+    async fn list_secrets_404_without_body_prompts_agent_update() {
+        let app = Router::new().route("/v1/projects/demo/secrets", get(not_found_plain));
+        let api = ApiClient::new(spawn_app(app).await);
+        let err = api.list_secrets("demo").await.unwrap_err().to_string();
+        assert!(err.contains("secrets"), "{err}");
+        assert!(err.contains(">= 0.9.0"), "{err}");
+        assert!(err.contains("update the agent on the Pi"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn list_secrets_404_with_json_error_uses_message_verbatim() {
+        let app = Router::new().route("/v1/projects/demo/secrets", get(not_found_json));
+        let api = ApiClient::new(spawn_app(app).await);
+        let err = api.list_secrets("demo").await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "command 'nope' not found; available: create-invite"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_secrets_404_without_body_prompts_agent_update() {
+        let app = Router::new().route("/v1/projects/demo/secrets", put(not_found_plain));
+        let api = ApiClient::new(spawn_app(app).await);
+        let err = api
+            .send_secrets("demo", BTreeMap::new(), BTreeMap::new(), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("secrets"), "{err}");
+        assert!(err.contains(">= 0.9.0"), "{err}");
+        assert!(err.contains("update the agent on the Pi"), "{err}");
     }
 
     #[test]
