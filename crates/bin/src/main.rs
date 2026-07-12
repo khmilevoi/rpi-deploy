@@ -1,5 +1,6 @@
 mod agent;
 mod cli;
+mod compat;
 mod duration;
 mod output;
 mod proto;
