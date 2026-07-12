@@ -9,6 +9,7 @@ pub mod git;
 pub mod health;
 pub mod history;
 pub mod hostnet;
+pub mod metrics;
 pub mod migrations;
 pub mod overrides;
 pub mod probe;
