@@ -384,6 +384,7 @@ export async function runE2E({
     ? path.resolve(env.RPI_E2E_ARTIFACT_DIR)
     : path.join(ROOT, 'target', 'e2e-artifacts', projectName),
   signal,
+  prepareLegacy = prepareLegacyTar,
 } = {}) {
   try {
     await mkdir(artifactDir, { recursive: true });
@@ -441,7 +442,7 @@ export async function runE2E({
     }
 
     if (!prebuilt) {
-      await prepareLegacyTar();
+      await prepareLegacy();
       localImageTouched = true;
       const build = await runner([...base, 'build', 'client'], {
         env: buildEnv,

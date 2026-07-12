@@ -20,6 +20,11 @@ import {
 
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '', timedOut: false });
 
+// `runE2E`'s real `prepareLegacy` shells out to `git archive` for a pinned
+// tag that only the e2e CI job fetches; unit tests inject this no-op so they
+// never depend on that tag being present locally.
+const prepareLegacyNoop = async () => {};
+
 function fakeRunner(responses) {
   const calls = [];
   const runner = async (args, options = {}) => {
@@ -66,6 +71,7 @@ test('single scenario success: version, build, config, up, run client, down, ima
       ok(),         // image rm
     ]);
     const code = await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-test',
@@ -100,6 +106,7 @@ test('multiple scenarios reuse one image build and aggregate the exit code', asy
       ok(),                                                     // image rm
     ]);
     const code = await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-multi',
@@ -130,6 +137,7 @@ test('--fail-fast stops dispatching after the first failure', async () => {
       ok(),                                                     // image rm
     ]);
     const code = await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-ff',
@@ -152,6 +160,7 @@ test('a scenario filter runs only the requested scenario', async () => {
       ok('2.33.1'), ok(), ok(), ok(), ok(), ok(), ok(),
     ]);
     const code = await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-pick',
@@ -171,6 +180,7 @@ test('an unknown scenario fails with exit 2 before touching Docker', async () =>
   await withArtifacts(async (artifactDir) => {
     const { calls, runner } = fakeRunner([]);
     const code = await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       env: {},
@@ -194,6 +204,7 @@ test('client failure collects diagnostics before teardown and keeps the exit cod
       ok(), // image rm
     ]);
     const code = await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-test',
@@ -220,6 +231,7 @@ test('cleanup failure fails a successful scenario but cannot mask a scenario fai
       ok(),
     ]);
     assert.equal(await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner: successCleanupFailure.runner,
       artifactDir,
       projectName: 'rpi-e2e-a',
@@ -235,6 +247,7 @@ test('cleanup failure fails a successful scenario but cannot mask a scenario fai
       ok(),
     ]);
     assert.equal(await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner: primaryFailure.runner,
       artifactDir,
       projectName: 'rpi-e2e-b',
@@ -323,6 +336,7 @@ test('a teardown rejection does not throw out of the pool, mask a red scenario, 
       ok(),                                                     // image rm
     ]);
     const code = await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-teardown-reject',
@@ -354,6 +368,7 @@ test('a rejecting image rm in runE2E teardown does not mask the exit code', asyn
       new Error('image rm exploded'),
     ]);
     assert.equal(await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner: successRun.runner,
       artifactDir,
       projectName: 'rpi-e2e-imgrm-a',
@@ -371,6 +386,7 @@ test('a rejecting image rm in runE2E teardown does not mask the exit code', asyn
       new Error('image rm exploded'),
     ]);
     assert.equal(await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner: failureRun.runner,
       artifactDir,
       projectName: 'rpi-e2e-imgrm-b',
@@ -387,6 +403,7 @@ test('runE2E converts an artifact-directory mkdir failure into a controlled exit
     await writeFile(blocker, 'x');
     const { calls, runner } = fakeRunner([]);
     const code = await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir: path.join(blocker, 'nested'),
       env: {},
@@ -403,6 +420,7 @@ test('prebuilt mode skips local build and image removal', async () => {
   await withArtifacts(async (artifactDir) => {
     const { calls, runner } = fakeRunner([ok('2.40.0'), ok(), ok(), ok(), ok()]);
     assert.equal(await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-ci',
@@ -422,6 +440,7 @@ test('Compose older than 2.33.1 fails before any service starts', async () => {
   await withArtifacts(async (artifactDir) => {
     const { calls, runner } = fakeRunner([ok('2.32.4')]);
     assert.equal(await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-old',
@@ -441,6 +460,7 @@ test('a timed-out client returns 124 and tears down exactly once', async () => {
       ok(), ok(),       // down, image rm
     ]);
     assert.equal(await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-timeout',
@@ -457,6 +477,7 @@ test('an already-aborted run exits 130 without touching Docker', async () => {
     controller.abort();
     const { calls, runner } = fakeRunner([]);
     assert.equal(await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-aborted',
@@ -476,6 +497,7 @@ test('RPI_E2E_KEEP=1 skips teardown and image removal', async () => {
       ok(), ok(), ok(), // diagnostics
     ]);
     assert.equal(await runE2E({
+      prepareLegacy: prepareLegacyNoop,
       runner,
       artifactDir,
       projectName: 'rpi-e2e-keep',
