@@ -201,6 +201,8 @@ mod tests {
                     cpu_percent: 0.2,
                     mem_used_bytes: 0,
                     mem_limit_bytes: mem_limit,
+                    state: "running".into(),
+                    health: None,
                 }],
                 last_deploy: None,
             }],

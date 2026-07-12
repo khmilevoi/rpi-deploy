@@ -180,6 +180,10 @@ pub struct ServiceStatsDto {
     pub cpu_percent: f64,
     pub mem_used_bytes: u64,
     pub mem_limit_bytes: u64,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub health: Option<String>,
 }
 
 impl From<ServiceStats> for ServiceStatsDto {
@@ -189,6 +193,8 @@ impl From<ServiceStats> for ServiceStatsDto {
             cpu_percent: s.cpu_percent,
             mem_used_bytes: s.mem_used_bytes,
             mem_limit_bytes: s.mem_limit_bytes,
+            state: s.state,
+            health: s.health,
         }
     }
 }
@@ -688,5 +694,13 @@ mod tests {
         assert_eq!(back.host.temp_celsius, Some(50.5));
         assert_eq!(back.host_history.len(), 1);
         assert_eq!(back.host_history[0].mem_total_bytes, 8);
+    }
+
+    #[test]
+    fn service_stats_dto_defaults_missing_state_and_health() {
+        let json = r#"{"service":"web","cpu_percent":0.0,"mem_used_bytes":10,"mem_limit_bytes":0}"#;
+        let dto: ServiceStatsDto = serde_json::from_str(json).unwrap();
+        assert_eq!(dto.state, "");
+        assert_eq!(dto.health, None);
     }
 }
