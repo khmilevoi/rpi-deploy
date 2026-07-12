@@ -117,10 +117,7 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
-    let patch = match parts.next() {
-        Some(p) => p.parse().ok()?,
-        None => return None,
-    };
+    let patch = parts.next()?.parse().ok()?;
     if parts.next().is_some() {
         return None;
     }
