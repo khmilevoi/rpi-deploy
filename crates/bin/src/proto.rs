@@ -4,8 +4,8 @@ use pi_application::list::ProjectView;
 use pi_application::remove::RemoveReport;
 use pi_domain::entities::{
     AgentOverview, CommandSpec, Deployment, DiagnosticCheck, DiagnosticReport, ExposeMode,
-    HealthcheckConfig, HostStats, ProjectConfig, ProjectStats, ServiceStats, StageTimeoutOverrides,
-    StatsReport,
+    HealthcheckConfig, HostSample, HostStats, ProjectConfig, ProjectStats, ServiceStats,
+    StageTimeoutOverrides, StatsReport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +196,8 @@ pub struct HostStatsDto {
     pub mem_total_bytes: u64,
     pub disk_used_percent: u8,
     pub uptime_secs: u64,
+    #[serde(default)]
+    pub temp_celsius: Option<f64>,
 }
 
 impl From<HostStats> for HostStatsDto {
@@ -206,6 +208,29 @@ impl From<HostStats> for HostStatsDto {
             mem_total_bytes: h.mem_total_bytes,
             disk_used_percent: h.disk_used_percent,
             uptime_secs: h.uptime_secs,
+            temp_celsius: h.temp_celsius,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostSampleDto {
+    pub at_ms: i64,
+    pub cpu_percent: f64,
+    pub mem_used_bytes: u64,
+    pub mem_total_bytes: u64,
+    #[serde(default)]
+    pub temp_celsius: Option<f64>,
+}
+
+impl From<HostSample> for HostSampleDto {
+    fn from(s: HostSample) -> HostSampleDto {
+        HostSampleDto {
+            at_ms: s.at_ms,
+            cpu_percent: s.cpu_percent,
+            mem_used_bytes: s.mem_used_bytes,
+            mem_total_bytes: s.mem_total_bytes,
+            temp_celsius: s.temp_celsius,
         }
     }
 }
@@ -231,6 +256,8 @@ impl From<ProjectStats> for ProjectStatsDto {
 pub struct StatsReportDto {
     pub host: HostStatsDto,
     pub projects: Vec<ProjectStatsDto>,
+    #[serde(default)]
+    pub host_history: Vec<HostSampleDto>,
 }
 
 impl From<StatsReport> for StatsReportDto {
@@ -238,6 +265,7 @@ impl From<StatsReport> for StatsReportDto {
         StatsReportDto {
             host: r.host.into(),
             projects: r.projects.into_iter().map(Into::into).collect(),
+            host_history: r.host_history.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -619,5 +647,42 @@ mod tests {
                 .as_deref(),
             Some("server")
         );
+    }
+
+    #[test]
+    fn old_agent_stats_body_without_history_or_temp_decodes_to_defaults() {
+        // An old agent never emits `temp_celsius` or `host_history`.
+        let json = r#"{"host":{"cpu_percent":5.0,"mem_used_bytes":100,"mem_total_bytes":200,"disk_used_percent":10,"uptime_secs":42},"projects":[]}"#;
+        let dto: StatsReportDto = serde_json::from_str(json).unwrap();
+        assert_eq!(dto.host.temp_celsius, None);
+        assert!(dto.host_history.is_empty());
+    }
+
+    #[test]
+    fn stats_report_dto_roundtrips_with_history_and_temp() {
+        let report = StatsReport {
+            host: HostStats {
+                cpu_percent: 9.0,
+                mem_used_bytes: 10,
+                mem_total_bytes: 20,
+                disk_used_percent: 3,
+                uptime_secs: 7,
+                temp_celsius: Some(50.5),
+            },
+            projects: vec![],
+            host_history: vec![HostSample {
+                at_ms: 1,
+                cpu_percent: 1.0,
+                mem_used_bytes: 4,
+                mem_total_bytes: 8,
+                temp_celsius: None,
+            }],
+        };
+        let dto: StatsReportDto = report.into();
+        let json = serde_json::to_string(&dto).unwrap();
+        let back: StatsReportDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.host.temp_celsius, Some(50.5));
+        assert_eq!(back.host_history.len(), 1);
+        assert_eq!(back.host_history[0].mem_total_bytes, 8);
     }
 }
