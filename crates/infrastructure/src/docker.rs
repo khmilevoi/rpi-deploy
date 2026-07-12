@@ -145,7 +145,11 @@ pub(crate) fn parse_stats_json(ps_output: &str, stats_output: &str) -> Vec<Servi
     let services: HashMap<String, (String, String, Option<String>)> = json_lines(ps_output)
         .iter()
         .filter_map(|v| {
-            let state = v.get("State").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let state = v
+                .get("State")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
             let health = v
                 .get("Health")
                 .and_then(|h| h.as_str())
