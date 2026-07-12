@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use pi_domain::contracts::{HostMetricsStore, TempProbe};
 use pi_domain::entities::HostSample;
+use sysinfo::System;
 
 /// Age-evicted ring buffer of host samples. Pure — no clock, no IO, no tokio.
 /// Eviction is relative to the newest sample's timestamp so tests are
@@ -37,6 +40,94 @@ impl RingBuffer {
 
     pub fn snapshot(&self) -> Vec<HostSample> {
         self.samples.iter().cloned().collect()
+    }
+}
+
+/// Owns the ring buffer behind a std `Mutex` (critical section is a
+/// push/evict with no `.await` held) plus the loop's sysinfo + temp state.
+pub struct HostMetricsSampler {
+    buf: Arc<Mutex<RingBuffer>>,
+    system: System,
+    temp: Arc<dyn TempProbe>,
+    interval: Duration,
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn take_sample(system: &mut System, temp: &Arc<dyn TempProbe>) -> HostSample {
+    system.refresh_cpu_usage();
+    system.refresh_memory();
+    HostSample {
+        at_ms: now_ms(),
+        cpu_percent: f64::from(system.global_cpu_usage()),
+        mem_used_bytes: system.used_memory(),
+        mem_total_bytes: system.total_memory(),
+        temp_celsius: temp.cpu_celsius(),
+    }
+}
+
+impl HostMetricsSampler {
+    pub fn new(
+        mut system: System,
+        temp: Arc<dyn TempProbe>,
+        window: Duration,
+        interval: Duration,
+    ) -> HostMetricsSampler {
+        let mut ring = RingBuffer::new(window);
+        // Immediate seed so `latest()` is Some before the first request.
+        ring.push(take_sample(&mut system, &temp));
+        HostMetricsSampler {
+            buf: Arc::new(Mutex::new(ring)),
+            system,
+            temp,
+            interval,
+        }
+    }
+
+    pub fn handle(&self) -> Arc<dyn HostMetricsStore> {
+        Arc::new(HostMetricsHandle {
+            buf: Arc::clone(&self.buf),
+        })
+    }
+
+    pub fn start(self) {
+        let HostMetricsSampler {
+            buf,
+            mut system,
+            temp,
+            interval,
+        } = self;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await; // first tick fires immediately — skip (already seeded)
+            loop {
+                ticker.tick().await;
+                let sample = take_sample(&mut system, &temp);
+                if let Ok(mut ring) = buf.lock() {
+                    ring.push(sample);
+                }
+            }
+        });
+    }
+}
+
+/// Cloneable read handle over the shared ring buffer.
+struct HostMetricsHandle {
+    buf: Arc<Mutex<RingBuffer>>,
+}
+
+impl HostMetricsStore for HostMetricsHandle {
+    fn latest(&self) -> Option<HostSample> {
+        self.buf.lock().ok().and_then(|r| r.latest())
+    }
+
+    fn history(&self) -> Vec<HostSample> {
+        self.buf.lock().map(|r| r.snapshot()).unwrap_or_default()
     }
 }
 
@@ -87,5 +178,48 @@ mod tests {
             rb.snapshot().iter().map(|s| s.at_ms).collect::<Vec<_>>(),
             vec![10, 20, 30]
         );
+    }
+}
+
+#[cfg(test)]
+mod sampler_tests {
+    use super::*;
+    use std::sync::Arc;
+    use sysinfo::System;
+
+    struct FixedTemp(Option<f64>);
+    impl pi_domain::contracts::TempProbe for FixedTemp {
+        fn cpu_celsius(&self) -> Option<f64> {
+            self.0
+        }
+    }
+
+    #[test]
+    fn construction_takes_one_immediate_sample() {
+        let sampler = HostMetricsSampler::new(
+            System::new(),
+            Arc::new(FixedTemp(Some(41.0))),
+            Duration::from_secs(300),
+            Duration::from_secs(2),
+        );
+        let handle = sampler.handle();
+        let latest = handle.latest().expect("pre-seeded sample present");
+        assert!(latest.mem_total_bytes > 0, "sysinfo memory read");
+        assert_eq!(latest.temp_celsius, Some(41.0));
+        assert_eq!(handle.history().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn started_loop_appends_more_samples() {
+        let sampler = HostMetricsSampler::new(
+            System::new(),
+            Arc::new(FixedTemp(None)),
+            Duration::from_secs(300),
+            Duration::from_millis(20),
+        );
+        let handle = sampler.handle();
+        sampler.start();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(handle.history().len() >= 2, "sampler appended samples");
     }
 }
