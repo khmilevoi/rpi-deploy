@@ -65,6 +65,32 @@ impl ProbeRunner for SystemRunner {
     }
 }
 
+/// Pure decision for the doctor `memory cgroup` check. `controllers` is the
+/// contents of `/sys/fs/cgroup/cgroup.controllers` (cgroup v2), `v1_present`
+/// is whether `/sys/fs/cgroup/memory` exists (cgroup v1).
+#[allow(dead_code)]
+fn memory_cgroup_check(controllers: Option<String>, v1_present: bool) -> DiagnosticCheck {
+    let v2_ok = controllers
+        .as_deref()
+        .map(|c| c.split_whitespace().any(|t| t == "memory"))
+        .unwrap_or(false);
+    let passed = v2_ok || v1_present;
+    DiagnosticCheck {
+        name: "memory cgroup".into(),
+        passed,
+        detail: if passed {
+            "memory accounting enabled".into()
+        } else {
+            "memory cgroup controller disabled — per-container memory reports 0".into()
+        },
+        hint: (!passed).then(|| {
+            "enable cgroup memory accounting: add 'cgroup_enable=memory cgroup_memory=1' to \
+             /boot/cmdline.txt (or firmware/cmdline.txt) and reboot"
+                .into()
+        }),
+    }
+}
+
 pub struct HostSystemProbe {
     runner: Arc<dyn ProbeRunner>,
     disk: Arc<dyn DiskProbe>,
@@ -339,6 +365,13 @@ impl SystemProbe for HostSystemProbe {
                 hint: Some("check agent data directory mount".into()),
             },
         });
+
+        #[cfg(target_os = "linux")]
+        {
+            let controllers = std::fs::read_to_string("/sys/fs/cgroup/cgroup.controllers").ok();
+            let v1_present = std::path::Path::new("/sys/fs/cgroup/memory").exists();
+            checks.push(memory_cgroup_check(controllers, v1_present));
+        }
 
         DiagnosticReport { checks }
     }
@@ -670,5 +703,36 @@ mod tests {
         .diagnostics()
         .await;
         assert!(report.checks.iter().all(|c| c.name != "ingress route"));
+    }
+
+    #[test]
+    fn memory_cgroup_v2_passes_when_controllers_list_memory() {
+        let check = memory_cgroup_check(Some("cpuset cpu io memory pids\n".into()), false);
+        assert!(check.passed);
+        assert!(check.hint.is_none());
+    }
+
+    #[test]
+    fn memory_cgroup_v2_fails_when_memory_absent_and_no_v1() {
+        let check = memory_cgroup_check(Some("cpuset cpu io pids\n".into()), false);
+        assert!(!check.passed);
+        assert!(check
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("cgroup_enable=memory cgroup_memory=1"));
+    }
+
+    #[test]
+    fn memory_cgroup_v1_passes_when_dir_present() {
+        let check = memory_cgroup_check(None, true);
+        assert!(check.passed);
+    }
+
+    #[test]
+    fn memory_cgroup_fails_when_neither_present() {
+        let check = memory_cgroup_check(None, false);
+        assert!(!check.passed);
+        assert_eq!(check.name, "memory cgroup");
     }
 }
