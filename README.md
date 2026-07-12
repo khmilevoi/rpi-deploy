@@ -46,7 +46,8 @@
 - **Stable ports & health checks** — the agent allocates a stable host port per project, writes a Compose override, and probes HTTP (or TCP) before declaring success.
 - **Latest-wins deploy queue** — a newer deploy supersedes the one in flight; `rpi deploy --cancel` aborts.
 - **Admin commands** — declare `[commands]` in `rpi.toml` and run them inside the service container with `rpi command`.
-- **Ops built in** — `rpi logs`, `rpi stats`, `rpi status`, `rpi doctor`, `rpi agent logs`, `rpi gc`.
+- **Ops built in** — `rpi logs`, `rpi stats` (`-w` for a live TUI with CPU/memory/disk/temperature sparklines and history), `rpi status`, `rpi doctor`, `rpi agent logs`, `rpi gc`.
+- **Version-skew aware** — the CLI and agent handshake on `connect`, gate commands against advertised agent features, and print a banner instead of a confusing error when they're out of sync.
 - **Fast install** — `npm install -g rpi-deploy` downloads a checksum-verified prebuilt binary (Windows x64, Linux x64/aarch64) in seconds, falling back to a source build elsewhere.
 
 ## Quick Start
@@ -87,7 +88,7 @@ That's it — `rpi ls` shows the project, its host port, and its public hostname
 | `rpi deploy --cancel` | Cancel active deploys of the current project |
 | `rpi ls` (alias: `rpi ps`) | List projects on the agent |
 | `rpi logs <project> [-f] [--tail N]` | Stream container logs |
-| `rpi stats [project] [--json]` | Live CPU / memory / disk metrics |
+| `rpi stats [project] [--json] [-w\|--watch] [--interval N]` | CPU / memory / disk / temperature metrics; `-w` opens a full-screen live view with history sparklines |
 | `rpi start\|stop\|restart <project>` | Manage containers without a rebuild |
 | `rpi rm <project> [--volumes]` | Remove a project |
 | `rpi status [--json]` | Agent and host overview |
