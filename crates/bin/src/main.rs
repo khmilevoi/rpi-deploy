@@ -110,11 +110,17 @@ enum Cmd {
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
-    /// Live CPU/memory/disk metrics
+    /// Live CPU/memory/disk/temperature metrics (add -w for a live graph)
     Stats {
         project: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Full-screen live-updating view; quit with q/Esc/Ctrl-C
+        #[arg(short = 'w', long)]
+        watch: bool,
+        /// Refresh interval in seconds for --watch
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
@@ -352,8 +358,10 @@ async fn run() -> anyhow::Result<()> {
         Cmd::Stats {
             project,
             json,
+            watch,
+            interval,
             connect,
-        } => cli::commands::stats(project, json, connect).await,
+        } => cli::commands::stats(project, json, watch, interval, connect).await,
         Cmd::Start { project, connect } => {
             cli::commands::lifecycle(project, "start", connect).await
         }
@@ -739,5 +747,45 @@ mod tests {
         assert!(cli.version);
         let short = Cli::try_parse_from(["rpi", "-V"]).unwrap();
         assert!(short.version);
+    }
+
+    #[test]
+    fn stats_watch_with_interval() {
+        let cli = Cli::try_parse_from(["rpi", "stats", "-w", "--interval", "5"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Stats {
+                watch,
+                interval,
+                json,
+                project,
+                ..
+            } => {
+                assert!(watch);
+                assert_eq!(interval, 5);
+                assert!(!json);
+                assert_eq!(project, None);
+            }
+            _ => panic!("expected Stats"),
+        }
+    }
+
+    #[test]
+    fn stats_json_and_positional_project() {
+        let cli = Cli::try_parse_from(["rpi", "stats", "rateme", "--json"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Stats {
+                json,
+                project,
+                watch,
+                interval,
+                ..
+            } => {
+                assert!(json);
+                assert_eq!(project.as_deref(), Some("rateme"));
+                assert!(!watch);
+                assert_eq!(interval, 2); // default
+            }
+            _ => panic!("expected Stats"),
+        }
     }
 }

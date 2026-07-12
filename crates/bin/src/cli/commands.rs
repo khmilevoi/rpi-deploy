@@ -378,69 +378,41 @@ pub async fn logs(
 pub async fn stats(
     project: Option<String>,
     json: bool,
+    watch: bool,
+    interval: u64,
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
     let profile = connect.resolve()?;
     let tunnel = SshTunnel::open(&profile).await?;
     let api = ApiClient::new(tunnel.base_url.clone());
+
+    if watch {
+        // Keep the SSH tunnel alive for the duration of the watch loop.
+        let _tunnel = tunnel;
+        return crate::cli::stats_tui::stats_watch(api, project, interval).await;
+    }
+
     let resp = api.stats(project.as_deref()).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
         return Ok(());
     }
-    let mut host_table = output::table();
-    host_table.set_header(output::header(["CPU", "MEM", "DISK", "UPTIME"]));
-    let host_mem_pct = if resp.host.mem_total_bytes > 0 {
-        resp.host.mem_used_bytes as f64 / resp.host.mem_total_bytes as f64 * 100.0
-    } else {
-        0.0
-    };
-    host_table.add_row(vec![
-        output::cell_sem(
-            format!("{:.1}%", resp.host.cpu_percent),
-            output::usage_sem(resp.host.cpu_percent),
-        ),
-        output::cell_sem(
-            format!(
-                "{}/{} bytes",
-                resp.host.mem_used_bytes, resp.host.mem_total_bytes
-            ),
-            output::usage_sem(host_mem_pct),
-        ),
-        output::cell_sem(
-            format!("{}%", resp.host.disk_used_percent),
-            output::usage_sem(resp.host.disk_used_percent as f64),
-        ),
-        output::cell(human_duration(resp.host.uptime_secs)),
-    ]);
-    println!("{host_table}");
 
-    if !resp.projects.is_empty() {
-        let mut services_table = output::table();
-        services_table.set_header(output::header(["PROJECT", "SERVICE", "CPU", "MEM"]));
-        for p in resp.projects {
-            let project_name = p.project.clone();
-            for s in p.services {
-                let mem_pct = if s.mem_limit_bytes > 0 {
-                    s.mem_used_bytes as f64 / s.mem_limit_bytes as f64 * 100.0
-                } else {
-                    0.0
-                };
-                services_table.add_row(vec![
-                    output::cell(project_name.clone()),
-                    output::cell(s.service),
-                    output::cell_sem(
-                        format!("{:.1}%", s.cpu_percent),
-                        output::usage_sem(s.cpu_percent),
-                    ),
-                    output::cell_sem(
-                        format!("{}/{} bytes", s.mem_used_bytes, s.mem_limit_bytes),
-                        output::usage_sem(mem_pct),
-                    ),
-                ]);
-            }
-        }
-        println!("{services_table}");
+    print!("{}", crate::cli::stats_render::render_stats_static(&resp));
+
+    if resp.host_history.is_empty() {
+        output::warn("no host history from the agent - update the agent on the Pi to see graphs");
+    }
+    if resp
+        .projects
+        .iter()
+        .flat_map(|p| &p.services)
+        .any(|s| s.mem_limit_bytes == 0)
+    {
+        output::warn(
+            "per-service memory shows n/a: enable cgroup memory accounting on the Pi \
+             (run `rpi doctor` for the fix)",
+        );
     }
     Ok(())
 }
