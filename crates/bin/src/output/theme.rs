@@ -48,6 +48,26 @@ impl Paint {
         }
     }
 
+    /// Foreground colour for a `ratatui` widget (chart line, sparkline);
+    /// `None` = unstyled. `Rgb` is exact under truecolor, else reduced to the
+    /// nearest xterm-256 — the same downgrade as `table_color`, so every
+    /// backend paints the identical hue.
+    pub fn ratatui_color(self, truecolor: bool) -> Option<ratatui::style::Color> {
+        use ratatui::style::Color;
+        match self {
+            Paint::Default => None,
+            Paint::Cyan => Some(Color::Cyan),
+            Paint::Green => Some(Color::Green),
+            Paint::Yellow => Some(Color::Yellow),
+            Paint::Red => Some(Color::Red),
+            Paint::Rgb(r, g, b) => Some(if truecolor {
+                Color::Rgb(r, g, b)
+            } else {
+                Color::Indexed(rgb_to_ansi256(r, g, b))
+            }),
+        }
+    }
+
     /// Colour token for an `indicatif` template (`{spinner:.<token>}`).
     /// `indicatif` parses it with `console::Style::from_dotted_str`, which
     /// accepts ANSI names and numeric `0-255` tokens. `None` = no colour.
@@ -223,6 +243,22 @@ mod tests {
             Paint::Green.table_color(false),
             Some(comfy_table::Color::Green)
         ));
+    }
+
+    #[test]
+    fn paint_converts_to_ratatui_colour() {
+        use ratatui::style::Color;
+        assert_eq!(Paint::Default.ratatui_color(true), None);
+        assert_eq!(Paint::Cyan.ratatui_color(false), Some(Color::Cyan));
+        // Raspberry accent: exact under truecolor, nearest xterm-256 otherwise.
+        assert_eq!(
+            Paint::Rgb(197, 26, 74).ratatui_color(true),
+            Some(Color::Rgb(197, 26, 74))
+        );
+        assert_eq!(
+            Paint::Rgb(197, 26, 74).ratatui_color(false),
+            Some(Color::Indexed(161))
+        );
     }
 
     #[test]

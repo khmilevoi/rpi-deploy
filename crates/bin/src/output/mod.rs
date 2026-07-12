@@ -165,6 +165,23 @@ pub fn styled_err(text: &str) -> String {
     console_style(Sem::Error).bold().apply_to(text).to_string()
 }
 
+/// Accent-tinted copy of `text` for `console`-rendered stdout (e.g. the stats
+/// sparkline); plain text when colours are disabled (tests/pipes), same as
+/// `styled_ok`/`styled_err`.
+pub fn styled_accent(text: &str) -> String {
+    console_style(Sem::Accent).apply_to(text).to_string()
+}
+
+/// Accent foreground for `ratatui` widgets (the stats chart line), from the
+/// active theme; `None` when the accent is a no-op paint. Truecolor vs
+/// xterm-256 follows the same detection as tables, so the chart matches the
+/// rest of the branded output.
+pub fn accent_ratatui_color() -> Option<ratatui::style::Color> {
+    theme::theme()
+        .accent
+        .ratatui_color(theme::truecolor_enabled())
+}
+
 /// Container state (+ optional health) -> semantic role.
 /// running/healthy = success; restarting/paused/created or a non-healthy
 /// healthcheck = warn; everything else (exited, dead, unknown) = error.
@@ -226,6 +243,8 @@ mod tests {
         // returned string must be exactly the input, no ANSI codes.
         assert_eq!(styled_ok("PASS"), "PASS");
         assert_eq!(styled_err("FAIL"), "FAIL");
+        // The sparkline accent tint is plain text off a TTY, same contract.
+        assert_eq!(styled_accent("▁▂▃"), "▁▂▃");
     }
 
     #[test]

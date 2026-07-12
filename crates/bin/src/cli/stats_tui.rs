@@ -11,6 +11,7 @@ use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragrap
 
 use crate::cli::api::ApiClient;
 use crate::cli::stats_render::human_bytes;
+use crate::output;
 use crate::proto::StatsReportDto;
 
 /// Terminal-independent view model derived from a stats response. Kept pure so
@@ -194,13 +195,21 @@ fn draw(f: &mut Frame, report: Option<&StatsReportDto>, status: &str) {
 
     // CPU% chart (0..100). MEM% shares the axis; TEMP overlays on the same
     // panel with its own dataset (°C read against the same 0..100 grid is fine
-    // for a Pi: idle ~40, throttle ~80).
-    let datasets = vec![
-        Dataset::default()
+    // for a Pi: idle ~40, throttle ~80). CPU is the primary series, so it wears
+    // the brand accent; mem/temp stay distinct secondary hues on the shared
+    // panel.
+    let cpu_dataset = {
+        let d = Dataset::default()
             .name("cpu%")
             .graph_type(GraphType::Line)
-            .data(&frame.cpu_points)
-            .cyan(),
+            .data(&frame.cpu_points);
+        match output::accent_ratatui_color() {
+            Some(c) => d.fg(c),
+            None => d.cyan(),
+        }
+    };
+    let datasets = vec![
+        cpu_dataset,
         Dataset::default()
             .name("mem%")
             .graph_type(GraphType::Line)

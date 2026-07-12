@@ -91,14 +91,22 @@ pub fn render_stats_static(report: &StatsReportDto) -> String {
     if !report.host_history.is_empty() {
         let width = 60;
         let cpu: Vec<f64> = report.host_history.iter().map(|s| s.cpu_percent).collect();
-        let _ = writeln!(out, "CPU%  {}", sparkline(&cpu, width));
+        let _ = writeln!(
+            out,
+            "CPU%  {}",
+            output::styled_accent(&sparkline(&cpu, width))
+        );
         let temps: Vec<f64> = report
             .host_history
             .iter()
             .filter_map(|s| s.temp_celsius)
             .collect();
         if !temps.is_empty() {
-            let _ = writeln!(out, "TEMP  {}", sparkline(&temps, width));
+            let _ = writeln!(
+                out,
+                "TEMP  {}",
+                output::styled_accent(&sparkline(&temps, width))
+            );
         }
     }
 
