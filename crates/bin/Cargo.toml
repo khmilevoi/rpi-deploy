@@ -33,6 +33,8 @@ shlex = { workspace = true }
 console = { workspace = true }
 indicatif = { workspace = true }
 comfy-table = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 
 [dev-dependencies]
 pi-domain = { workspace = true, features = ["mocks"] }
