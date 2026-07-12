@@ -429,6 +429,11 @@ pub struct ServiceStats {
     pub cpu_percent: f64,
     pub mem_used_bytes: u64,
     pub mem_limit_bytes: u64,
+    /// Docker compose `State` string (e.g. "running"); empty when not reported.
+    pub state: String,
+    /// Docker healthcheck state ("healthy"/"unhealthy"/"starting"), None when
+    /// the service declares no healthcheck.
+    pub health: Option<String>,
 }
 
 /// Per-project slice of `rpi stats`. last_deploy is filled by the GetStats

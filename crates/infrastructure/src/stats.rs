@@ -119,6 +119,8 @@ mod tests {
                 cpu_percent: 0.2,
                 mem_used_bytes: 0,
                 mem_limit_bytes: 0,
+                state: "running".into(),
+                health: None,
             }])
         });
         let mut disk = MockDiskProbe::new();

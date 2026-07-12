@@ -141,12 +141,19 @@ pub(crate) fn parse_mem_usage(s: &str) -> Option<(u64, u64)> {
 }
 
 pub(crate) fn parse_stats_json(ps_output: &str, stats_output: &str) -> Vec<ServiceStats> {
-    let services: HashMap<String, String> = json_lines(ps_output)
+    // Name -> (service, state, health) from the ps JSON.
+    let services: HashMap<String, (String, String, Option<String>)> = json_lines(ps_output)
         .iter()
         .filter_map(|v| {
+            let state = v.get("State").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let health = v
+                .get("Health")
+                .and_then(|h| h.as_str())
+                .filter(|h| !h.is_empty())
+                .map(str::to_string);
             Some((
                 v.get("Name")?.as_str()?.to_string(),
-                v.get("Service")?.as_str()?.to_string(),
+                (v.get("Service")?.as_str()?.to_string(), state, health),
             ))
         })
         .collect();
@@ -156,7 +163,7 @@ pub(crate) fn parse_stats_json(ps_output: &str, stats_output: &str) -> Vec<Servi
         let Some(name) = v.get("Name").and_then(|n| n.as_str()) else {
             continue;
         };
-        let Some(service) = services.get(name) else {
+        let Some((service, state, health)) = services.get(name) else {
             continue;
         };
         let Some(cpu_percent) = v
@@ -178,6 +185,8 @@ pub(crate) fn parse_stats_json(ps_output: &str, stats_output: &str) -> Vec<Servi
             cpu_percent,
             mem_used_bytes,
             mem_limit_bytes,
+            state: state.clone(),
+            health: health.clone(),
         });
     }
     out
@@ -450,7 +459,7 @@ mod tests {
     #[test]
     fn parse_stats_json_joins_services_by_container_name() {
         let ps = concat!(
-            r#"{"Name":"rateme-web-1","Service":"web","State":"running"}"#,
+            r#"{"Name":"rateme-web-1","Service":"web","State":"running","Health":"healthy"}"#,
             "\n",
             r#"{"Name":"rateme-db-1","Service":"db","State":"running"}"#,
             "\n",
@@ -469,7 +478,11 @@ mod tests {
         assert_eq!(out[0].cpu_percent, 1.25);
         assert_eq!(out[0].mem_used_bytes, 100 * 1024 * 1024);
         assert_eq!(out[0].mem_limit_bytes, 1024 * 1024 * 1024);
+        assert_eq!(out[0].state, "running");
+        assert_eq!(out[0].health.as_deref(), Some("healthy"));
         assert_eq!(out[1].service, "db");
+        assert_eq!(out[1].state, "running");
+        assert_eq!(out[1].health, None);
     }
 
     #[test]
