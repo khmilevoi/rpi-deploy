@@ -48,7 +48,7 @@ Tiebreakers: mixed `feat` + `fix` → minor (feat wins). "Is this rendering chan
 
 ## After the tag (automatic — do not do these by hand)
 
-check (versions+tests) → build (3 archives named `rpi-vX.Y.Z-<triple>.*`) → GitHub Release (`--generate-notes`, SHA256SUMS) → npm publish. Notes can be polished on GitHub afterwards.
+check (versions+tests) → build (3 archives named `rpi-vX.Y.Z-<triple>.*`) → GitHub Release (`--generate-notes`, SHA256SUMS) → npm publish. The generated notes are only a raw commit list — turning them into a real description of what changed is a required post-release step (see "Release notes" below), not optional polish.
 
 ## Post-release verification
 
@@ -63,6 +63,16 @@ The `npx rpi-deploy@X.Y.Z --version` check must run in a throwaway Docker contai
 ```
 docker run --rm node:20-slim npx -y rpi-deploy@X.Y.Z --version   # must print rpi X.Y.Z, and install must be fast (prebuilt binary), not a multi-minute cargo build
 ```
+
+## Release notes: describe what changed (required)
+
+`--generate-notes` produces commit subjects, which describe the work, not the change — a user reading "chore(cli): tidy stats_render imports" learns nothing. After the workflow publishes the release, rewrite the notes so they open with a **What changed** section: one bullet per user-facing change, each stating what exactly changed and what the user can now do or will now see (new command/flag, changed output, fixed behavior — with the old vs new behavior for fixes). Derive the bullets from the same `git log` range you used to choose the bump, never from memory; internal-only commits (refactors, CI, test scaffolding) are folded into a single "Internal" line or omitted. Keep the auto-generated commit list below it as "Full changelog". Then update the release:
+
+```
+gh release edit vX.Y.Z --notes-file notes.md
+```
+
+The release is not done until the notes describe the changes — a green npm publish with a bare commit list does not close the checklist.
 
 ## Landing page audit (after every release, in subagents)
 
