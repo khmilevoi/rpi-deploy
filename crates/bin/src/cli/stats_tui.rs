@@ -94,7 +94,10 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> io::Result<TerminalGuard> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
+        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(e);
+        }
         Ok(TerminalGuard)
     }
 }
@@ -212,7 +215,7 @@ fn draw(f: &mut Frame, report: Option<&StatsReportDto>, status: &str) {
     let x_max = frame.cpu_points.len().max(1) as f64 - 1.0;
     let chart = Chart::new(datasets)
         .block(Block::default().borders(Borders::ALL).title(" host "))
-        .x_axis(Axis::default().bounds([0.0, x_max]))
+        .x_axis(Axis::default().bounds([0.0, x_max.max(1.0)]))
         .y_axis(
             Axis::default()
                 .bounds([0.0, 100.0])
