@@ -36,6 +36,7 @@ impl StatsProvider for CompositeStats {
             mem_total_bytes: sys.total_memory(),
             disk_used_percent: self.disk.used_percent().unwrap_or(0),
             uptime_secs: System::uptime(),
+            temp_celsius: None,
         };
 
         let mut project_stats = Vec::new();
@@ -51,6 +52,7 @@ impl StatsProvider for CompositeStats {
         Ok(StatsReport {
             host,
             projects: project_stats,
+            host_history: Vec::new(),
         })
     }
 }

@@ -7,8 +7,8 @@ use mockall::automock;
 
 use crate::entities::{
     AgentOverview, ComposeStack, DeployRef, Deployment, DeploymentStatus, DiagnosticReport,
-    FetchedSource, LifecycleAction, Project, ProjectConfig, SecretsBundle, ServiceState,
-    ServiceStats, StageEvent, StatsReport,
+    FetchedSource, HostSample, LifecycleAction, Project, ProjectConfig, SecretsBundle,
+    ServiceState, ServiceStats, StageEvent, StatsReport,
 };
 use crate::error::DomainError;
 
@@ -285,4 +285,17 @@ pub trait Clock: Send + Sync {
 #[cfg_attr(feature = "mocks", automock)]
 pub trait IdGen: Send + Sync {
     fn new_id(&self) -> String;
+}
+
+/// Read side of the agent's host-metrics ring buffer (synchronous, no IO).
+#[cfg_attr(feature = "mocks", automock)]
+pub trait HostMetricsStore: Send + Sync {
+    fn latest(&self) -> Option<HostSample>;
+    fn history(&self) -> Vec<HostSample>;
+}
+
+/// CPU temperature probe (synchronous).
+#[cfg_attr(feature = "mocks", automock)]
+pub trait TempProbe: Send + Sync {
+    fn cpu_celsius(&self) -> Option<f64>;
 }

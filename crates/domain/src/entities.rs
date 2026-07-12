@@ -448,6 +448,20 @@ pub struct HostStats {
     pub mem_total_bytes: u64,
     pub disk_used_percent: u8,
     pub uptime_secs: u64,
+    /// CPU temperature in °C; `None` on hosts without a readable thermal zone.
+    pub temp_celsius: Option<f64>,
+}
+
+/// One background host sample retained in the agent's ring buffer.
+/// Disk and uptime are intentionally not sampled per-tick — they are
+/// assembled into the snapshot at request time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostSample {
+    pub at_ms: i64,
+    pub cpu_percent: f64,
+    pub mem_used_bytes: u64,
+    pub mem_total_bytes: u64,
+    pub temp_celsius: Option<f64>,
 }
 
 /// Full `rpi stats` payload.
@@ -455,6 +469,8 @@ pub struct HostStats {
 pub struct StatsReport {
     pub host: HostStats,
     pub projects: Vec<ProjectStats>,
+    /// Recent host samples (oldest→newest) for CLI sparklines/charts.
+    pub host_history: Vec<HostSample>,
 }
 
 /// One PASS/FAIL check of `rpi doctor` (§14).
@@ -719,6 +735,20 @@ mod tests {
         assert_eq!(StageStatus::Ok.as_str(), "ok");
         assert_eq!(StageStatus::Failed.as_str(), "failed");
         assert_eq!(StageStatus::Skipped.as_str(), "skipped");
+    }
+
+    #[test]
+    fn host_sample_holds_all_fields() {
+        let s = HostSample {
+            at_ms: 1_700_000_000_000,
+            cpu_percent: 12.5,
+            mem_used_bytes: 1024,
+            mem_total_bytes: 4096,
+            temp_celsius: Some(42.0),
+        };
+        assert_eq!(s.at_ms, 1_700_000_000_000);
+        assert_eq!(s.temp_celsius, Some(42.0));
+        assert_eq!(s.clone(), s);
     }
 }
 
