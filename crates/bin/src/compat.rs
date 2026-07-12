@@ -133,6 +133,166 @@ fn version_at_least(version: &str, floor: &str) -> bool {
     }
 }
 
+use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::sync::Mutex;
+
+use crate::proto::VersionInfo;
+
+/// Version-less variant of the missing-feature error, for the transport
+/// safety net (agent swapped between handshake and call, spec 2026-07-12).
+pub fn feature_unavailable_error(feature: Feature) -> anyhow::Error {
+    anyhow::anyhow!(
+        "agent does not support {} (requires agent >= {}) - update the agent on the Pi",
+        feature.label(),
+        feature.since()
+    )
+}
+
+/// One agent connection's negotiated compatibility. Built once per command
+/// by `cli::connect::connect_agent`; every availability check and every
+/// version/compat notice goes through here.
+pub struct CompatSession {
+    cli_version: String,
+    agent_version: String,
+    agent_api: String,
+    capabilities: BTreeSet<String>,
+    /// Dedup: each banner key prints at most once per command run.
+    warned: Mutex<HashSet<String>>,
+    sink: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+impl CompatSession {
+    pub fn new(cli_version: &str, info: &VersionInfo) -> CompatSession {
+        Self::with_sink(cli_version, info, Box::new(|m| crate::output::warn(m)))
+    }
+
+    pub fn with_sink(
+        cli_version: &str,
+        info: &VersionInfo,
+        sink: Box<dyn Fn(&str) + Send + Sync>,
+    ) -> CompatSession {
+        let capabilities = match &info.features {
+            Some(list) => list.iter().cloned().collect(),
+            None => legacy_capabilities(&info.version),
+        };
+        CompatSession {
+            cli_version: cli_version.to_string(),
+            agent_version: info.version.clone(),
+            agent_api: info.api.clone(),
+            capabilities,
+            warned: Mutex::new(HashSet::new()),
+            sink,
+        }
+    }
+
+    pub fn agent_version(&self) -> &str {
+        &self.agent_version
+    }
+
+    pub fn agent_api(&self) -> &str {
+        &self.agent_api
+    }
+
+    /// Raw capability membership — no side effects, no policy.
+    pub fn supports(&self, feature: Feature) -> bool {
+        self.capabilities.contains(feature.capability())
+    }
+
+    /// Apply the feature's declared policy. `Ok(true)` — go ahead;
+    /// `Ok(false)` — take the fallback path (Degradable already warned once,
+    /// Silent stayed quiet); `Err` — Required feature missing.
+    pub fn gate(&self, feature: Feature) -> anyhow::Result<bool> {
+        if self.supports(feature) {
+            return Ok(true);
+        }
+        match feature.policy() {
+            Policy::Required => Err(self.missing_error(feature)),
+            Policy::Degradable => {
+                self.warn_once(
+                    feature.capability(),
+                    &format!(
+                        "{} is not available on agent v{} (requires agent >= {}) - skipping",
+                        feature.label(),
+                        self.agent_version,
+                        feature.since()
+                    ),
+                );
+                Ok(false)
+            }
+            Policy::Silent => Ok(false),
+        }
+    }
+
+    /// Best supported generation, in preference order (newest first).
+    pub fn pick(&self, preference: &[Feature]) -> Option<Feature> {
+        preference.iter().copied().find(|f| self.supports(*f))
+    }
+
+    /// Version-skew banners (§9.1 successor): agent older -> update agent,
+    /// agent newer -> update CLI, unparseable-but-different -> generic.
+    pub fn emit_version_banners(&self) {
+        if self.agent_version == self.cli_version {
+            return;
+        }
+        let msg = match (
+            parse_version(&self.agent_version),
+            parse_version(&self.cli_version),
+        ) {
+            (Some(agent), Some(cli)) => match agent.cmp(&cli) {
+                Ordering::Less => format!(
+                    "CLI v{} is newer than agent v{} - update the agent on the Pi",
+                    self.cli_version, self.agent_version
+                ),
+                Ordering::Greater => format!(
+                    "agent v{} is newer than CLI v{} - update the CLI: npm i -g rpi-deploy@latest",
+                    self.agent_version, self.cli_version
+                ),
+                Ordering::Equal => format!(
+                    "CLI v{} and agent v{} differ - update the agent on the Pi",
+                    self.cli_version, self.agent_version
+                ),
+            },
+            _ => format!(
+                "CLI v{} and agent v{} differ - update the agent on the Pi",
+                self.cli_version, self.agent_version
+            ),
+        };
+        self.warn_once("version-skew", &msg);
+    }
+
+    fn missing_error(&self, feature: Feature) -> anyhow::Error {
+        let agent_newer = matches!(
+            (
+                parse_version(&self.agent_version),
+                parse_version(&self.cli_version),
+            ),
+            (Some(a), Some(c)) if a > c
+        );
+        if agent_newer {
+            anyhow::anyhow!(
+                "{} is not supported by agent v{}; CLI v{} is too old - update the CLI: npm i -g rpi-deploy@latest",
+                feature.label(),
+                self.agent_version,
+                self.cli_version
+            )
+        } else {
+            anyhow::anyhow!(
+                "{} is not available on agent v{} (requires agent >= {}) - update the agent on the Pi",
+                feature.label(),
+                self.agent_version,
+                feature.since()
+            )
+        }
+    }
+
+    fn warn_once(&self, key: &str, msg: &str) {
+        if self.warned.lock().unwrap().insert(key.to_string()) {
+            (self.sink)(msg);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +352,141 @@ mod tests {
         assert!(caps.contains("source-check"));
 
         assert!(legacy_capabilities("unknown").is_empty());
+    }
+
+    use crate::proto::VersionInfo;
+    use std::sync::{Arc, Mutex};
+
+    fn info(version: &str, features: Option<&[&str]>) -> VersionInfo {
+        VersionInfo {
+            version: version.to_string(),
+            api: "v1".to_string(),
+            features: features.map(|f| f.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    fn session(cli: &str, info: &VersionInfo) -> (CompatSession, Arc<Mutex<Vec<String>>>) {
+        let warnings: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = warnings.clone();
+        let s = CompatSession::with_sink(
+            cli,
+            info,
+            Box::new(move |m| sink.lock().unwrap().push(m.to_string())),
+        );
+        (s, warnings)
+    }
+
+    #[test]
+    fn handshake_features_win_over_legacy_matrix() {
+        // An agent that explicitly advertises only `stats` supports exactly that,
+        // whatever its version says.
+        let (s, _) = session("0.20.0", &info("0.20.0", Some(&["stats"])));
+        assert!(s.supports(Feature::Stats));
+        assert!(!s.supports(Feature::Secrets));
+    }
+
+    #[test]
+    fn legacy_agent_falls_back_to_version_matrix() {
+        let (s, _) = session("0.20.0", &info("0.17.1", None));
+        assert!(s.supports(Feature::Secrets));
+        assert!(!s.supports(Feature::SourceCheck));
+    }
+
+    #[test]
+    fn gate_required_missing_is_error_with_update_agent_hint() {
+        let (s, warnings) = session("0.20.0", &info("0.17.1", Some(&[])));
+        let err = s.gate(Feature::Secrets).unwrap_err().to_string();
+        assert!(err.contains("secrets"), "{err}");
+        assert!(err.contains(">= 0.9.0"), "{err}");
+        assert!(err.contains("update the agent on the Pi"), "{err}");
+        assert!(warnings.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gate_required_missing_on_newer_agent_says_update_cli() {
+        let (s, _) = session("0.20.0", &info("0.30.0", Some(&[])));
+        let err = s.gate(Feature::Secrets).unwrap_err().to_string();
+        assert!(err.contains("update the CLI"), "{err}");
+        assert!(err.contains("npm i -g rpi-deploy@latest"), "{err}");
+    }
+
+    #[test]
+    fn gate_silent_missing_is_quiet_false() {
+        let (s, warnings) = session("0.20.0", &info("0.17.1", None));
+        assert!(!s.gate(Feature::SourceCheck).unwrap());
+        assert!(warnings.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gate_available_is_true() {
+        let (s, _) = session("0.20.0", &info("0.20.0", Some(&["secrets"])));
+        assert!(s.gate(Feature::Secrets).unwrap());
+    }
+
+    #[test]
+    fn pick_returns_first_supported_preference() {
+        let (s, _) = session("0.20.0", &info("0.20.0", Some(&["secrets"])));
+        assert_eq!(
+            s.pick(&[Feature::Stats, Feature::Secrets]),
+            Some(Feature::Secrets)
+        );
+        assert_eq!(s.pick(&[Feature::Stats]), None);
+    }
+
+    #[test]
+    fn version_banner_older_agent_and_dedup() {
+        let (s, warnings) = session("0.20.0", &info("0.17.1", None));
+        s.emit_version_banners();
+        s.emit_version_banners();
+        let w = warnings.lock().unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("update the agent on the Pi"), "{}", w[0]);
+    }
+
+    #[test]
+    fn version_banner_newer_agent_says_update_cli() {
+        let (s, warnings) = session("0.20.0", &info("0.30.0", Some(&[])));
+        s.emit_version_banners();
+        let w = warnings.lock().unwrap();
+        assert!(
+            w[0].contains("update the CLI: npm i -g rpi-deploy@latest"),
+            "{}",
+            w[0]
+        );
+    }
+
+    #[test]
+    fn version_banner_equal_versions_is_silent() {
+        let (s, warnings) = session("0.20.0", &info("0.20.0", Some(&[])));
+        s.emit_version_banners();
+        assert!(warnings.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn version_banner_same_parse_but_different_strings_warns_generically() {
+        // "0.20.0-dirty" parses to the same (0,20,0) triple, but the strings
+        // differ — warn generically rather than staying silent.
+        let (s, warnings) = session("0.20.0", &info("0.20.0-dirty", Some(&[])));
+        s.emit_version_banners();
+        let w = warnings.lock().unwrap();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("differ"), "{}", w[0]);
+    }
+
+    #[test]
+    fn version_banner_unparseable_agent_version_warns_generically() {
+        let (s, warnings) = session("0.20.0", &info("garbage", Some(&[])));
+        s.emit_version_banners();
+        let w = warnings.lock().unwrap();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("differ"), "{}", w[0]);
+    }
+
+    #[test]
+    fn safety_net_error_matches_gate_wording() {
+        let err = feature_unavailable_error(Feature::Commands).to_string();
+        assert!(err.contains("container commands"), "{err}");
+        assert!(err.contains(">= 0.9.0"), "{err}");
+        assert!(err.contains("update the agent on the Pi"), "{err}");
     }
 }
