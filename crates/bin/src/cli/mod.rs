@@ -12,4 +12,5 @@ pub mod sse;
 pub mod ssh;
 pub mod stats_render;
 pub mod stats_tui;
+pub mod stats_view;
 pub mod tunnel;
