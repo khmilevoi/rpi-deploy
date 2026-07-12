@@ -147,6 +147,17 @@ pub fn feature_unavailable_error(feature: Feature) -> anyhow::Error {
     )
 }
 
+/// Direction-aware hint for the doctor `version match` check: point the user
+/// at whichever side is behind. Only the "agent newer" case flips to the CLI;
+/// agent-older and unparseable/same-parse-but-different both fall back to the
+/// agent hint, matching the generic branch of `emit_version_banners`.
+pub fn version_skew_hint(cli_version: &str, agent_version: &str) -> &'static str {
+    match (parse_version(agent_version), parse_version(cli_version)) {
+        (Some(agent), Some(cli)) if agent > cli => "update the CLI: npm i -g rpi-deploy@latest",
+        _ => "update the agent binary on the Pi",
+    }
+}
+
 /// One agent connection's negotiated compatibility. Built once per command
 /// by `cli::connect::connect_agent`; every availability check and every
 /// version/compat notice goes through here.
@@ -481,6 +492,30 @@ mod tests {
         let w = warnings.lock().unwrap();
         assert_eq!(w.len(), 1);
         assert!(w[0].contains("differ"), "{}", w[0]);
+    }
+
+    #[test]
+    fn version_skew_hint_points_at_the_stale_side() {
+        // agent newer than CLI -> the CLI is stale
+        assert_eq!(
+            version_skew_hint("0.20.0", "0.20.1"),
+            "update the CLI: npm i -g rpi-deploy@latest"
+        );
+        // agent older than CLI -> the agent is stale
+        assert_eq!(
+            version_skew_hint("0.20.1", "0.20.0"),
+            "update the agent binary on the Pi"
+        );
+        // same parse but different strings -> generic (update the agent)
+        assert_eq!(
+            version_skew_hint("0.20.0", "0.20.0-dirty"),
+            "update the agent binary on the Pi"
+        );
+        // unparseable agent version -> generic (update the agent)
+        assert_eq!(
+            version_skew_hint("0.20.0", "garbage"),
+            "update the agent binary on the Pi"
+        );
     }
 
     #[test]

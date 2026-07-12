@@ -669,7 +669,7 @@ pub async fn doctor(connect: ConnectOpts) -> anyhow::Result<()> {
                         "version match",
                         v.version == cli_version,
                         format!("cli v{cli_version}, agent v{}", v.version),
-                        Some("update the agent binary on the Pi"),
+                        Some(crate::compat::version_skew_hint(cli_version, &v.version)),
                     ));
                     match api.doctor().await {
                         Ok(resp) => checks.extend(resp.checks),
