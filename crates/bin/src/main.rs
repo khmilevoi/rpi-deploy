@@ -169,6 +169,17 @@ enum Cmd {
     Init(InitArgs),
     /// Configure a server profile on this machine (wizard; flags for CI)
     Setup(SetupArgs),
+    /// Update the agent on the board to a chosen version (SSH + sudo)
+    Upgrade {
+        /// Target version (default: this CLI's version; `latest` = newest release)
+        #[arg(long)]
+        version: Option<String>,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
     /// Manage project secrets (env vars + secret files from [secrets] in rpi.toml)
     Secrets {
         #[command(subcommand)]
@@ -243,6 +254,18 @@ enum AgentCmd {
         #[arg(long)]
         tunnel: Option<String>,
         /// Print the plan without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Update this board's agent binary (run with sudo; downloads, verifies, swaps, restarts)
+    Update {
+        /// SSH login user for npm-channel detection (default: $SUDO_USER)
+        #[arg(long)]
+        user: Option<String>,
+        /// Target version (default: latest published release)
+        #[arg(long)]
+        version: Option<String>,
+        /// Resolve + report without downloading or swapping
         #[arg(long)]
         dry_run: bool,
     },
@@ -404,6 +427,11 @@ async fn run() -> anyhow::Result<()> {
             })
             .await
         }
+        Cmd::Upgrade {
+            version,
+            yes,
+            connect,
+        } => cli::upgrade::run(version, yes, connect).await,
         Cmd::Secrets {
             cmd: SecretsCmd::Send { apply, connect },
         } => cli::commands::secrets_send(apply, connect).await,
@@ -448,6 +476,14 @@ async fn run() -> anyhow::Result<()> {
             )
             .await
         }
+        Cmd::Agent {
+            cmd:
+                AgentCmd::Update {
+                    user,
+                    version,
+                    dry_run,
+                },
+        } => agent::update::run_cmd(user, version, dry_run).await,
         Cmd::Agent {
             cmd:
                 AgentCmd::Migrate {
@@ -767,6 +803,74 @@ mod tests {
                 assert_eq!(project, None);
             }
             _ => panic!("expected Stats"),
+        }
+    }
+
+    #[test]
+    fn upgrade_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "rpi",
+            "upgrade",
+            "--version",
+            "0.22.0",
+            "--yes",
+            "--server",
+            "home",
+        ])
+        .unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Upgrade {
+                version,
+                yes,
+                connect,
+            } => {
+                assert_eq!(version.as_deref(), Some("0.22.0"));
+                assert!(yes);
+                assert_eq!(connect.server.as_deref(), Some("home"));
+            }
+            _ => panic!("expected upgrade"),
+        }
+    }
+
+    #[test]
+    fn upgrade_bare_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["rpi", "upgrade"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Upgrade { version, yes, .. } => {
+                assert_eq!(version, None);
+                assert!(!yes);
+            }
+            _ => panic!("expected upgrade"),
+        }
+    }
+
+    #[test]
+    fn agent_update_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "rpi",
+            "agent",
+            "update",
+            "--version",
+            "0.22.0",
+            "--user",
+            "deploy",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Agent {
+                cmd:
+                    AgentCmd::Update {
+                        user,
+                        version,
+                        dry_run,
+                    },
+            } => {
+                assert_eq!(user.as_deref(), Some("deploy"));
+                assert_eq!(version.as_deref(), Some("0.22.0"));
+                assert!(dry_run);
+            }
+            _ => panic!("expected agent update"),
         }
     }
 

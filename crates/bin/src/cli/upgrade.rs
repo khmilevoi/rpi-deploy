@@ -42,7 +42,6 @@ async fn read_agent_version(profile: &ServerProfile) -> Option<String> {
     api.version().await.ok().map(|v| v.version)
 }
 
-#[allow(dead_code)]
 pub async fn run(version: Option<String>, yes: bool, connect: ConnectOpts) -> anyhow::Result<()> {
     if std::env::var("PI_AGENT_URL").is_ok() {
         anyhow::bail!(

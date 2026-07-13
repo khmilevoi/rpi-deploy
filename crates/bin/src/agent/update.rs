@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 /// Resolve the source binary for `version`. npm branch when the login user's
 /// global npm has `rpi-deploy` installed (refresh it to `@version`); otherwise
 /// download + verify the GitHub release archive from `base_url`.
-#[allow(dead_code)]
 pub(crate) async fn obtain_source_binary(
     sys: &dyn Sys,
     login_user: &str,
@@ -47,7 +46,6 @@ pub(crate) async fn obtain_source_binary(
 }
 
 /// CLI entrypoint for `rpi agent update`. Must run as root (under sudo).
-#[allow(dead_code)]
 pub async fn run_cmd(
     user: Option<String>,
     version: Option<String>,
@@ -102,7 +100,6 @@ pub async fn run_cmd(
 
 /// Swap in the source binary, re-run the idempotent setup, and restart the
 /// agent when the binary actually changed.
-#[allow(dead_code)]
 async fn apply_update(
     sys: &dyn Sys,
     login_user: &str,

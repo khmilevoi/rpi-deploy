@@ -4,8 +4,6 @@
 //! Pure helpers live here; the `Sys`-driven download orchestration is added in
 //! the same file (see `download_verified_binary`).
 
-#![allow(dead_code)]
-
 use crate::agent::setup::Sys;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
