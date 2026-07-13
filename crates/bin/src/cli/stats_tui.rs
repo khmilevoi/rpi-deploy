@@ -57,35 +57,69 @@ pub async fn stats_watch(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut events = EventStream::new();
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval.max(1)));
+    // Poll metrics on a background task and hand samples to the UI over a
+    // channel. Fetching inline in the event `select!` used to block the input
+    // branch for the whole request — `docker stats` over SSH can take a second
+    // or more — which is why q/Esc/Ctrl-C felt laggy or dead while a refresh
+    // was in flight. Keeping the fetch off the loop makes quitting instant.
+    let (tx, stats_rx) = tokio::sync::mpsc::channel::<anyhow::Result<StatsReportDto>>(1);
+    let fetcher = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval.max(1)));
+        loop {
+            ticker.tick().await;
+            if tx.send(api.stats(project.as_deref()).await).await.is_err() {
+                break; // the UI loop exited and dropped the receiver
+            }
+        }
+    });
+
+    let result = run_events(&mut terminal, stats_rx, EventStream::new()).await;
+    fetcher.abort();
+    result
+}
+
+/// Keys that quit the watch view: `q`, `Esc`, or `Ctrl-C`.
+fn is_quit_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    matches!(code, KeyCode::Char('q') | KeyCode::Esc)
+        || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// Input/render loop. Redraws on every new metrics sample (received on
+/// `stats_rx`, fed by a background fetcher) or key event, and breaks
+/// immediately on a quit key. Because the fetch happens off this loop, a
+/// keypress is never starved by an in-flight request. Generic over the event
+/// stream so it can be driven by a `TestBackend` and an in-memory stream.
+async fn run_events<B, S>(
+    terminal: &mut Terminal<B>,
+    mut stats_rx: tokio::sync::mpsc::Receiver<anyhow::Result<StatsReportDto>>,
+    mut events: S,
+) -> anyhow::Result<()>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+    S: futures::Stream<Item = io::Result<Event>> + Unpin,
+{
     let mut last: Option<StatsReportDto> = None;
     let mut status = String::from("connecting…");
-
-    match api.stats(project.as_deref()).await {
-        Ok(r) => {
-            last = Some(r);
-            status.clear();
-        }
-        Err(e) => status = format!("reconnecting… ({e})"),
-    }
+    let mut stats_open = true;
 
     loop {
         terminal.draw(|f| draw(f, last.as_ref(), &status))?;
 
         tokio::select! {
-            _ = ticker.tick() => {
-                match api.stats(project.as_deref()).await {
-                    Ok(r) => { last = Some(r); status.clear(); }
-                    Err(e) => { status = format!("reconnecting… ({e})"); }
+            maybe_stats = stats_rx.recv(), if stats_open => {
+                match maybe_stats {
+                    Some(Ok(r)) => { last = Some(r); status.clear(); }
+                    Some(Err(e)) => { status = format!("reconnecting… ({e})"); }
+                    // Fetcher gone: stop selecting on the channel so the loop
+                    // doesn't spin, but keep the UI up so the user can quit.
+                    None => { stats_open = false; }
                 }
             }
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(KeyEvent { code, modifiers, .. }))) => {
-                        let quit = matches!(code, KeyCode::Char('q') | KeyCode::Esc)
-                            || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL));
-                        if quit {
+                        if is_quit_key(code, modifiers) {
                             break;
                         }
                     }
@@ -482,5 +516,64 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("DISK"), "tiny summary present");
+    }
+
+    #[test]
+    fn quit_key_set() {
+        assert!(is_quit_key(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(is_quit_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(is_quit_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!is_quit_key(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(!is_quit_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(!is_quit_key(KeyCode::Up, KeyModifiers::NONE));
+    }
+
+    /// Regression for the laggy/dead quit: a metrics fetch that never returns
+    /// must not delay quitting. Model the worst case — the stats channel stays
+    /// open but never yields — and assert each quit key still breaks the loop.
+    /// (The old design awaited the fetch inline in the event `select!`, so a
+    /// keypress could be starved for the length of a request.)
+    #[tokio::test]
+    async fn quit_keys_break_loop_even_while_stats_stall() {
+        for key in [
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            // Channel stays open (we hold `_tx`) but never delivers a sample.
+            let (_tx, stats_rx) = tokio::sync::mpsc::channel::<anyhow::Result<StatsReportDto>>(1);
+            // The key first, then a stream that never ends — returning proves
+            // the KEY quit the loop, not the event stream running dry.
+            let events = futures::stream::iter(vec![Ok::<_, io::Error>(Event::Key(key))])
+                .chain(futures::stream::pending::<io::Result<Event>>());
+            let out = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                run_events(&mut terminal, stats_rx, events),
+            )
+            .await;
+            assert!(out.is_ok(), "quit key {key:?} did not break the loop");
+            out.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn non_quit_key_keeps_loop_running() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let (_tx, stats_rx) = tokio::sync::mpsc::channel::<anyhow::Result<StatsReportDto>>(1);
+        let events = futures::stream::iter(vec![Ok::<_, io::Error>(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )))])
+        .chain(futures::stream::pending::<io::Result<Event>>());
+        let out = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            run_events(&mut terminal, stats_rx, events),
+        )
+        .await;
+        assert!(
+            out.is_err(),
+            "an unrelated key must not quit the watch view"
+        );
     }
 }
