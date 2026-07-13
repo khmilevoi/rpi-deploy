@@ -1106,7 +1106,7 @@ async fn run_with(sys: &dyn Sys, opts: &SetupOpts) -> anyhow::Result<SetupReport
 /// login user's own npm has a — possibly newer — build installed instead of
 /// trusting that self-referential "canonical" result. Returns None when npm
 /// is unavailable to that user or `rpi-deploy` isn't installed via it.
-async fn resolve_npm_dist_binary(sys: &dyn Sys, login_user: &str) -> Option<PathBuf> {
+pub(crate) async fn resolve_npm_dist_binary(sys: &dyn Sys, login_user: &str) -> Option<PathBuf> {
     let root = sys
         .run("sudo", &["-u", login_user, "-i", "--", "npm", "root", "-g"])
         .await

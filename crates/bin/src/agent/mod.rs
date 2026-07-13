@@ -9,3 +9,4 @@ pub mod self_install;
 pub mod setup;
 pub mod state;
 pub mod uninstall;
+pub mod update;
