@@ -276,4 +276,46 @@ mod tests {
         assert_eq!(v.services[0].state, "running");
         assert_eq!(v.services[1].sem, Sem::Neutral); // empty state (old agent)
     }
+
+    #[test]
+    fn temp_none_renders_na_current_value() {
+        let r = StatsReportDto {
+            host: HostStatsDto {
+                cpu_percent: 0.9,
+                mem_used_bytes: 900,
+                mem_total_bytes: 8000,
+                disk_used_percent: 16,
+                uptime_secs: 4 * 86_400 + 6 * 3600,
+                temp_celsius: None,
+            },
+            projects: vec![],
+            host_history: vec![],
+        };
+        let v = build_view(&r);
+        assert_eq!(v.temp.value, "n/a");
+        assert_eq!(v.temp.unit, "");
+    }
+
+    #[test]
+    fn cards_series_come_from_history() {
+        let history = vec![
+            HostSampleDto {
+                at_ms: 0,
+                cpu_percent: 5.0,
+                mem_used_bytes: 100,
+                mem_total_bytes: 1000,
+                temp_celsius: Some(40.0),
+            },
+            HostSampleDto {
+                at_ms: 1000,
+                cpu_percent: 15.0,
+                mem_used_bytes: 200,
+                mem_total_bytes: 1000,
+                temp_celsius: Some(42.0),
+            },
+        ];
+        let v = build_view(&report(vec![], history));
+        assert_eq!(v.cpu.series, vec![(0.0, 5.0), (1.0, 15.0)]);
+        assert_eq!(v.temp.series, vec![(0.0, 40.0), (1.0, 42.0)]);
+    }
 }

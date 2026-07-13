@@ -260,7 +260,12 @@ fn draw_mini_chart(f: &mut Frame, area: Rect, card: &MetricCard, color: Color, p
     if card.series.len() < 2 {
         return;
     }
-    let x_max = (card.series.len() as f64 - 1.0).max(1.0);
+    let x_max = card
+        .series
+        .iter()
+        .map(|&(x, _)| x)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
     let (mut y_min, mut y_max) = card
         .series
         .iter()
