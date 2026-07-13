@@ -147,6 +147,17 @@ sudo rpi agent setup              # Pi only: swaps the binary and restarts the a
 
 Upgrading from v0.5? The command was renamed `pi` → `rpi` and the project config `pi.toml` → `rpi.toml` (hard cutover). See [docs/migration-v0.5-to-v0.6.md](docs/migration-v0.5-to-v0.6.md).
 
+### Installing without npm
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.sh | sh
+```
+
+Downloads and verifies the prebuilt binary and installs it to
+`/usr/local/bin` (override with `RPI_INSTALL_DIR`); `RPI_VERSION` pins a
+version (default: latest). It does not run setup — follow with
+`sudo rpi agent setup` on a Pi, or `rpi setup` on a dev machine.
+
 <details>
 <summary><b>Build from source</b> (instead of npm)</summary>
 
@@ -417,6 +428,33 @@ token_file = "/var/lib/rpi/cloudflare/token"
 ## Agent Management
 
 `sudo rpi agent setup` is idempotent: it creates the `rpi-agent` system user, directories, the systemd unit, and `/etc/rpi/agent.toml` if missing, repairs permissions, and never touches `secret.key` or `state.db`. Re-running it is always safe; `--dry-run` previews.
+
+### Updating the agent
+
+Update the rpi binary on a board to a chosen version from your laptop:
+
+```bash
+rpi upgrade                 # bring the board up to this CLI's version
+rpi upgrade --version 0.22.0
+rpi upgrade --version latest --yes
+```
+
+`rpi upgrade` opens `ssh -t <user>@<host> sudo rpi agent update --version <X>`,
+so a board whose sudo needs a password will prompt in your own terminal. It
+reuses your existing SSH profile (`--server` / `PI_SERVER` / default), shows
+`current → target`, and re-reads `/v1/version` afterwards to confirm.
+
+On the board, `rpi agent update` downloads the release archive
+(`rpi-v<version>-<triple>.tar.gz`) from GitHub Releases, verifies its SHA256
+against the release `SHA256SUMS`, swaps `/usr/local/bin/rpi`, re-runs the
+idempotent `rpi agent setup`, and restarts `rpi-agent`. If the board was
+installed via npm, it refreshes the global `rpi-deploy@<version>` instead.
+
+For unattended updates, add a narrow sudoers rule (not blanket NOPASSWD):
+
+```
+<login-user> ALL=(root) NOPASSWD: /usr/local/bin/rpi agent update *
+```
 
 Host-level upgrades run through a uniform migration framework:
 

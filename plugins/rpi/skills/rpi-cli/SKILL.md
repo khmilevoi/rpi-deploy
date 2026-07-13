@@ -1,6 +1,6 @@
 ---
 name: rpi-cli
-description: Use when operating, installing, testing, or troubleshooting the rpi deploy CLI, including rpi deploy, rpi ls, rpi secrets send, rpi secrets ls, rpi command, rpi logs, rpi stats, rpi start/stop/restart/rm, rpi status, rpi doctor, rpi gc, rpi agent run, rpi setup, rpi init, rpi agent setup, SSH profiles, PI_SERVER, PI_AGENT_URL, local dev agents, and CLI-to-agent connection failures.
+description: Use when operating, installing, testing, or troubleshooting the rpi deploy CLI, including rpi deploy, rpi ls, rpi secrets send, rpi secrets ls, rpi command, rpi logs, rpi stats, rpi start/stop/restart/rm, rpi status, rpi doctor, rpi gc, rpi agent run, rpi setup, rpi init, rpi agent setup, rpi upgrade, rpi agent update, install.sh, SSH profiles, PI_SERVER, PI_AGENT_URL, local dev agents, and CLI-to-agent connection failures.
 ---
 
 # Rpi CLI
@@ -43,6 +43,8 @@ Primary references in this repo:
 | One-command developer setup | `rpi setup` |
 | Scaffold a new `rpi.toml` | `rpi init` |
 | Install/configure the agent on the Pi | `rpi agent setup` |
+| Update a board's agent from the client (SSH + sudo) | `rpi upgrade [--version <X\|latest>] [--yes]` |
+| Update the rpi binary on the board (run with sudo) | `rpi agent update [--version <X>] [--user <u>] [--dry-run]` |
 | Uninstall the agent (keeps data unless `--purge`) | `rpi agent uninstall` |
 
 Remote commands accept either a named profile or direct SSH flags:
@@ -54,6 +56,16 @@ rpi deploy --host pi-host.local --user pi-user --key ~/.ssh/id_ed25519_pi
 ```
 
 Do not combine `--server` with `--host`; direct `--host` mode requires `--user`.
+
+To install without npm (bootstrap the prebuilt binary directly), use `scripts/install.sh`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/khmilevoi/rpi-deploy/master/scripts/install.sh | sh
+```
+
+Env overrides: `RPI_VERSION` (pin a version, default latest), `RPI_INSTALL_DIR`
+(default `/usr/local/bin`). It only installs the binary — it does not run
+`rpi agent setup` or `rpi setup`.
 
 ## Running Admin Commands
 
