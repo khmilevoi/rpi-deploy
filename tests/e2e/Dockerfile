@@ -31,6 +31,7 @@ COPY --from=builder /out/rpi /usr/local/bin/rpi
 COPY --from=legacy_builder /out/rpi-legacy /usr/local/bin/rpi-legacy
 
 RUN groupadd --system rpi-agent && \
+    groupadd docker && \
     useradd --system --gid rpi-agent --no-create-home --shell /usr/sbin/nologin rpi-agent && \
     useradd --create-home --shell /bin/bash deploy && \
     passwd --delete deploy && \
