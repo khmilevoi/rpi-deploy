@@ -18,21 +18,31 @@ echo "$before" | grep -q '0.17.1' && fail "precondition: /usr/local/bin/rpi is a
 
 # Stage a release-shaped fixture on the target, served via file://. The archive
 # must contain a member named `rpi`, so copy rpi-legacy -> rpi before taring.
-"${SSH[@]}" sudo sh -euc '
-  arch=$(uname -m)
-  case "$arch" in
-    aarch64|arm64) triple=aarch64-unknown-linux-musl ;;
-    x86_64|amd64)  triple=x86_64-unknown-linux-musl ;;
-    *) echo "unsupported arch: $arch" >&2; exit 1 ;;
-  esac
-  work=$(mktemp -d)
-  cp /usr/local/bin/rpi-legacy "$work/rpi"
-  d=/opt/e2e-release/v0.17.1
-  mkdir -p "$d"
-  tar -C "$work" -czf "$d/rpi-v0.17.1-$triple.tar.gz" rpi
-  ( cd "$d" && sha256sum "rpi-v0.17.1-$triple.tar.gz" > SHA256SUMS )
-  rm -rf "$work"
-'
+# The script is fed over STDIN (`sudo sh -s` + a quoted heredoc), NOT as ssh
+# command arguments: ssh flattens trailing argv words into one space-joined
+# string, which mangles a multi-line `sh -euc '...'` script — stdin bytes are
+# immune. The heredoc is quoted (<<'STAGE') so $arch/$work/$d/$triple expand on
+# the REMOTE shell, not locally.
+"${SSH[@]}" sudo sh -s <<'STAGE'
+set -eu
+arch=$(uname -m)
+case "$arch" in
+  aarch64|arm64) triple=aarch64-unknown-linux-musl ;;
+  x86_64|amd64)  triple=x86_64-unknown-linux-musl ;;
+  *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+esac
+work=$(mktemp -d)
+cp /usr/local/bin/rpi-legacy "$work/rpi"
+d=/opt/e2e-release/v0.17.1
+mkdir -p "$d"
+tar -C "$work" -czf "$d/rpi-v0.17.1-$triple.tar.gz" rpi
+( cd "$d" && sha256sum "rpi-v0.17.1-$triple.tar.gz" > SHA256SUMS )
+rm -rf "$work"
+STAGE
+
+# Fail fast with a clear message if staging did not actually produce the fixture.
+"${SSH[@]}" test -f /opt/e2e-release/v0.17.1/SHA256SUMS \
+  || fail 'fixture staging did not create /opt/e2e-release/v0.17.1/SHA256SUMS'
 
 # Run the update as root with the fixture base URL injected. `env` sets the var
 # for the rpi child regardless of the sudoers env policy; SUDO_USER=deploy is
