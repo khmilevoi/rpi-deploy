@@ -63,7 +63,6 @@ impl SshExec<'_> {
     /// Run `remote` on the board over an interactive `ssh -t` session with
     /// inherited stdio, so a remote `sudo` prompt reaches the operator's own
     /// terminal. Errors if the remote command exits nonzero.
-    #[allow(dead_code)]
     pub async fn run_tty(&self, remote: &[&str]) -> anyhow::Result<()> {
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.args(self.tty_args(remote));
