@@ -30,8 +30,11 @@ COPY --from=docker_cli /usr/local/libexec/docker/cli-plugins/docker-compose \
 COPY --from=builder /out/rpi /usr/local/bin/rpi
 COPY --from=legacy_builder /out/rpi-legacy /usr/local/bin/rpi-legacy
 
+# `agent setup` (run by `rpi agent update`) does `usermod -aG docker rpi-agent`,
+# so the docker group must exist by name; DOCKER_HOST is TCP here, so the
+# membership itself grants no daemon access.
 RUN groupadd --system rpi-agent && \
-    groupadd docker && \
+    groupadd --system docker && \
     useradd --system --gid rpi-agent --no-create-home --shell /usr/sbin/nologin rpi-agent && \
     useradd --create-home --shell /bin/bash deploy && \
     passwd --delete deploy && \

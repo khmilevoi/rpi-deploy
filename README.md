@@ -442,7 +442,9 @@ rpi upgrade --version latest --yes
 `rpi upgrade` opens `ssh -t <user>@<host> sudo rpi agent update --version <X>`,
 so a board whose sudo needs a password will prompt in your own terminal. It
 reuses your existing SSH profile (`--server` / `PI_SERVER` / default), shows
-`current → target`, and re-reads `/v1/version` afterwards to confirm.
+`current → target`, and re-reads `/v1/version` afterwards to confirm. It needs
+real SSH access to the board, so it doesn't apply to the local-dev override and
+errors out if `PI_AGENT_URL` is set.
 
 On the board, `rpi agent update` downloads the release archive
 (`rpi-v<version>-<triple>.tar.gz`) from GitHub Releases, verifies its SHA256

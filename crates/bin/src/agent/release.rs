@@ -120,11 +120,10 @@ pub async fn download_verified_binary(
     let triple =
         target_triple(&arch).ok_or_else(|| format!("unsupported architecture: {}", arch.trim()))?;
     let asset = asset_name(version, triple);
-    let base = base_url;
     let archive = format!("{workdir}/{asset}");
     let sums = format!("{workdir}/SHA256SUMS");
-    let asset_url = format!("{base}/v{version}/{asset}");
-    let sums_url = format!("{base}/v{version}/SHA256SUMS");
+    let asset_url = format!("{base_url}/v{version}/{asset}");
+    let sums_url = format!("{base_url}/v{version}/SHA256SUMS");
 
     sys.run("curl", &["-fsSL", "-o", &archive, &asset_url])
         .await

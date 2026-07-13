@@ -8,16 +8,34 @@ use crate::cli::prompt::{InquirePrompter, Prompter};
 use crate::cli::ssh::SshExec;
 use crate::cli::tunnel::SshTunnel;
 
+/// A resolved target version is interpolated into a remote shell command
+/// (`ssh … sudo rpi agent update --version <X>`). Restrict it to the character
+/// set a real version uses so a value like `0; reboot` can never reach the
+/// board's shell. Not an escalation guard (the operator already holds SSH+sudo)
+/// — defense-in-depth against a self-inflicted footgun / typo.
+fn validate_version(v: &str) -> anyhow::Result<()> {
+    if !v.is_empty()
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'_'))
+    {
+        Ok(())
+    } else {
+        anyhow::bail!("invalid target version {v:?}: expected a version like 0.22.0")
+    }
+}
+
 /// Resolve the version `rpi upgrade` will bring the board to: no flag → the
 /// client's own version (keeps the client↔agent pair aligned); `latest` → the
 /// newest published release; otherwise the explicit version (leading `v`
 /// stripped).
 pub async fn resolve_target_version(flag: Option<String>) -> anyhow::Result<String> {
-    match flag.as_deref() {
-        None => Ok(env!("CARGO_PKG_VERSION").to_string()),
-        Some("latest") => github_latest_version().await,
-        Some(v) => Ok(v.trim_start_matches('v').to_string()),
-    }
+    let v = match flag.as_deref() {
+        None => env!("CARGO_PKG_VERSION").to_string(),
+        Some("latest") => github_latest_version().await?,
+        Some(v) => v.trim_start_matches('v').to_string(),
+    };
+    validate_version(&v)?;
+    Ok(v)
 }
 
 /// Newest published release version (no leading `v`) via the GitHub API.
@@ -99,6 +117,31 @@ mod tests {
         assert_eq!(
             resolve_target_version(Some("0.22.0".into())).await.unwrap(),
             "0.22.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_version_with_shell_metacharacters() {
+        assert!(resolve_target_version(Some("0; reboot".into()))
+            .await
+            .is_err());
+        assert!(resolve_target_version(Some("0.22.0 && rm -rf /".into()))
+            .await
+            .is_err());
+        assert!(resolve_target_version(Some("$(id)".into())).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn accepts_normal_and_prerelease_versions() {
+        assert_eq!(
+            resolve_target_version(Some("0.22.0".into())).await.unwrap(),
+            "0.22.0"
+        );
+        assert_eq!(
+            resolve_target_version(Some("v0.22.0-rc.1".into()))
+                .await
+                .unwrap(),
+            "0.22.0-rc.1"
         );
     }
 }
