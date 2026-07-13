@@ -3,6 +3,7 @@ pub mod http;
 pub mod logfile;
 pub mod migrate;
 pub mod migrate_ledger;
+pub mod release;
 pub mod run;
 pub mod self_install;
 pub mod setup;
