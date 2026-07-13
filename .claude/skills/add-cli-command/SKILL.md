@@ -7,6 +7,8 @@ description: Use when adding a new rpi subcommand or changing an existing comman
 
 End-to-end recipe for a new `rpi <cmd>`. The chain is: clap enum → `cli/commands.rs` → `ApiClient` → HTTP `/v1/...` → axum handler → use case → domain contract. Work through the checklist in order; every REQUIRED item exists for each shipped command today.
 
+For the *why* behind this shape — the CLI↔agent boundary, command nesting, help conventions, output split, safety gates, version skew — see [`docs/cli-philosophy.md`](../../../docs/cli-philosophy.md).
+
 ## File checklist (in order)
 
 **Agent side (skip for local-only commands like `init`/`setup`):**
