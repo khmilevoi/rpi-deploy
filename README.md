@@ -48,7 +48,8 @@
 - **Admin commands** — declare `[commands]` in `rpi.toml` and run them inside the service container with `rpi command`.
 - **Ops built in** — `rpi logs`, `rpi stats` (`-w` for a live dashboard TUI: CPU / memory / temperature cards with mini charts, plus a per-service table with status pills and memory bars), `rpi status`, `rpi doctor`, `rpi agent logs`, `rpi gc`.
 - **Version-skew aware** — the CLI and agent handshake on `connect`, gate commands against advertised agent features, and print a banner instead of a confusing error when they're out of sync.
-- **Fast install** — `npm install -g rpi-deploy` downloads a checksum-verified prebuilt binary (Windows x64, Linux x64/aarch64) in seconds, falling back to a source build elsewhere.
+- **Fast install** — `npm install -g rpi-deploy` downloads a checksum-verified prebuilt binary (Windows x64, Linux x64/aarch64) in seconds, falling back to a source build elsewhere. A no-npm `install.sh` one-liner bootstraps binary-only hosts.
+- **Client-triggered updates** — `rpi upgrade` brings the board's agent up to your CLI's version over the existing SSH + sudo path (download → SHA-256 verify → atomic swap → restart), no manual SSH session required.
 
 ## Quick Start
 
