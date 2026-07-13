@@ -22,7 +22,7 @@ FROM docker:28-cli AS docker_cli
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git libgcc-s1 openssh-client openssh-server passwd util-linux && \
+      bash ca-certificates curl git libgcc-s1 openssh-client openssh-server passwd sudo util-linux && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=docker_cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker_cli /usr/local/libexec/docker/cli-plugins/docker-compose \
@@ -35,6 +35,8 @@ RUN groupadd --system rpi-agent && \
     useradd --create-home --shell /bin/bash deploy && \
     passwd --delete deploy && \
     usermod --append --groups rpi-agent deploy && \
+    printf 'deploy ALL=(root) NOPASSWD: ALL\n' > /etc/sudoers.d/deploy-e2e && \
+    chmod 0440 /etc/sudoers.d/deploy-e2e && \
     install -d -m 0755 /run/sshd /opt/e2e && \
     docker --version && docker compose version && rpi --version && rpi-legacy --version
 
