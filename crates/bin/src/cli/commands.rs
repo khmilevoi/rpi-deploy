@@ -460,6 +460,7 @@ fn format_command_line(name: &str, spec: &pi_domain::entities::CommandSpec) -> S
 pub async fn command(
     name: Option<String>,
     args: Vec<String>,
+    full: bool,
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
     let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
@@ -509,7 +510,12 @@ pub async fn command(
         drop(tunnel);
         std::process::exit(code);
     }
-    pane.finish_ok_keep(&format!("command '{name}' finished (exit 0)"));
+    let summary = format!("command '{name}' finished (exit 0)");
+    if full {
+        pane.finish_ok_dump(&summary);
+    } else {
+        pane.finish_ok_keep(&summary);
+    }
     Ok(())
 }
 

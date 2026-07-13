@@ -234,6 +234,24 @@ impl LogPane {
         crate::output::success(summary);
     }
 
+    /// Success variant that dumps the full captured log below the streamed
+    /// frame, for callers that asked to see everything (e.g. `rpi command
+    /// --full`) rather than just the last `max_visible` lines. Non-interactive
+    /// runs already streamed every line via `push_line`.
+    pub fn finish_ok_dump(self, summary: &str) {
+        if self.interactive {
+            (self.print_line)(
+                &console_style(Sem::Muted)
+                    .apply_to("— full log —")
+                    .to_string(),
+            );
+            for l in &self.full {
+                (self.print_line)(l);
+            }
+        }
+        crate::output::success(summary);
+    }
+
     /// Neutral outcome (e.g. deploy superseded) — same as success: clear, no dump.
     pub fn finish_neutral(self, summary: &str) {
         if self.interactive {

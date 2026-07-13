@@ -108,6 +108,9 @@ enum Cmd {
         /// Extra arguments appended to the declared command (write them after --)
         #[arg(last = true)]
         args: Vec<String>,
+        /// Print the full output instead of just the last lines
+        #[arg(long)]
+        full: bool,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
@@ -377,8 +380,9 @@ async fn run() -> anyhow::Result<()> {
         Cmd::Command {
             name,
             args,
+            full,
             connect,
-        } => cli::commands::command(name, args, connect).await,
+        } => cli::commands::command(name, args, full, connect).await,
         Cmd::Stats {
             project,
             json,
