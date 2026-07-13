@@ -9,9 +9,6 @@ use crate::output::{self, Sem};
 use crate::proto::StatsReportDto;
 
 /// One metric card (cpu / mem / temp): a large current value plus a mini series.
-// Not consumed yet — the render task (Task 5) builds the dashboard widgets
-// from these fields; remove once that task lands.
-#[allow(dead_code)]
 pub struct MetricCard {
     pub label: &'static str,
     /// Numeric part only (drawn large); e.g. "0.9", "11.2", "48.5", or "n/a".
@@ -23,9 +20,6 @@ pub struct MetricCard {
 }
 
 /// One row of the services table.
-// Not consumed yet — the render task (Task 5) builds table rows from these
-// fields; remove once that task lands.
-#[allow(dead_code)]
 pub struct ServiceRow {
     pub project: String,
     pub service: String,
@@ -40,9 +34,6 @@ pub struct ServiceRow {
     pub sem: Sem,
 }
 
-// Not consumed yet — the render task (Task 5) builds the dashboard frame from
-// this; remove once that task lands.
-#[allow(dead_code)]
 pub struct StatsView {
     pub disk_percent: u8,
     pub uptime: String,
@@ -52,9 +43,6 @@ pub struct StatsView {
     pub services: Vec<ServiceRow>,
 }
 
-// Not consumed yet — the render task (Task 5) switches dashboard layout on
-// this; remove once that task lands.
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LayoutMode {
     Rich,
@@ -64,9 +52,6 @@ pub enum LayoutMode {
 
 /// Pick a layout by terminal size so the tall rich dashboard degrades instead
 /// of overflowing. Thresholds are height-first (cards are the tall part).
-// Not consumed yet — the render task (Task 5) calls this from the draw loop;
-// remove once that task lands.
-#[allow(dead_code)]
 pub fn layout_mode(area: Rect) -> LayoutMode {
     if area.height < 10 {
         LayoutMode::Tiny
@@ -78,9 +63,6 @@ pub fn layout_mode(area: Rect) -> LayoutMode {
 }
 
 /// Days-aware uptime: "4d 6h" / "6h 5m" / "3m".
-// Not consumed yet outside `build_view`/tests — the render task (Task 5)
-// wires this module in; remove once that task lands.
-#[allow(dead_code)]
 pub fn format_uptime(secs: u64) -> String {
     let days = secs / 86_400;
     let hours = (secs % 86_400) / 3600;
@@ -94,9 +76,6 @@ pub fn format_uptime(secs: u64) -> String {
     }
 }
 
-// Not consumed yet — the render task (Task 5) calls this from the draw loop;
-// remove once that task lands.
-#[allow(dead_code)]
 pub fn build_view(report: &StatsReportDto) -> StatsView {
     let h = &report.host;
 

@@ -184,27 +184,23 @@ pub fn accent_ratatui_color() -> Option<ratatui::style::Color> {
 
 /// True when 24-bit color should be emitted (colors on + truecolor terminal).
 /// Public wrapper so `ratatui` callers can build a matching grey palette.
-#[allow(dead_code)]
 pub fn truecolor_enabled() -> bool {
     theme::truecolor_enabled()
 }
 
 /// Memory-series green (`#75A928`) for `ratatui`; exact under truecolor,
 /// nearest xterm-256 otherwise.
-#[allow(dead_code)]
 pub fn mem_ratatui_color() -> Option<ratatui::style::Color> {
     theme::Paint::Rgb(117, 169, 40).ratatui_color(theme::truecolor_enabled())
 }
 
 /// Temperature-series magenta (`#D96AE0`) for `ratatui`.
-#[allow(dead_code)]
 pub fn temp_ratatui_color() -> Option<ratatui::style::Color> {
     theme::Paint::Rgb(217, 106, 224).ratatui_color(theme::truecolor_enabled())
 }
 
 /// Semantic role -> `ratatui` color, following the active theme; `None` for
 /// non-colored roles (Muted/Neutral/Frame). Mirrors `table.rs::sem_colour`.
-#[allow(dead_code)]
 pub fn sem_ratatui_color(sem: Sem) -> Option<ratatui::style::Color> {
     let t = theme::theme();
     let tc = theme::truecolor_enabled();

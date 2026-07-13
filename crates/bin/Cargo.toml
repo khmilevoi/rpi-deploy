@@ -35,6 +35,7 @@ indicatif = { workspace = true }
 comfy-table = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+tui-big-text = { workspace = true }
 
 [dev-dependencies]
 pi-domain = { workspace = true, features = ["mocks"] }
