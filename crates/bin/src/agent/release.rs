@@ -6,7 +6,9 @@
 
 #![allow(dead_code)]
 
+use crate::agent::setup::Sys;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// GitHub `owner/repo` that publishes rpi releases. Mirrors
 /// `scripts/postinstall.js`'s `REPO`.
@@ -78,6 +80,89 @@ pub fn parse_latest_tag(body: &str) -> Result<String, String> {
     Ok(tag.trim_start_matches('v').to_string())
 }
 
+/// Create a fresh temp working directory via `mktemp -d`.
+pub async fn make_tempdir(sys: &dyn Sys) -> Result<String, String> {
+    sys.run("mktemp", &["-d"])
+        .await
+        .map(|s| s.trim().to_string())
+        .map_err(|e| format!("mktemp -d: {e}"))
+}
+
+/// Resolve the newest published release version (no leading `v`) via the GitHub
+/// API. Shells `curl` through `Sys` and parses `tag_name` — no async HTTP
+/// client needed on the board. `api_base` is passed in (read from env by the
+/// caller) so this stays env-free and unit-testable.
+pub async fn resolve_latest_version(sys: &dyn Sys, api_base: &str) -> Result<String, String> {
+    let url = format!("{api_base}/releases/latest");
+    let body = sys
+        .run(
+            "curl",
+            &["-fsSL", "-H", "Accept: application/vnd.github+json", &url],
+        )
+        .await
+        .map_err(|e| format!("query {url}: {e}"))?;
+    parse_latest_tag(&body)
+}
+
+/// Download the release archive for `version` targeting this host's arch, verify
+/// its SHA256 against the release `SHA256SUMS`, extract it into `workdir`, and
+/// return the path to the extracted `rpi` binary. All I/O goes through `Sys`
+/// (curl/sha256sum/tar), mirroring `setup::ensure_cloudflared_binary`.
+/// `base_url` is passed in (read from env by the caller) so this stays env-free.
+pub async fn download_verified_binary(
+    sys: &dyn Sys,
+    base_url: &str,
+    version: &str,
+    workdir: &str,
+) -> Result<PathBuf, String> {
+    let arch = sys
+        .run("uname", &["-m"])
+        .await
+        .map_err(|e| format!("uname -m: {e}"))?;
+    let triple =
+        target_triple(&arch).ok_or_else(|| format!("unsupported architecture: {}", arch.trim()))?;
+    let asset = asset_name(version, triple);
+    let base = base_url;
+    let archive = format!("{workdir}/{asset}");
+    let sums = format!("{workdir}/SHA256SUMS");
+    let asset_url = format!("{base}/v{version}/{asset}");
+    let sums_url = format!("{base}/v{version}/SHA256SUMS");
+
+    sys.run("curl", &["-fsSL", "-o", &archive, &asset_url])
+        .await
+        .map_err(|e| format!("download {asset_url}: {e}"))?;
+    sys.run("curl", &["-fsSL", "-o", &sums, &sums_url])
+        .await
+        .map_err(|e| format!("download {sums_url}: {e}"))?;
+
+    let sums_text = sys
+        .read(Path::new(&sums))
+        .ok_or_else(|| format!("cannot read {sums}"))?;
+    let expected = parse_sha256sums(&sums_text)
+        .get(&asset)
+        .cloned()
+        .ok_or_else(|| format!("{asset} not listed in SHA256SUMS"))?;
+    let actual_line = sys
+        .run("sha256sum", &[&archive])
+        .await
+        .map_err(|e| format!("sha256sum {archive}: {e}"))?;
+    let actual = actual_line.split_whitespace().next().unwrap_or("");
+    if actual != expected {
+        return Err(format!(
+            "sha256 mismatch for {asset}: expected {expected}, got {actual}"
+        ));
+    }
+
+    sys.run("tar", &["-xf", &archive, "-C", workdir])
+        .await
+        .map_err(|e| format!("tar extract {archive}: {e}"))?;
+    let bin = PathBuf::from(format!("{workdir}/rpi"));
+    if !sys.exists(&bin) {
+        return Err(format!("archive {asset} did not contain rpi"));
+    }
+    Ok(bin)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +231,180 @@ mod tests {
     fn parse_latest_tag_errors_without_tag_name() {
         assert!(parse_latest_tag(r#"{"name":"x"}"#).is_err());
         assert!(parse_latest_tag("not json").is_err());
+    }
+
+    use crate::agent::setup::fake::FakeSys;
+    use std::path::Path;
+
+    const API: &str = "https://api.github.com/repos/khmilevoi/rpi-deploy";
+    const BASE: &str = "file:///rel";
+
+    #[tokio::test]
+    async fn resolve_latest_version_reads_tag_name() {
+        let mut sys = FakeSys::default();
+        let url = format!("{API}/releases/latest");
+        sys.ok.insert(
+            FakeSys::key(
+                "curl",
+                &["-fsSL", "-H", "Accept: application/vnd.github+json", &url],
+            ),
+            r#"{"tag_name":"v0.22.0"}"#.into(),
+        );
+        assert_eq!(resolve_latest_version(&sys, API).await.unwrap(), "0.22.0");
+    }
+
+    #[tokio::test]
+    async fn download_verified_binary_happy_path() {
+        let version = "0.22.0";
+        let triple = "aarch64-unknown-linux-musl";
+        let asset = asset_name(version, triple);
+        let hash = "c".repeat(64);
+        let work = "/tmp/wd";
+        let archive = format!("{work}/{asset}");
+        let sums = format!("{work}/SHA256SUMS");
+
+        let mut sys = FakeSys::default();
+        sys.ok
+            .insert(FakeSys::key("uname", &["-m"]), "aarch64".into());
+        sys.ok.insert(
+            FakeSys::key(
+                "curl",
+                &[
+                    "-fsSL",
+                    "-o",
+                    &archive,
+                    &format!("{BASE}/v{version}/{asset}"),
+                ],
+            ),
+            String::new(),
+        );
+        sys.ok.insert(
+            FakeSys::key(
+                "curl",
+                &[
+                    "-fsSL",
+                    "-o",
+                    &sums,
+                    &format!("{BASE}/v{version}/SHA256SUMS"),
+                ],
+            ),
+            String::new(),
+        );
+        sys.files.insert(sums.clone(), format!("{hash}  {asset}\n"));
+        sys.ok.insert(
+            FakeSys::key("sha256sum", &[&archive]),
+            format!("{hash}  {archive}"),
+        );
+        sys.ok.insert(
+            FakeSys::key("tar", &["-xf", &archive, "-C", work]),
+            String::new(),
+        );
+        sys.paths.insert(format!("{work}/rpi"));
+
+        let bin = download_verified_binary(&sys, BASE, version, work)
+            .await
+            .unwrap();
+        assert_eq!(bin, Path::new("/tmp/wd/rpi"));
+    }
+
+    #[tokio::test]
+    async fn download_verified_binary_rejects_sha_mismatch() {
+        let version = "0.22.0";
+        let asset = asset_name(version, "aarch64-unknown-linux-musl");
+        let work = "/tmp/wd";
+        let archive = format!("{work}/{asset}");
+        let sums = format!("{work}/SHA256SUMS");
+        let mut sys = FakeSys::default();
+        sys.ok
+            .insert(FakeSys::key("uname", &["-m"]), "aarch64".into());
+        sys.ok.insert(
+            FakeSys::key(
+                "curl",
+                &[
+                    "-fsSL",
+                    "-o",
+                    &archive,
+                    &format!("{BASE}/v{version}/{asset}"),
+                ],
+            ),
+            String::new(),
+        );
+        sys.ok.insert(
+            FakeSys::key(
+                "curl",
+                &[
+                    "-fsSL",
+                    "-o",
+                    &sums,
+                    &format!("{BASE}/v{version}/SHA256SUMS"),
+                ],
+            ),
+            String::new(),
+        );
+        sys.files
+            .insert(sums.clone(), format!("{}  {asset}\n", "a".repeat(64)));
+        sys.ok.insert(
+            FakeSys::key("sha256sum", &[&archive]),
+            format!("{}  {archive}", "b".repeat(64)),
+        );
+        let err = download_verified_binary(&sys, BASE, version, work)
+            .await
+            .unwrap_err();
+        assert!(err.contains("sha256 mismatch"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn download_verified_binary_rejects_unsupported_arch() {
+        let mut sys = FakeSys::default();
+        sys.ok
+            .insert(FakeSys::key("uname", &["-m"]), "armv7l".into());
+        let err = download_verified_binary(&sys, BASE, "0.22.0", "/tmp/wd")
+            .await
+            .unwrap_err();
+        assert!(err.contains("unsupported architecture"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn download_verified_binary_errors_when_asset_not_in_sums() {
+        let version = "0.22.0";
+        let asset = asset_name(version, "aarch64-unknown-linux-musl");
+        let work = "/tmp/wd";
+        let archive = format!("{work}/{asset}");
+        let sums = format!("{work}/SHA256SUMS");
+        let mut sys = FakeSys::default();
+        sys.ok
+            .insert(FakeSys::key("uname", &["-m"]), "aarch64".into());
+        sys.ok.insert(
+            FakeSys::key(
+                "curl",
+                &[
+                    "-fsSL",
+                    "-o",
+                    &archive,
+                    &format!("{BASE}/v{version}/{asset}"),
+                ],
+            ),
+            String::new(),
+        );
+        sys.ok.insert(
+            FakeSys::key(
+                "curl",
+                &[
+                    "-fsSL",
+                    "-o",
+                    &sums,
+                    &format!("{BASE}/v{version}/SHA256SUMS"),
+                ],
+            ),
+            String::new(),
+        );
+        sys.files.insert(
+            sums.clone(),
+            format!("{}  some-other-file.tar.gz\n", "a".repeat(64)),
+        );
+        let err = download_verified_binary(&sys, BASE, version, work)
+            .await
+            .unwrap_err();
+        assert!(err.contains("not listed in SHA256SUMS"), "{err}");
     }
 }
