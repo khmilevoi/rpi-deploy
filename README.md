@@ -46,7 +46,7 @@
 - **Stable ports & health checks** — the agent allocates a stable host port per project, writes a Compose override, and probes HTTP (or TCP) before declaring success.
 - **Latest-wins deploy queue** — a newer deploy supersedes the one in flight; `rpi deploy --cancel` aborts.
 - **Admin commands** — declare `[commands]` in `rpi.toml` and run them inside the service container with `rpi command`.
-- **Ops built in** — `rpi logs`, `rpi stats` (`-w` for a live TUI with CPU/memory/disk/temperature sparklines and history), `rpi status`, `rpi doctor`, `rpi agent logs`, `rpi gc`.
+- **Ops built in** — `rpi logs`, `rpi stats` (`-w` for a live dashboard TUI: CPU / memory / temperature cards with mini charts, plus a per-service table with status pills and memory bars), `rpi status`, `rpi doctor`, `rpi agent logs`, `rpi gc`.
 - **Version-skew aware** — the CLI and agent handshake on `connect`, gate commands against advertised agent features, and print a banner instead of a confusing error when they're out of sync.
 - **Fast install** — `npm install -g rpi-deploy` downloads a checksum-verified prebuilt binary (Windows x64, Linux x64/aarch64) in seconds, falling back to a source build elsewhere.
 
