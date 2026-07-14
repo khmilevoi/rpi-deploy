@@ -119,6 +119,7 @@ sequenceDiagram
 ## Source anchors
 
 - `crates/application/src/secrets.rs` — send/list secrets use cases: validates the bundle isn't empty, saves it, and (with `--apply`) re-injects it and restarts the affected containers immediately.
+- `crates/bin/src/cli/rpitoml.rs` (`SecretsSection` only) — the `[secrets]` table in `rpi.toml`: names the local env file `rpi secrets send` reads (`[secrets].env`, default `.env`) and the extra files it reads verbatim (`[secrets].files`).
 - `crates/application/src/mask.rs` — `MaskingSink`: replaces armed secret values (6+ characters) with `***KEY***` in every line logged afterward.
 - `crates/infrastructure/src/secrets.rs` — `EncryptedFileStore`: age-encrypts and decrypts the bundle at rest, one file per project, using an agent identity key kept at file mode 0600.
 - `crates/infrastructure/src/secretsfile.rs` — `FsSecretsWriter`: writes `.env` and secret files into a checkout (files 0600, directories 0700), replaces the previous bundle's files via a small manifest, and guards every write and cleanup against symlink escapes.

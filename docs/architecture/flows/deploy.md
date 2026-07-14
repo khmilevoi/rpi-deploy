@@ -40,7 +40,7 @@ sequenceDiagram
         P->>CF: route — publish hostname to the stable host port
         CF-->>P: applied / skipped / error
     end
-    P->>P: gc — best-effort prune of unused images
+    P->>P: gc — best-effort prune of dangling images
     P-->>API: stage events as they happen, then the final status
     API-->>CLI: SSE stream, rendered as a staged pipeline
 ```
@@ -51,13 +51,16 @@ stateDiagram-v2
     Queued --> Running: slot is free, or the previous run for this project just finished
     Queued --> Superseded: a newer rpi deploy for the same project arrives while still queued
     Queued --> Canceled: rpi deploy --cancel
+    Queued --> Interrupted: agent restarts
     Running --> Canceled: rpi deploy --cancel
     Running --> Failed: a stage errors out
     Running --> Success: every stage completes (a skipped route still counts as success)
+    Running --> Interrupted: agent restarts
     Superseded --> [*]
     Canceled --> [*]
     Failed --> [*]
     Success --> [*]
+    Interrupted --> [*]
 ```
 
 ## Walkthrough
@@ -78,7 +81,12 @@ stateDiagram-v2
    still waiting can be replaced.
 4. Once a deploy starts running, the CLI opens a log stream and renders every
    stage as it happens: a staged pipeline where each stage shows started,
-   then succeeded / failed / skipped, with timing.
+   then succeeded / failed / skipped, with timing. The agent buffers each
+   deployment's recent log lines and stage events — an in-memory backlog
+   while it's still running, or the tail saved with its history record once
+   it's finished — and replays that backlog to any viewer who opens or
+   reopens the deploy's log stream, with live events (or just the final
+   status, for an already-finished deploy) following right after.
 5. **Fetch** — clones the repository on the very first deploy of a project
    (generating a dedicated SSH deploy key first if the repo needs one), then
    always fetches from the remote and hard-resets the checkout to the
@@ -123,7 +131,7 @@ stateDiagram-v2
       the route call itself errors, the deploy **fails** here; the
       application stack is already up and healthy at this point, just not
       reachable at its public hostname.
-11. **Gc** — a best-effort prune of unused Docker images to reclaim disk
+11. **Gc** — a best-effort prune of dangling Docker images to reclaim disk
     space. A gc error, or its own timeout, is always downgraded to
     "skipped" — it never fails the deploy.
 12. The agent records the final status (success, failed, or canceled) and
@@ -139,11 +147,19 @@ stateDiagram-v2
     any in-flight git/docker command it was waiting on) and is then marked
     canceled. Either way, canceling never tears down or rolls back
     containers that `start` already brought up — it only stops the pipeline
-    from proceeding any further.
+    from proceeding any further. The CLI has no distinct stamp for this
+    outcome, though: whichever process is still following that deploy's log
+    stream sees a status other than success or superseded, so an explicit
+    `--cancel` still prints the same failed-style stamp and exits non-zero,
+    just like a genuine failure.
 14. When a running deploy ends — success, failure, or cancellation — the
     agent immediately promotes the one deploy waiting behind it (if any) to
     running. If nothing is queued, the project goes idle until the next
     `rpi deploy`.
+15. If the agent process itself restarts while a deployment is still queued
+    or running, that row is not resumed: every such deployment is marked
+    interrupted at startup, and the project simply waits for the next
+    `rpi deploy` to start fresh.
 
 ## Source anchors
 
@@ -177,6 +193,17 @@ stateDiagram-v2
 - `crates/infrastructure/src/overrides.rs` — writes rpi's own compose
   override (bind address, stable host port, restart policy) that the
   build/start stages layer on top of the project's own compose file.
+- `crates/infrastructure/src/history.rs` (`sweep_interrupted` only) — marks
+  any deployment left `queued` or `running` as `interrupted` when the agent
+  restarts; its other role, deployment-history retention, is covered in
+  `flows/gc.md`.
+- `crates/infrastructure/src/events.rs` — the in-memory backlog and live
+  broadcast behind the deploy log stream: buffers each running deployment's
+  recent events and replays them to a viewer that opens or reopens the
+  stream mid-run.
+- `crates/application/src/tail.rs` — keeps the last N lines of a
+  deployment's log as its history record's tail, which is what a viewer
+  gets instead once that deployment has finished.
 - `crates/bin/src/cli/commands.rs` — the CLI side of `rpi deploy` and `rpi
   deploy --cancel`: submits the request, follows the SSE stream, renders
   the staged pipeline, and prints the final result.

@@ -27,9 +27,8 @@ flowchart TD
 1. **Two ways to trigger a cleanup run.** A cleanup run happens automatically
    as the last step of every deploy, after the optional public-routing step,
    regardless of whether the project declares a public hostname. It also
-   runs on demand when an operator runs `rpi gc`, which sends the agent the
-   same request a deploy would trigger internally. Both paths execute the
-   exact same routine.
+   runs on demand when an operator runs `rpi gc`, which runs the same
+   routine the deploy's cleanup stage invokes in-process.
 2. **What always happens.** Every cleanup run removes dangling Docker
    images — images with no tag that also aren't referenced by any
    container. This step always runs, whichever trigger started it.

@@ -14,6 +14,9 @@ procedure. Full design: `docs/superpowers/specs/2026-07-13-architecture-docs-des
 
 1. Match the files you touched against the map below; update every affected
    doc **before finishing the task** (this is a CLAUDE.md requirement).
+   1a. The map isn't exhaustive — a file can anchor more than one doc — so
+       also grep `docs/architecture/` for each changed file's path and update
+       every doc that anchors it, even ones the map above doesn't list.
 2. Updating a doc means all three: diagram, numbered prose walkthrough, and
    `Source anchors` stay consistent with each other and the code.
 3. No matching row but you added a crate/module/process or a new external
