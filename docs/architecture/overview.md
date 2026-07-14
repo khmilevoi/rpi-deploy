@@ -35,7 +35,7 @@ flowchart LR
 ## Walkthrough
 
 1. **One binary, two roles.** `rpi` is a single executable with one command
-   enum covering every subcommand. When you run `rpi agent run`, the program
+   list covering every subcommand. When you run `rpi agent run`, the program
    branches straight into the agent's own startup path before it even sets
    up the CLI's terminal logging — so the exact same binary behaves as a
    long-running daemon on the Pi, or as a one-shot client on your machine,
@@ -45,36 +45,43 @@ flowchart LR
    again, with `sudo`, on the Pi. That's what the dotted `npm` edge
    represents: it's how either side obtains or updates the `rpi` executable,
    not something the running agent talks to at deploy time.
-3. **The CLI opens a fresh SSH tunnel per command.** Every non-agent `rpi`
-   subcommand spawns its own `ssh -L <local-port>:/run/rpi/agent.sock -N`
-   process (batch mode, no prompts), waits up to 10 seconds for that local
-   port to accept a connection, and tears the SSH process down again when
-   the command finishes. Because the far end of the tunnel is a Unix socket
+3. **The CLI opens a fresh SSH tunnel per command.** Every subcommand that
+   talks to the agent — deploy, ls, logs, stats, status, and the rest —
+   spawns its own `ssh -L <local-port>:/run/rpi/agent.sock -N` process
+   (batch mode, no prompts), waits up to 10 seconds for that local port to
+   accept a connection, and tears the SSH process down again when the
+   command finishes. Because the far end of the tunnel is a Unix socket
    path rather than a TCP port, nothing new is reachable from outside the
    Pi except what SSH already exposes — there is no separate listening port
    for the agent itself. (A `PI_AGENT_URL` environment variable can bypass
    the tunnel for local development against a plain TCP agent; that path is
-   never used against a real Pi.)
+   never used against a real Pi.) Two subcommands never reach this point at
+   all: `rpi init` (writes `rpi.toml` from local prompts/detection) and
+   `rpi setup` (saves a local server profile, plus a plain connectivity
+   check of its own) are local-only wizards that don't open the tunnel or
+   contact the agent.
    - *Failure branch:* if the tunnel doesn't come up in time — wrong host,
      no SSH access, or the agent isn't running so nothing is listening on
      the socket — the CLI aborts with an error telling you to check SSH
      access, and no HTTP request is ever attempted. Nothing beyond the
      pre-existing SSH port was ever exposed for that attempt.
-4. **Requests land on the agent's HTTP API.** On the Pi, the agent process
-   loads its config, starts a background host-metrics sampler, and serves an
-   HTTP router — either on the Unix socket (file mode `0660`, so only
+4. **The agent boots and self-heals before it serves anything.** On the Pi,
+   the agent process loads its config and starts a background host-metrics
+   sampler; then, before it opens its HTTP router at all, it sweeps its own
+   deployment history: anything still marked "in progress" from a previous
+   run — because the process crashed or the Pi rebooted mid-deploy — is
+   marked interrupted. A stale "running" status never survives an agent
+   restart.
+5. **Requests land on the agent's HTTP API.** Only then does the agent serve
+   its HTTP router — either on the Unix socket (file mode `0660`, so only
    members of the `rpi-agent` group, i.e. the SSH login user added during
-   `rpi agent setup`, can connect), or on a plain TCP address when `agent.toml`
-   sets one (Windows / local-dev only). That router is what every non-agent
-   `rpi` subcommand ultimately calls: creating, inspecting, or cancelling
-   deployments; listing, removing, or controlling projects; streaming logs;
-   sending env vars and secrets; and agent-level status, stats, doctor, logs,
-   and garbage collection.
-5. **Startup self-healing.** Before serving any request, the agent sweeps its
-   own deployment history: anything still marked "in progress" from a
-   previous run — because the process crashed or the Pi rebooted mid-deploy
-   — is marked interrupted. A stale "running" status never survives an
-   agent restart.
+   `rpi agent setup`, can connect), or on a plain TCP address when
+   `agent.toml` sets one (Windows / local-dev only). That router is what
+   every subcommand that talks to the agent ultimately calls: creating,
+   inspecting, or cancelling deployments; listing, removing, or controlling
+   projects; streaming logs; sending env vars and secrets; and agent-level
+   status, stats, doctor, logs, and garbage collection (`rpi init` and `rpi
+   setup` never reach it, per step 3 above).
 6. **A deploy drives Docker Compose and Git.** Handling a deploy request
    builds and starts the project's Docker Compose stack and clones or
    fetches the project's repository from GitHub as part of that pipeline
