@@ -11,3 +11,7 @@ rtk cargo test --locked
 ```
 
 If `cargo fmt --all -- --check` reports a diff, run `rtk cargo fmt --all` and commit the result — do not hand-edit formatting.
+
+If the change alters behavior or structure covered by `docs/architecture/`,
+update the affected documents before finishing — see the
+`architecture-diagrams` skill for the code-area→doc map and conventions.
