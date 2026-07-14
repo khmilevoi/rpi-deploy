@@ -28,10 +28,10 @@ sequenceDiagram
     Installer-->>Operator: rpi binary ready
 
     Operator->>Setup: sudo rpi agent setup
+    Setup->>Setup: install the running binary to /usr/local/bin/rpi
     Setup->>OS: create rpi-agent user (docker group, no sudo, no shell)
     Setup->>OS: create /var/lib/rpi, /var/log/rpi, /etc/rpi
     Setup->>OS: write default config, only if absent
-    Setup->>Setup: install the running binary to /usr/local/bin/rpi
     Setup->>OS: write systemd unit, daemon-reload
     Setup->>OS: systemctl enable --now rpi-agent
     OS->>Agent: start as the rpi-agent user
@@ -52,43 +52,43 @@ sequenceDiagram
    and neither channel runs the bootstrap step below automatically — they
    only print the next command to run.
 2. **Fallback when there's no prebuilt binary.** The npm channel falls back
-   to building from source with `cargo build --release` when the host's
-   OS/architecture isn't one of the published prebuilt targets (installing
-   Rust via `rustup` first if needed, and checking for a C toolchain). The
-   shell installer has no such fallback: an unrecognized `uname -m` is a hard
-   failure with no further attempt, because it has no way to build from
-   source.
+   to building from source with `cargo build --release --locked` when the
+   host's OS/architecture isn't one of the published prebuilt targets
+   (installing Rust via `rustup` first if needed, and checking for a C
+   toolchain). The shell installer has no such fallback: an unrecognized
+   `uname -m` is a hard failure with no further attempt, because it has no
+   way to build from source.
 3. **`sudo rpi agent setup` — the one-time bootstrap.** Must run as root
    (via `sudo`). It determines the "login user" — the SSH account the
    operator is actually using — from `--user`, or from `$SUDO_USER` when
    omitted; without either, it refuses to proceed rather than guess.
-4. **Creates a dedicated, unprivileged service account.** A system user
+4. **Installs the binary at the canonical path — the first thing setup
+   does.** The currently running executable is copied atomically (write a
+   temp file, `chmod 0755`, then rename it over the target) to
+   `/usr/local/bin/rpi` — the path the systemd unit's `ExecStart` always
+   points at, regardless of which installer channel produced the binary.
+   Because `sudo` resolves `rpi` through root's own `PATH` — which never
+   includes an npm-managed directory — setup double-checks: if it finds the
+   binary already sitting at the canonical path (so there'd otherwise be
+   nothing to do) but the operator's own npm has a `rpi-deploy` install with
+   a different build, that build is installed instead, so a newer
+   npm-installed version isn't silently ignored.
+5. **Creates a dedicated, unprivileged service account.** A system user
    `rpi-agent` is created with no login shell and no home directory, then
    added to the `docker` group (so it can drive Docker Compose) — but never
    to `sudo` or any admin group. The operator's own login user is added to
    the `rpi-agent` group too, so their SSH login can reach the agent's Unix
    socket without needing `sudo` for every command.
-5. **Creates the directories the agent owns.** `/var/lib/rpi` (state) and
+6. **Creates the directories the agent owns.** `/var/lib/rpi` (state) and
    `/var/log/rpi` (file logs) are created owned by `rpi-agent`; `/etc/rpi`
    (config) is created owned by root, since the agent only ever reads its
    config, never writes it.
-6. **Config adoption, not overwrite.** The default `agent.toml` is written
+7. **Config adoption, not overwrite.** The default `agent.toml` is written
    only when the file is completely absent — an existing config from a
    previous run (or a hand-edited one) is left untouched. The same rule
    applies to an existing Cloudflare tunnel config (`config.yml`, written
    only by the optional `--with-cloudflared` bootstrap): if one is already
    present, setup adopts and validates it rather than regenerating it.
-7. **Installs the binary at the canonical path.** The currently running
-   executable is copied atomically (write a temp file, `chmod 0755`, then
-   rename it over the target) to `/usr/local/bin/rpi` — the path the
-   systemd unit's `ExecStart` always points at, regardless of which
-   installer channel produced the binary. Because `sudo` resolves `rpi`
-   through root's own `PATH` — which never includes an npm-managed
-   directory — setup double-checks: if it finds the binary already sitting
-   at the canonical path (so there'd otherwise be nothing to do) but the
-   operator's own npm has a `rpi-deploy` install with a different build,
-   that build is installed instead, so a newer npm-installed version isn't
-   silently ignored.
 8. **Writes and enables the systemd unit.** The service definition (running
    as `User=rpi-agent`, `ExecStart=/usr/local/bin/rpi agent run …`) is
    written only if it doesn't already match byte-for-byte; a differing unit
@@ -115,7 +115,7 @@ sequenceDiagram
     identical config/unit file is reported as already present and left
     untouched; only real drift (e.g. a directory owned by a stale UID after
     a reinstall, or a systemd unit whose contents changed) is repaired. The
-    binary is only restarted if it was actually replaced by step 7 — running
+    binary is only restarted if it was actually replaced by step 4 — running
     setup again with nothing new to install never bounces the service.
 13. **Privilege split, end to end.** Root is only ever needed for this
     bootstrap command itself — creating the account, directories, and
@@ -134,7 +134,7 @@ sequenceDiagram
 - `scripts/install.sh` — no-npm one-line installer: arch detection, checksum
   verification, install; no source-build fallback.
 - `scripts/postinstall.js` — npm postinstall: prebuilt-binary download with
-  checksum verification, falling back to a `cargo build --release` source
-  build when no prebuilt binary matches the host.
+  checksum verification, falling back to a `cargo build --release --locked`
+  source build when no prebuilt binary matches the host.
 - `bin/rpi.js` — the `rpi` shim npm installs on `PATH`; simply execs the
   binary `postinstall.js` placed under the package's `dist/` directory.
