@@ -18,7 +18,13 @@ sequenceDiagram
 
     Note over Setup: sudo rpi agent setup --with-cloudflared (token file + domain)
     alt config.yml already present (hand-built tunnel)
-        Note over Setup,CFD: adopt in place — tunnel id read straight from config.yml; the file is never rewritten and cloudflared is never restarted for this
+        alt config's tunnel: field already looks like a tunnel id
+            Note over Setup,CFD: adopt in place — id read straight from config.yml, no Cloudflare API call; the file is never rewritten and cloudflared is never restarted for this
+        else tunnel: field is a name, not an id
+            Setup->>CF: resolve tunnel id by name (find or create)
+            CF-->>Setup: resolved tunnel id
+            Note over Setup,CFD: config.yml is still never rewritten and cloudflared still never restarted; only the resolved id is recorded (in agent.toml)
+        end
     else no config.yml yet
         Setup->>CF: find or create tunnel (by name)
         alt tunnel already exists on Cloudflare
@@ -60,20 +66,33 @@ flowchart LR
    one-time setup command (`rpi agent setup --with-cloudflared`, detailed in
    `flows/agent-setup.md`) first checks whether a `cloudflared` config file
    already exists on disk. If it does — a tunnel someone built by hand — that
-   file is adopted exactly as-is: its tunnel id is read straight out of it,
-   the file itself is never rewritten, and `cloudflared` is never restarted
-   as part of adopting it. Only when no config file exists yet does setup go
-   on to talk to the Cloudflare API at all.
-2. **Finding or creating the tunnel resource itself.** In that fresh-install
-   case, setup asks the Cloudflare API for a tunnel with the target name.
-   If one already exists there (created outside `rpi`, or left over from an
-   earlier attempt), its id is reused — but its secret can never be recovered
-   from the API, so an adopted tunnel must already have its own credentials
-   file sitting on disk, or setup reports an error rather than guessing. If
-   no tunnel exists under that name, a brand-new one is created together
-   with a freshly generated secret, which setup writes to a credentials file
-   it fully owns. Either way, setup then writes (or leaves alone) the
-   `config.yml` and enables `cloudflared` as a background service.
+   file's contents are adopted exactly as-is: the file itself is never
+   rewritten, and `cloudflared` is never restarted or newly enabled as part
+   of adopting it. Whether adoption also has to talk to the Cloudflare API
+   depends on the shape of the file's `tunnel:` field. When it already looks
+   like a tunnel id (the 36-character hyphenated hex string `cloudflared`
+   itself writes there), the id is read straight out of the file and setup
+   makes no API call at all. When it's a human-chosen name instead, setup
+   can't just read an id off disk — it has to resolve that name to a real
+   tunnel id via the Cloudflare API (the same lookup described in the next
+   step), and it's that resolved id, not anything from the file, that ends
+   up recorded in `agent.toml`. Either way the config file on disk stays
+   untouched.
+2. **Finding or creating the tunnel resource itself.** This same Cloudflare
+   API call — ask for a tunnel with the target name — covers both the
+   name-resolution case just described and the case where no `config.yml`
+   exists yet at all. If a tunnel by that name already exists there (created
+   outside `rpi`, or left over from an earlier attempt, or the one an
+   operator hand-built), its id is reused — but its secret can never be
+   recovered from the API, so an adopted tunnel must already have its own
+   credentials file sitting on disk, or setup reports an error rather than
+   guessing. If no tunnel exists under that name, a brand-new one is created
+   together with a freshly generated secret, which setup writes to a
+   credentials file it fully owns. Only in this fresh-install case (no
+   `config.yml` on disk yet) does setup go on to write `config.yml` and
+   enable `cloudflared` as a background service; when adopting an existing
+   file — whether or not resolving its tunnel name took an API round trip —
+   the file stays exactly as it was and the service is never (re)enabled.
 3. **From here on, every deploy that declares a hostname repeats a much
    smaller cycle.** `rpi.toml`'s `[ingress].hostname` (see the `rpi-toml`
    skill for the field) is the only thing that triggers this: projects
@@ -131,11 +150,15 @@ flowchart LR
    (with the exact command to enable automatic ingress instead).
 10. **Failure — the hostname is already routed elsewhere.** This shows up in
     two different ways depending on what already occupies the name in the
-    DNS zone. If a conflicting record already exists there (for example, one
-    from an unrelated service), Cloudflare's API rejects the write outright;
-    the route stage fails, `config.yml` is rolled back, and the whole deploy
-    is marked failed — even though the application container is already up
-    and healthy at that point, just not reachable at its hostname. If,
+    DNS zone. If a conflicting record already exists there (for example, an
+    A record from an unrelated service), the code itself doesn't detect or
+    check for that conflict — it only ever looks up *CNAME* records under
+    that name, so a differently-typed record is invisible to it and it still
+    attempts to write a new CNAME. It relies entirely on Cloudflare's API to
+    reject that write; when it does, the route stage fails, `config.yml` is
+    rolled back, and the whole deploy is marked failed — even though the
+    application container is already up and healthy at that point, just not
+    reachable at its hostname. If,
     instead, the hostname is already a *CNAME* — say, adopted by a different
     tunnel, or left behind by a previous rpi project — nothing here checks
     who currently owns it: the record is simply overwritten to point at this
@@ -153,6 +176,12 @@ flowchart LR
 
 ## Source anchors
 
+- `crates/bin/src/agent/setup.rs` — the one-time setup command's adoption
+  logic: reads an existing `cloudflared` config.yml, decides whether its
+  `tunnel:` field already looks like a tunnel id (`looks_like_tunnel_id`) or
+  needs resolving by name via the Cloudflare API, and records whichever id
+  results into `agent.toml` without ever rewriting the adopted config.yml or
+  enabling the `cloudflared` service.
 - `crates/infrastructure/src/cloudflare.rs` — the Cloudflare API client:
   resolves the account from the token, finds-or-creates (adopts) a tunnel by
   name, and upserts the proxied DNS CNAME that points a hostname at the
