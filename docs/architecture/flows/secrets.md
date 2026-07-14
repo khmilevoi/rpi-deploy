@@ -56,14 +56,14 @@ sequenceDiagram
    secret store encrypts it whole — variable values and file contents alike
    — with age, using a keypair the agent generated for itself the first time
    it ran and keeps on disk at file mode 0600. The encrypted bundle is
-   written one file per project. Nothing belonging to a bundle is ever
-   written to disk unencrypted, and re-sending a bundle later fully replaces
-   the previous one: any variable or file left out of the new bundle is
-   removed from a checkout the next time secrets are injected.
+   written one file per project: the secret store's own copy of a bundle is
+   never written to disk unencrypted. (A bundle's values do reach disk as
+   plaintext elsewhere — deliberately, when injected into a checkout; see
+   item 4.)
 
-4. **Two moments secrets get injected.** Plaintext secret values exist in
-   the agent's memory only during one of these two operations, never in
-   between:
+4. **Two moments secrets get injected.** Plaintext secret values are
+   written into a checkout only during one of these two operations, never
+   in between:
    - **Immediately, with `--apply`.** Right after saving, if the caller
      passed `--apply`, the agent writes `.env` and the secret files straight
      into the project's existing checkout (mode 0600) and recreates the
@@ -72,8 +72,15 @@ sequenceDiagram
    - **Later, on `rpi deploy`.** Every deploy loads whatever is currently
      stored for that project — decrypting it in the process — and writes it
      into the freshly fetched checkout (mode 0600) before the stack starts.
-     This is the only place a previously-stored bundle is decrypted back
-     into plaintext.
+     This is the only place a previously-stored bundle's values are
+     decrypted and written back out onto disk as plaintext.
+
+   `rpi secrets ls` also decrypts a previously-stored bundle, but only in
+   memory and only to read the secret and file names it contains — the
+   values themselves are discarded and never written to disk or shown.
+   Re-sending a bundle later fully replaces the previous one: any variable
+   or file left out of the new bundle is removed from a checkout the next
+   time secrets are injected.
 
 5. **Masking secret values in logs.** From the moment either injection above
    arms it, every line the agent would otherwise log during that operation
