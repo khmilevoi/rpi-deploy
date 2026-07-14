@@ -103,25 +103,26 @@ sequenceDiagram
         SSH-->>CLI: failure
         CLI->>CLI: record ssh connection as FAIL
     else SSH ok
+        SSH-->>CLI: success
         CLI->>CLI: record ssh connection as PASS
-        CLI->>SSH: open the agent tunnel
-        alt tunnel fails, agent likely not running
-            SSH-->>CLI: failure
-            CLI->>CLI: record agent tunnel as FAIL
-        else tunnel ok
-            CLI->>Agent: GET version
-            alt agent unreachable through the tunnel
-                Agent-->>CLI: failure
-                CLI->>CLI: record agent api as FAIL
-            else agent responds
-                Agent-->>CLI: agent version
-                CLI->>CLI: record agent api as PASS, compare versions for the version match check
-                CLI->>Agent: GET doctor
-                Agent->>Diag: run the agent-side environment checks
-                Diag-->>Agent: checks, each pass or fail with detail and hint
-                Agent-->>CLI: checks list
-                CLI->>CLI: merge into one report
-            end
+    end
+    CLI->>SSH: open the agent tunnel, a second and independent SSH connection, always attempted regardless of the check above
+    alt tunnel fails, agent likely not running
+        SSH-->>CLI: failure
+        CLI->>CLI: record agent tunnel as FAIL
+    else tunnel ok
+        CLI->>Agent: GET version
+        alt agent unreachable through the tunnel
+            Agent-->>CLI: failure
+            CLI->>CLI: record agent api as FAIL
+        else agent responds
+            Agent-->>CLI: agent version
+            CLI->>CLI: record agent api as PASS, compare versions for the version match check
+            CLI->>Agent: GET doctor
+            Agent->>Diag: run the agent-side environment checks
+            Diag-->>Agent: checks, each pass or fail with detail and hint
+            Agent-->>CLI: checks list
+            CLI->>CLI: merge into one report
         end
     end
     CLI-->>Op: render the PASS or FAIL table, exit 1 if any check failed
@@ -171,17 +172,21 @@ sequenceDiagram
    (Docker stats over SSH can take a noticeable moment) never makes quitting
    feel stuck; `q`, `Esc`, or `Ctrl-C` exits and restores the normal
    terminal.
-5. **Checking the Pi over.** `rpi doctor` runs several independent checks in
-   a fixed order, each one gating whether the next is even attempted: a
-   plain SSH connectivity check with no tunnel and no HTTP at all; opening
-   the same tunnel every other command uses; asking the agent's version
-   endpoint; and, only once all of those succeed, one more request that asks
-   the agent to run its own list of environment checks on the Pi (for
-   example, whether the cgroup memory accounting that `rpi stats`'s
+5. **Checking the Pi over.** `rpi doctor` runs several checks in a fixed
+   order, but only some of them gate what comes after. First, a plain SSH
+   connectivity check with no tunnel and no HTTP at all. Then, regardless of
+   whether that check passed or failed, opening the same tunnel every other
+   command uses — a second, independent SSH connection, not a reuse of the
+   first one. From the tunnel result onward the checks do gate each other:
+   only if the tunnel comes up does the CLI ask the agent's version
+   endpoint, and only once that succeeds does it also send one more request
+   that asks the agent to run its own list of environment checks on the Pi
+   (for example, whether the cgroup memory accounting that `rpi stats`'s
    per-service memory numbers depend on is enabled) and report each one as
    pass or fail with a plain-English detail and, on failure, a suggested
-   fix. The CLI adds the version comparison itself as one more row, pointing
-   at whichever side is behind if the two don't match.
+   fix. The CLI adds the version comparison itself as one more row alongside
+   that same successful-version-check step, pointing at whichever side is
+   behind if the two don't match.
 
 ### Failure branches
 
@@ -199,11 +204,17 @@ sequenceDiagram
   doesn't advertise stats support — the CLI prints which side needs
   updating and exits, rather than letting the request fail deep inside a
   live dashboard.
-- **Doctor's short-circuit.** Any of the early checks failing — unreachable
-  over SSH, the tunnel not coming up, the agent unreachable through the
-  tunnel — stops the remaining checks from even being attempted; the report
-  shows FAIL for that step and every step after it. The command's exit code
-  is 1 if any row failed at all (whether an early short-circuited one or a
+- **Doctor's short-circuit.** The plain SSH connectivity check does *not*
+  gate the tunnel: the CLI opens the agent tunnel as a second, independent
+  SSH connection regardless of whether that first check passed or failed, so
+  both of those rows are always attempted and recorded. The short-circuit
+  proper starts at the tunnel — if it fails to come up, or the agent is
+  unreachable through it once it's up, every check from that point on is
+  skipped and reported as FAIL. In practice the SSH check and the tunnel
+  tend to fail or pass together, since both ride an SSH connection to the
+  same host, but they are two separate connections and a passing SSH check
+  is no guarantee the tunnel will come up. The command's exit code is 1 if
+  any row failed at all (whether from the tunnel-stage short-circuit or a
   later agent-side check), 0 only when every row passed.
 - **Agent's own logging unavailable (`rpi agent logs`).** Whether the cause
   is the agent process being down or just its on-disk file logging being
