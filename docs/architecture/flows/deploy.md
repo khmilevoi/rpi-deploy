@@ -180,3 +180,8 @@ stateDiagram-v2
 - `crates/bin/src/cli/commands.rs` — the CLI side of `rpi deploy` and `rpi
   deploy --cancel`: submits the request, follows the SSE stream, renders
   the staged pipeline, and prints the final result.
+- `crates/bin/src/cli/sourcekey.rs` — the deploy-key preflight run before
+  submitting a deploy for an SSH-remote repo: asks the agent whether it can
+  read the repo, and on denial either auto-registers a deploy key via the
+  local `gh` CLI or shows the public key with instructions and polls until
+  access works.

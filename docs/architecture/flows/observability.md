@@ -245,6 +245,10 @@ sequenceDiagram
   background loop that takes a CPU/memory/temperature reading on a fixed
   cadence into an age-evicted ring buffer, which is what supplies
   `rpi stats`'s current values and its short history graphs.
+- `crates/infrastructure/src/stats.rs` — `CompositeStats`, the `StatsProvider`
+  adapter behind `GetStats`: combines the metrics sampler's latest host
+  reading with a live per-service snapshot pulled straight from the
+  container runtime into the report the CLI renders.
 - `crates/infrastructure/src/sys.rs` — small system-facing adapters (a
   system clock, a UUID generator) used across the agent; not specific to
   logs, stats, or doctor, but this crate's home for that kind of small
@@ -262,3 +266,10 @@ sequenceDiagram
   dashboard (rendering role only): turns a stats snapshot into metric cards,
   a scaled memory bar per service, and a layout choice based on terminal
   size, with no terminal I/O of its own.
+- `crates/bin/src/cli/stats_render.rs` — renders the one-shot (non-`-w`)
+  `rpi stats` table and the byte/sparkline formatting helpers shared with
+  the `-w` dashboard.
+- `crates/bin/src/cli/stats_tui.rs` — the `-w` dashboard itself: takes over
+  the terminal (alternate screen, raw mode, restored on exit or panic),
+  polls the agent on a background task every `--interval` seconds, and
+  redraws `stats_view`'s layout with `ratatui` until `q`/`Esc`/`Ctrl-C`.

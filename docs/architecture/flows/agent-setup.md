@@ -123,6 +123,14 @@ sequenceDiagram
     moment the unit starts, the agent process itself runs entirely as the
     unprivileged `rpi-agent` user, with no `sudo` access, for the rest of
     its life until the next bootstrap or update.
+14. **Tearing down.** `sudo rpi agent uninstall` reverses this bootstrap: it
+    disables and removes the systemd unit and deletes the `rpi-agent` system
+    user, but by default leaves `/var/lib/rpi`, `/etc/rpi`, and
+    `/var/log/rpi` in place — and leaves the installed binary at
+    `/usr/local/bin/rpi` alone either way. Passing `--purge` (which itself
+    requires `--yes`, since it is irreversible) additionally deletes those
+    three directories, including the secrets vault and every project's
+    checkout.
 
 ## Source anchors
 
@@ -138,3 +146,7 @@ sequenceDiagram
   source build when no prebuilt binary matches the host.
 - `bin/rpi.js` — the `rpi` shim npm installs on `PATH`; simply execs the
   binary `postinstall.js` placed under the package's `dist/` directory.
+- `crates/bin/src/agent/uninstall.rs` — `sudo rpi agent uninstall`: disables
+  and removes the systemd unit and the `rpi-agent` user; deletes
+  `/var/lib/rpi`, `/etc/rpi`, and `/var/log/rpi` only when `--purge` is
+  given, leaving them (and the installed binary) alone by default.

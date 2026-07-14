@@ -87,7 +87,11 @@ flowchart TD
    ever runs once per Pi. Today's only such migration detects the old
    installation by inspecting the host's accounts directly rather than
    consulting that bookkeeping table — the table exists for a future
-   migration that can't self-detect that way.
+   migration that can't self-detect that way. A separate `sudo rpi agent
+   migrate` command exists as a uniform runner over that same registry and
+   ledger — list, dry-run, or apply a migration by id — for a future
+   migration that isn't safe to fold silently into `agent setup`/`agent
+   update` the way today's one is.
 
 4. **Repo checkouts are per-project working directories inside the data
    directory.** Each configured project has its own repository checkout
@@ -203,6 +207,13 @@ flowchart TD
 - `crates/infrastructure/src/migrations.rs` — the bookkeeping table and
   ledger for one-time, host-level migrations, distinct from the automatic
   schema migrations in `sqlite.rs`.
+- `crates/bin/src/agent/migrate.rs` — the `Migration` trait and registry
+  (today just `PiToRpi`, the self-detecting legacy-rename check), and the
+  `rpi agent migrate` command's list/dry-run/run-by-id/apply-all logic.
+- `crates/bin/src/agent/migrate_ledger.rs` — `DbLedger`, the async wrapper
+  over `migrations.rs`'s ledger table that `rpi agent migrate` reads and
+  writes (separate from `agent setup`'s own direct legacy-rename check,
+  which runs before a ledger handle exists and so never updates the ledger).
 - `crates/infrastructure/src/secrets.rs` — the encrypted secrets vault
   itself: bundle-per-project layout and first-start identity key.
 - `crates/infrastructure/src/secretsfile.rs` — writes a project's decrypted

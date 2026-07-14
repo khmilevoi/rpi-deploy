@@ -29,13 +29,13 @@ procedure. Full design: `docs/superpowers/specs/2026-07-13-architecture-docs-des
 | `crates/bin/src/cli/{connect,ssh,tunnel,api,config}.rs`, `crates/bin/src/compat.rs` | `flows/connect.md` |
 | `crates/application/src/{secrets,mask}.rs`; `crates/infrastructure/src/{secrets,secretsfile,secretpath,dotenv}.rs` | `flows/secrets.md` |
 | `crates/infrastructure/src/{cloudflare,cloudflared}.rs` | `flows/ingress.md` |
-| `crates/bin/src/agent/{setup,self_install}.rs`, `scripts/install.sh`, `scripts/postinstall.js`, `bin/rpi.js` | `flows/agent-setup.md` |
+| `crates/bin/src/agent/{setup,self_install,uninstall}.rs`, `scripts/install.sh`, `scripts/postinstall.js`, `bin/rpi.js` | `flows/agent-setup.md` |
 | `crates/bin/src/agent/{update,release}.rs`, `crates/bin/src/cli/upgrade.rs` | `flows/agent-update.md` |
 | `crates/application/src/command.rs`, `crates/bin/src/cli/sse.rs` | `flows/commands.md` |
-| `crates/application/src/{logs,tail,stats,diagnostics}.rs`; `crates/infrastructure/src/{metrics,sys,events}.rs`; `crates/bin/src/cli/stats_*.rs`; `crates/bin/src/agent/logfile.rs` | `flows/observability.md` |
+| `crates/application/src/{logs,tail,stats,diagnostics}.rs`; `crates/infrastructure/src/{metrics,sys,events,stats}.rs`; `crates/bin/src/cli/stats_*.rs`; `crates/bin/src/agent/logfile.rs` | `flows/observability.md` |
 | `crates/application/src/gc.rs`; `crates/infrastructure/src/{disk,history}.rs` | `flows/gc.md` |
 | `Cargo.toml` workspace members, any `crates/*/src/lib.rs`, `crates/domain/src/contracts.rs` | `crates.md` |
-| `crates/infrastructure/src/{sqlite,history,migrations,secretsfile,secretpath}.rs`; `crates/bin/src/agent/{config,state}.rs` | `storage.md` |
+| `crates/infrastructure/src/{sqlite,history,migrations,secretsfile,secretpath}.rs`; `crates/bin/src/agent/{config,state,migrate,migrate_ledger}.rs` | `storage.md` |
 | `crates/bin/src/agent/http.rs` routes, `crates/bin/src/proto.rs`, `crates/bin/src/cli/commands.rs` | the flow doc of the affected command, plus `crates.md` if the request path itself changed |
 | New external actor (registry, API, cloud service) | `overview.md` |
 
