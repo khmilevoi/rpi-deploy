@@ -84,8 +84,11 @@ sequenceDiagram
    capability (for example, secrets, container commands, or stats) actually
    calls its endpoint, the CLI checks that capability against the set
    negotiated in the handshake. A required-but-missing capability stops the
-   command immediately with a message naming the feature, the minimum agent
-   version that introduced it, and which side needs updating — this is
+   command immediately with a message naming the feature and which side
+   needs updating; when the agent is the older side, that message also
+   states the minimum agent version the feature requires, while a message
+   pointing at an outdated CLI names only the feature and the update
+   instruction, since there is no minimum CLI version to cite — this is
    deliberate: it replaces what would otherwise be a confusing low-level
    HTTP error with a plain instruction. Some capabilities are allowed to be
    missing quietly instead (the CLI just skips that step and falls back to
