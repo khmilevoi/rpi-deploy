@@ -67,7 +67,7 @@ flowchart TD
    times, and a short trailing excerpt of its log output). The database
    enforces that project names and host ports are each unique, so two
    projects can never collide on the same port. Old, finished deploy rows
-   for a project are pruned automatically after each new deploy starts,
+   for a project are pruned automatically whenever a new deploy is queued,
    keeping only a configurable number of recent ones per project — a
    deployment that's still queued or running is never pruned, no matter how
    old it gets. The database opens in a mode that tolerates concurrent
@@ -85,9 +85,9 @@ flowchart TD
    migrations (for example, a past rename of the whole installation) have
    already been applied, so a migration that needs special handling only
    ever runs once per Pi. Today's only such migration detects the old
-   installation by inspecting the filesystem directly rather than consulting
-   that bookkeeping table — the table exists for a future migration that
-   can't self-detect that way.
+   installation by inspecting the host's accounts directly rather than
+   consulting that bookkeeping table — the table exists for a future
+   migration that can't self-detect that way.
 
 4. **Repo checkouts are per-project working directories inside the data
    directory.** Each configured project has its own repository checkout
@@ -96,8 +96,9 @@ flowchart TD
 
 5. **Compose overrides are small per-project files the agent writes itself.**
    Alongside each project's checkout, a separate file inside the data
-   directory records state the agent needs to remember about that project
-   (such as a manual stop) — kept apart from anything coming from the
+   directory records the bind-address/port mapping for the project's
+   exposure setting, plus a restart policy that lets a manual `rpi stop`
+   persist across a host reboot — kept apart from anything coming from the
    project's own Git history.
 
 6. **Secrets sit at rest encrypted, inside the data directory, separate from
@@ -202,6 +203,8 @@ flowchart TD
 - `crates/infrastructure/src/migrations.rs` — the bookkeeping table and
   ledger for one-time, host-level migrations, distinct from the automatic
   schema migrations in `sqlite.rs`.
+- `crates/infrastructure/src/secrets.rs` — the encrypted secrets vault
+  itself: bundle-per-project layout and first-start identity key.
 - `crates/infrastructure/src/secretsfile.rs` — writes a project's decrypted
   secrets into its checkout at deploy time (its variables plus any declared
   files), validating paths and refusing to follow a symlink, and replacing
