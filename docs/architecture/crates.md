@@ -73,7 +73,11 @@ sequenceDiagram
    profile locally, for later commands to use). Neither opens a network
    connection to the Pi. (The `rpi agent setup/update/migrate/uninstall`
    family is a separate maintenance surface: it manages the agent itself over
-   plain SSH rather than through the request path below.)
+   plain SSH rather than through the request path below.) `rpi upgrade` is a
+   third exception: it opens the tunnel only to read the agent's current
+   version for the before/after message, then performs the actual update as a
+   direct SSH command rather than an HTTP request - see
+   `docs/architecture/flows/agent-update.md` for the detailed flow.
 3. For every other command, the CLI resolves which server profile to use and
    opens an SSH tunnel that forwards a local TCP port to the agent's Unix
    socket on the Pi.
@@ -116,20 +120,23 @@ sequenceDiagram
 
 ## Source anchors
 
-- `Cargo.toml` - workspace member list and the crate dependency graph (`bin`
+- `Cargo.toml` — workspace member list and the crate dependency graph (`bin`
   depends on `application`, `infrastructure`, and `domain`; `application` and
   `infrastructure` each depend only on `domain`).
-- `crates/domain/src/lib.rs` - domain crate's module list: `contracts`,
+- `crates/domain/src/lib.rs` — domain crate's module list: `contracts`,
   `entities`, `error`.
-- `crates/application/src/lib.rs` - application crate's module list, one
+- `crates/application/src/lib.rs` — application crate's module list, one
   module per use case (`deploy`, `gc`, `logs`, `command`, `scheduler`, ...).
-- `crates/infrastructure/src/lib.rs` - infrastructure crate's module list,
+- `crates/infrastructure/src/lib.rs` — infrastructure crate's module list,
   one module per outside system (`docker`, `git`, `sqlite`, `cloudflare`,
   `secrets`, ...).
-- `crates/domain/src/contracts.rs` - every contract (interface) the domain
+- `crates/domain/src/contracts.rs` — every contract (interface) the domain
   layer defines, e.g. `Source` (fetch project code), `ContainerRuntime` (run
   containers), `ProjectRepository` / `DeploymentHistory` (persistence),
   `SecretStore` / `SecretsWriter` (secrets at rest and on disk),
-  `HealthGate` (deploy health check), `Ingress` / `CloudflareApi` (routing a
-  hostname to the deployment), `StatsProvider` / `SystemProbe` (host and
-  service metrics).
+  `HealthGate` (deploy health check), `Ingress` (upserts hostname -> port on
+  the edge) / `CloudflareApi` (tunnel create/adopt and DNS CNAME writes),
+  `StatsProvider` / `SystemProbe` (host and service metrics).
+- `crates/bin/src/cli/upgrade.rs` and the `Cmd::Upgrade` arm in
+  `crates/bin/src/main.rs` — `rpi upgrade`'s tunnel-for-version-only, then
+  direct-SSH-update behavior.
