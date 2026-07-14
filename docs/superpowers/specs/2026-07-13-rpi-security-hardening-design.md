@@ -305,10 +305,15 @@ listeners, including loopback TCP.
 The handshake exchanges `protocol_min`, `protocol_max`, and capabilities. Normal
 operations require an overlap and sign the selected version. At least the
 previous protocol minor remains supported for update orchestration. With no
-overlap, only minimal health/version and the stable upgrade staging capability
-remain available; deploy, secrets, lifecycle, logs, and command operations fail
-with an upgrade instruction. There is no fallback to an unsigned or less
-authenticated request format.
+overlap, only minimal health/version and a separately versioned, stable
+`upgrade-v1` staging capability remain available; it uses the same identities,
+challenge, signatures, and replay defense. Deploy, secrets, lifecycle, logs,
+and command operations fail with an upgrade instruction. There is no fallback
+to an unsigned or less authenticated request format.
+
+Any board SSH host-key change fails closed. Rotation requires re-running
+client-side setup with an explicit rotation flag and an independently obtained
+new fingerprint; a normal `rpi setup` never overwrites a pin.
 
 ### Audit
 
@@ -352,13 +357,16 @@ uncommitted or untracked source changes because they are not represented by the
 authorized commit. Sending local-only content belongs to the future signed
 archive provider, not to a permissive Git flag in production.
 
-Git accepts only `ssh` and credential-free `https` URLs whose host is in the
-root-owned allowlist. It rejects `http`, `git://`, `file://`, local paths,
-userinfo/tokens, option-like repository arguments, unsafe redirects, and
-unexpected access to loopback/private/link-local addresses. The Git child uses
-a sealed environment: terminal prompts and credential helpers are disabled,
-system/user configuration is ignored, and only explicitly allowed protocols are
-enabled.
+Git accepts only `ssh` and credential-free `https` URLs whose exact
+transport/host/port tuple is in the root-owned allowlist. The first release
+contains only `github.com` on standard SSH/HTTPS ports; every other provider is
+added explicitly. It rejects `http`, `git://`, `file://`, local paths,
+userinfo/tokens, option-like repository arguments, and unexpected access to
+loopback/private/link-local addresses. Redirects are limited in count, remain
+HTTPS, and every destination tuple must be independently allowlisted; protocol
+downgrade is forbidden. The Git child uses a sealed environment: terminal
+prompts and credential helpers are disabled, system/user configuration is
+ignored, and only explicitly allowed protocols are enabled.
 
 Git SSH never uses `StrictHostKeyChecking=accept-new`. Built-in provider keys are
 shipped as signed release data. Additional hosts are registered with:
@@ -366,6 +374,8 @@ shipped as signed release data. Additional hosts are registered with:
 ```text
 rpi source-host add git.example.com --server <profile> \
   --ssh-fingerprint SHA256:<fingerprint> [--allow-private-network]
+rpi source-host add gitlab.example.com --server <profile> \
+  --transport https --port 443 [--allow-private-network]
 ```
 
 The client invokes a fixed SSH/sudo board command. It scans the full key only to
@@ -434,6 +444,9 @@ Each deployment runs these stages in order:
 
 Subsequent restart, stop, logs, command, and removal operations refer to the
 stored project/snapshot identity rather than re-reading repository Compose.
+At minimum the active snapshot, the previous known-good snapshot, and any
+in-progress candidate are retained. Only older unreferenced snapshots are GC
+eligible; each lifecycle action rechecks the stored digest before Docker use.
 
 ### Denied repository capabilities
 
@@ -582,8 +595,17 @@ as read-only Compose secrets at declared targets. The normalized snapshot stores
 trusted paths and generation identity, never values.
 
 Secret values are unavailable to Compose interpolation, Dockerfile `ARG`/`ENV`,
-image build contexts, normalized snapshots, and ordinary logs. Build-time
-secrets are rejected in this program and require a separate design.
+image build contexts, normalized snapshots, agent diagnostics, and audit logs.
+The log pipeline redacts exact managed-secret byte sequences across chunk
+boundaries before returning application output. Build-time secrets are rejected
+in this program and require a separate design.
+
+This cannot stop application code that legitimately receives a secret from
+encoding, splitting, transmitting, or deliberately printing it. A compromised
+project is assumed able to compromise its own provided secrets; log capability
+is therefore separate and project-scoped. The guarantee is that RPI never
+injects secrets into builds or logs them itself and removes accidental exact
+matches, not that it can defeat intentional exfiltration by the application.
 
 Applying secrets is generation-based and atomic: stage a new encrypted/runtime
 generation, deploy and health-check it, then retire the old runtime generation.
@@ -988,8 +1010,8 @@ This program is complete only when all of the following are demonstrated:
   cannot pass the pinned agent challenge;
 - a private repository key grants read access to only its associated project and
   can be independently rotated;
-- deployed secrets are absent from checkout, build context, immutable snapshot,
-  image history, and ordinary logs;
+- managed secrets are absent from checkout, build context, immutable snapshot,
+  image history, agent/audit logs, and exact literal application-log output;
 - a PostgreSQL database in a named volume survives deploy, package update,
   rootless migration, restart, and rollback with verified data;
 - clean setup performs no backup or rootful migration steps;

@@ -146,7 +146,8 @@ The command performs:
 
 1. Resolve the board profile and verify the pinned SSH host key.
 2. Open the stdio proxy and complete agent challenge plus protocol/capability
-   negotiation.
+   negotiation, using the independently versioned signed `upgrade-v1` protocol
+   when the normal API ranges do not overlap.
 3. Read current version, target architecture, migration state, and version
    floor through the minimal signed status operation.
 4. Resolve an exact target and reject an obvious downgrade or incompatible
@@ -252,9 +253,10 @@ The residual risk is documented by `rpi doctor`.
 ## Protocol and bootstrap behavior
 
 The control handshake advertises protocol ranges and capabilities. Normal
-operations require overlap; update status/staging is kept stable for at least
-the previous protocol minor. If target metadata says the new agent cannot speak
-to the current client, update fails before staging.
+operations require overlap; signed `upgrade-v1` status/staging is independently
+versioned and kept stable across normal protocol changes, while still using the
+same identity, agent challenge, and replay protection. If target metadata says
+the new agent cannot speak to the current client, update fails before staging.
 
 The first release that implements this design is the update bootstrap boundary.
 Boards on an older SHA256-based release receive one manual update using the new
