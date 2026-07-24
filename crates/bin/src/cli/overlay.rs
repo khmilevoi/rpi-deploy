@@ -300,8 +300,21 @@ pub fn interpolate(
         forbid("environment.on_create", e.on_create.as_deref())?;
     }
 
+    // Check if RPI_ENV_SLUG is actually referenced before deriving it.
+    let needs_slug = [
+        overlay.source.as_ref().and_then(|s| s.branch.as_deref()),
+        overlay.ingress.as_ref().and_then(|i| i.hostname.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|v| v.contains("${RPI_ENV_SLUG}"));
     let mut vars = user_vars.clone();
-    if let Some(branch) = user_vars.get("BRANCH_NAME") {
+    if needs_slug {
+        let Some(branch) = user_vars.get("BRANCH_NAME") else {
+            anyhow::bail!(
+                "${{RPI_ENV_SLUG}} requires --vars BRANCH_NAME=<branch> (the slug is derived from it)"
+            );
+        };
         vars.insert("RPI_ENV_SLUG".to_string(), derive_slug(branch)?);
     }
 
@@ -481,5 +494,48 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("BRANCH_NAME"), "got: {err}");
+    }
+
+    #[test]
+    fn static_overlay_ignores_underivable_branch_name_for_slug() {
+        // BRANCH_NAME that cannot produce a slug must not break an overlay
+        // that never references ${RPI_ENV_SLUG}; parse_vars accepts the value,
+        // interpolate must not call derive_slug.
+        let mut o = overlay("[source]\nbranch = \"${BRANCH_NAME}\"\n");
+        let vars = parse_vars(&["BRANCH_NAME=___".into()]).unwrap();
+        assert!(interpolate(&mut o, &vars).unwrap());
+        assert_eq!(o.source.as_ref().unwrap().branch.as_deref(), Some("___"));
+
+        let mut o = overlay("[ingress]\nhostname = \"${RPI_ENV_SLUG}.preview.example.com\"\n");
+        let vars = parse_vars(&["BRANCH_NAME=___".into()]).unwrap();
+        let err = interpolate(&mut o, &vars).unwrap_err().to_string();
+        assert!(err.contains("RPI_ENV_SLUG"), "got: {err}");
+    }
+
+    #[test]
+    fn multiple_references_in_one_string_are_substituted() {
+        let mut o =
+            overlay("[ingress]\nhostname = \"${RPI_ENV_SLUG}.${BRANCH_NAME}.example.com\"\n");
+        let vars = parse_vars(&["BRANCH_NAME=login".into()]).unwrap();
+        assert!(interpolate(&mut o, &vars).unwrap());
+        assert_eq!(
+            o.ingress.as_ref().unwrap().hostname.as_deref(),
+            Some("login.login.example.com")
+        );
+    }
+
+    #[test]
+    fn interpolation_in_argv_and_table_commands_is_rejected() {
+        for text in [
+            "[commands]\nseed = [\"run\", \"${BRANCH_NAME}\"]\n",
+            "[commands.seed]\nrun = \"x\"\nservice = \"${BRANCH_NAME}\"\n",
+        ] {
+            let mut o = overlay(text);
+            let vars = parse_vars(&["BRANCH_NAME=x".into()]).unwrap();
+            assert!(
+                interpolate(&mut o, &vars).is_err(),
+                "{text} must be rejected"
+            );
+        }
     }
 }
