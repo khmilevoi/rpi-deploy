@@ -97,6 +97,18 @@ fn is_valid_name(s: &str) -> bool {
         && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
 }
 
+fn is_valid_env_part(s: &str, max_len: usize) -> bool {
+    !s.is_empty()
+        && s.len() <= max_len
+        && !s.contains("--")
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && s.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+}
+
 async fn create_deployment(
     State(state): State<AppState>,
     Json(req): Json<DeployRequest>,
@@ -142,6 +154,24 @@ async fn create_deployment(
                     "environment.base must match ^[a-z0-9][a-z0-9_-]*$ and must not contain '--'"
                         .into(),
                 )));
+            }
+            if !is_valid_env_part(&env.env, 64)
+                || !env
+                    .env
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase())
+            {
+                return Err(ApiError(DomainError::Invalid(
+                    "environment.env must match ^[a-z][a-z0-9-]*$ without '--'".into(),
+                )));
+            }
+            if let Some(slug) = &env.slug {
+                if !is_valid_env_part(slug, 30) {
+                    return Err(ApiError(DomainError::Invalid(
+                        "environment.slug must be lowercase [a-z0-9-], max 30 chars, no '--', no edge '-'".into(),
+                    )));
+                }
             }
             let expected = match &env.slug {
                 Some(slug) => format!("{}--{}--{}", env.base, env.env, slug),
@@ -1159,6 +1189,41 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
         let msg = json["error"].as_str().unwrap();
         assert!(msg.contains("'--'"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn malformed_env_and_slug_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().times(0).returning(|_| Ok(None));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // env with "--": expected 400
+        let body = deploy_body_with_environment("myapp--branch", "te--st", "myapp", None);
+        let (status, json) = request(app.clone(), post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("environment.env"), "got: {msg}");
+
+        // slug with "--": expected 400
+        let body = deploy_body_with_environment(
+            "myapp--branch--sl--ug",
+            "branch",
+            "myapp",
+            Some("sl--ug"),
+        );
+        let (status, json) = request(app.clone(), post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("environment.slug"), "got: {msg}");
+
+        // slug with uppercase: expected 400
+        let body =
+            deploy_body_with_environment("myapp--branch--slug", "branch", "myapp", Some("SLUG"));
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("environment.slug"), "got: {msg}");
     }
 
     fn deploy_body(name: &str) -> serde_json::Value {
