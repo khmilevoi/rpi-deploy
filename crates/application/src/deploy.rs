@@ -191,6 +191,15 @@ impl DeployProject {
                 deployment.commit_sha = Some(commit_sha);
                 deployment.finished_at = Some(finished_at);
                 deployment.log_tail = tail.tail();
+                if let Err(err) = self
+                    .projects
+                    .mark_deploy_success(&config.name, finished_at)
+                    .await
+                {
+                    log.line(&format!(
+                        "warning: could not record deploy success time: {err}"
+                    ));
+                }
                 let record_result = self
                     .history
                     .record_finished(
@@ -374,6 +383,44 @@ impl DeployProject {
             }
         }
 
+        // environments spec: on_create runs once, after the first fully successful
+        // deploy of the key (health + route done). Failure fails the deploy; the
+        // flag stays false so the next deploy retries.
+        if let Some(env) = &config.environment {
+            if let (Some(cmd_name), false) = (&env.on_create, project.on_create_done) {
+                let spec = config.commands.get(cmd_name).ok_or_else(|| {
+                    DomainError::Invalid(format!(
+                        "on_create command '{cmd_name}' is not declared in [commands]"
+                    ))
+                })?;
+                let service = spec
+                    .service
+                    .clone()
+                    .unwrap_or_else(|| config.service.clone());
+                let secs = config.command_timeout_secs.unwrap_or(600);
+                let argv = spec.argv.clone();
+                tracked(
+                    &log,
+                    "on_create",
+                    staged("on_create", secs, async {
+                        let code = self
+                            .runtime
+                            .exec(&stack, &service, &argv, log.clone())
+                            .await?;
+                        if code != 0 {
+                            return Err(DomainError::Runtime(format!(
+                                "on_create '{cmd_name}' exited with code {code}"
+                            )));
+                        }
+                        Ok(())
+                    }),
+                )
+                .await?;
+                self.projects.set_on_create_done(&config.name, true).await?;
+                log.line(&format!("on_create '{cmd_name}' completed"));
+            }
+        }
+
         log.stage(&StageEvent::started("gc"));
         let t0 = std::time::Instant::now();
         match staged("gc", GC_TIMEOUT_SECS, self.gc.execute(log.clone())).await {
@@ -469,12 +516,16 @@ mod tests {
         gc_runtime.expect_prune_images().returning(|_| Ok(()));
         let mut disk = MockDiskProbe::new();
         disk.expect_used_percent().returning(|| Ok(10));
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_mark_deploy_success()
+            .returning(|_, _| Ok(()));
         Mocks {
             source: MockSource::new(),
             runtime: MockContainerRuntime::new(),
             gc_runtime,
             disk,
-            projects: MockProjectRepository::new(),
+            projects,
             history: MockDeploymentHistory::new(),
             overrides: MockOverrideStore::new(),
             secrets: MockSecretStore::new(),
@@ -1731,5 +1782,246 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e.stage == "route"));
+    }
+
+    fn env_sample_config(on_create: Option<&str>) -> ProjectConfig {
+        let mut config = sample_config();
+        config.name = "rateme--test".into();
+        config.hostname = None;
+        config.environment = Some(pi_domain::entities::EnvironmentMeta {
+            env: "test".into(),
+            base: "rateme".into(),
+            slug: None,
+            ttl_secs: None,
+            on_create: on_create.map(String::from),
+        });
+        if let Some(cmd) = on_create {
+            config.commands.insert(
+                cmd.to_string(),
+                pi_domain::entities::CommandSpec::new(vec!["node".into(), "seed.js".into()]),
+            );
+        }
+        config
+    }
+
+    #[tokio::test]
+    async fn on_create_runs_once_after_healthy_deploy_and_marks_done() {
+        let mut m = mocks();
+        // fresh expectation below replaces the unbounded default from mocks()
+        m.projects.checkpoint();
+        let cfg = env_sample_config(Some("seed"));
+
+        m.projects.expect_upsert().times(1).returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
+            })
+        });
+        m.source.expect_fetch().returning(|_, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.runtime
+            .expect_exec()
+            .withf(|_stack, service, argv, _log| service == "web" && argv == ["node", "seed.js"])
+            .times(1)
+            .returning(|_, _, _, _| Ok(0));
+        m.projects
+            .expect_set_on_create_done()
+            .withf(|name, done| name == "rateme--test" && *done)
+            .times(1)
+            .returning(|_, _| Ok(()));
+        m.projects
+            .expect_mark_deploy_success()
+            .withf(|name, at| name == "rateme--test" && *at == 100)
+            .times(1)
+            .returning(|_, _| Ok(()));
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let result = build(m)
+            .execute(
+                "dep-oc".into(),
+                cfg,
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn on_create_skipped_when_already_done() {
+        let mut m = mocks();
+        let cfg = env_sample_config(Some("seed"));
+
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+                on_create_done: true,
+                last_success_at: Some(50),
+            })
+        });
+        m.source.expect_fetch().returning(|_, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        // on_create already done: exec/set_on_create_done must never fire
+        m.runtime.expect_exec().times(0);
+        m.projects.expect_set_on_create_done().times(0);
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let result = build(m)
+            .execute(
+                "dep-oc-done".into(),
+                cfg,
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn on_create_nonzero_exit_fails_deploy_and_keeps_flag() {
+        let mut m = mocks();
+        let cfg = env_sample_config(Some("seed"));
+
+        m.projects.expect_upsert().returning(|c| {
+            Ok(Project {
+                config: c.clone(),
+                host_port: 8000,
+                created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
+            })
+        });
+        m.source.expect_fetch().returning(|_, _, _| {
+            Ok(FetchedSource {
+                workdir: PathBuf::from("/wd"),
+                commit_sha: SHA.into(),
+            })
+        });
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
+        m.overrides
+            .expect_write()
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/ov.yml")));
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.runtime.expect_exec().returning(|_, _, _, _| Ok(1));
+        m.projects.expect_set_on_create_done().times(0);
+        m.history.expect_mark_running().returning(|_, _| Ok(()));
+        m.history
+            .expect_record_finished()
+            .withf(|_id, status, _sha, _at, _tail| *status == DeploymentStatus::Failed)
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let deploy = build(m);
+        let sink = CollectSink::new();
+        let err = deploy
+            .execute(
+                "dep-oc-fail".into(),
+                cfg,
+                DeployRef::Branch("main".into()),
+                sink.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, DomainError::Runtime(_)), "got: {err}");
+        assert!(
+            sink.stages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.stage == "on_create"
+                    && e.status == pi_domain::entities::StageStatus::Failed),
+            "expected a failed on_create stage event"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_base_deploy_marks_last_success() {
+        let mut m = mocks();
+        // fresh expectation below replaces the unbounded default from mocks()
+        m.projects.checkpoint();
+        ok_pre_stages(&mut m);
+        m.projects
+            .expect_mark_deploy_success()
+            .withf(|name, at| name == "rateme" && *at == 100)
+            .times(1)
+            .returning(|_, _| Ok(()));
+        m.secrets
+            .expect_load()
+            .returning(|_| Ok(SecretsBundle::default()));
+        m.secrets_writer.expect_write().times(0);
+        m.runtime.expect_build().returning(|_, _| Ok(()));
+        m.runtime.expect_up().returning(|_, _| Ok(()));
+        m.runtime.expect_ps().returning(|_| Ok(vec![]));
+        m.health.expect_check().returning(|_, _, _| Ok(()));
+        m.ingress
+            .expect_upsert()
+            .returning(|_, _, _| Ok(IngressOutcome::Applied));
+
+        let result = build(m)
+            .execute(
+                "dep-success-marks".into(),
+                sample_config(),
+                DeployRef::Branch("main".into()),
+                CollectSink::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeploymentStatus::Success);
     }
 }
