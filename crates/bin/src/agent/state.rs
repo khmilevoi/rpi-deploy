@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use pi_application::command::RunCommand;
 use pi_application::deploy::DeployProject;
 use pi_application::diagnostics::{AgentStatus, RunDiagnostics};
+use pi_application::environments::{DestroyEnvironment, ListEnvironments, ResetEnvironmentData};
 use pi_application::gc::RunGc;
 use pi_application::lifecycle::ControlLifecycle;
 use pi_application::list::ListProjects;
@@ -17,7 +18,8 @@ use pi_application::scheduler::{DeployRunner, DeployScheduler};
 use pi_application::secrets::{ListSecrets, SendSecrets};
 use pi_application::stats::GetStats;
 use pi_domain::contracts::{
-    DeploymentHistory, HostMetricsStore, HostNetwork, IdGen, Ingress, Source, TempProbe,
+    DeploymentHistory, HostMetricsStore, HostNetwork, IdGen, Ingress, ProjectRepository, Source,
+    TempProbe,
 };
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
 use pi_infrastructure::disk::SysinfoDiskProbe;
@@ -56,11 +58,21 @@ pub struct AppState {
     pub lifecycle: Arc<ControlLifecycle>,
     pub commands: Arc<RunCommand>,
     pub remove: Arc<RemoveProject>,
+    /// Environment overlay lifecycle (environment-overlays spec, `rpi env
+    /// ls/rm/reset-data`). `destroy_env` wraps `remove` above rather than
+    /// duplicating its teardown; `reset_env` has its own guard.
+    pub list_envs: Arc<ListEnvironments>,
+    pub destroy_env: Arc<DestroyEnvironment>,
+    pub reset_env: Arc<ResetEnvironmentData>,
     pub diagnostics: Arc<RunDiagnostics>,
     pub agent_status: Arc<AgentStatus>,
     pub host_network: Arc<dyn HostNetwork>,
     pub log_dir: PathBuf,
     pub log_dir_available: bool,
+    /// Project registry, consulted by `create_deployment` for the base/
+    /// environment kind guard (environment-overlays spec) before submitting
+    /// the deploy.
+    pub projects: Arc<dyn ProjectRepository>,
     // Not read directly today — `stats` already holds its own clone via
     // `CompositeStats`. Kept on `AppState` as the shared handle for handlers
     // added by later stats-modes work (e.g. a live/SSE metrics endpoint).
@@ -181,6 +193,15 @@ pub fn build_state(
         secrets.clone(),
         overrides.clone(),
     );
+    let list_envs = ListEnvironments::new(projects.clone());
+    let destroy_env = DestroyEnvironment::new(projects.clone(), Arc::clone(&remove));
+    let reset_env = ResetEnvironmentData::new(
+        projects.clone(),
+        Arc::clone(&history),
+        runtime.clone(),
+        source.clone(),
+        overrides.clone(),
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -201,6 +222,7 @@ pub fn build_state(
     );
     let diagnostics = RunDiagnostics::new(probe.clone());
     let agent_status = AgentStatus::new(probe, projects.clone(), Arc::clone(&history));
+    let projects_repo: Arc<dyn ProjectRepository> = projects.clone();
     let send_secrets = SendSecrets::new(
         secrets.clone(),
         projects,
@@ -227,11 +249,15 @@ pub fn build_state(
             lifecycle,
             commands,
             remove,
+            list_envs,
+            destroy_env,
+            reset_env,
             diagnostics,
             agent_status,
             host_network: Arc::clone(&host_network),
             log_dir: config.logs.dir.clone(),
             log_dir_available,
+            projects: projects_repo,
             metrics,
         },
         sampler,

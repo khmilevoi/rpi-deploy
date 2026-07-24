@@ -191,6 +191,38 @@ impl CloudflareApi for HttpCloudflare {
             .map_err(api_err)?;
         Ok(())
     }
+
+    async fn delete_tunnel_cname(&self, zone: &str, name: &str) -> Result<(), DomainError> {
+        let zid = self.zone_id(zone).await?;
+        // find existing record id
+        let existing: serde_json::Value = self
+            .client
+            .get(format!(
+                "{}/zones/{zid}/dns_records?type=CNAME&name={name}",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(api_err)?
+            .error_for_status()
+            .map_err(api_err)?
+            .json()
+            .await
+            .map_err(api_err)?;
+        let Some(rid) = existing["result"][0]["id"].as_str() else {
+            return Ok(()); // already absent
+        };
+        self.client
+            .delete(format!("{}/zones/{zid}/dns_records/{rid}", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(api_err)?
+            .error_for_status()
+            .map_err(api_err)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

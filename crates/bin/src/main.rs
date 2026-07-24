@@ -77,6 +77,12 @@ enum Cmd {
         /// for manual setup instead
         #[arg(long, conflicts_with = "cancel")]
         no_gh_key: bool,
+        /// Deploy/operate an environment defined by rpi.<env>.toml
+        #[arg(long)]
+        env: Option<String>,
+        /// Overlay variables, e.g. --vars BRANCH_NAME=feature/login (repeatable)
+        #[arg(long = "vars")]
+        vars: Vec<String>,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
@@ -111,6 +117,12 @@ enum Cmd {
         /// Print the full output instead of just the last lines
         #[arg(long)]
         full: bool,
+        /// Deploy/operate an environment defined by rpi.<env>.toml
+        #[arg(long)]
+        env: Option<String>,
+        /// Overlay variables, e.g. --vars BRANCH_NAME=feature/login (repeatable)
+        #[arg(long = "vars")]
+        vars: Vec<String>,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
@@ -193,6 +205,59 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AgentCmd,
     },
+    /// Show the resolved configuration (base + overlay), locally.
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
+    /// Manage environments (overlays of rpi.toml)
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// List environments registered on the agent
+    Ls {
+        /// All environments on the agent, not only this project's
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Destroy an environment: stack, volumes, ingress, DNS, secrets, registry
+    Destroy {
+        env: String,
+        #[arg(long = "vars")]
+        vars: Vec<String>,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Remove the environment's volumes and re-run on_create on next deploy
+    ResetData {
+        env: String,
+        #[arg(long = "vars")]
+        vars: Vec<String>,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print the resolved rpi.toml (with --env: base + overlay merged).
+    Show {
+        #[arg(long)]
+        env: Option<String>,
+        #[arg(long = "vars")]
+        vars: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -202,11 +267,23 @@ enum SecretsCmd {
         /// Also apply the new secrets to running containers
         #[arg(long)]
         apply: bool,
+        /// Deploy/operate an environment defined by rpi.<env>.toml
+        #[arg(long)]
+        env: Option<String>,
+        /// Overlay variables, e.g. --vars BRANCH_NAME=feature/login (repeatable)
+        #[arg(long = "vars")]
+        vars: Vec<String>,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
     /// List stored env keys and file paths (values are never transmitted)
     Ls {
+        /// Deploy/operate an environment defined by rpi.<env>.toml
+        #[arg(long)]
+        env: Option<String>,
+        /// Overlay variables, e.g. --vars BRANCH_NAME=feature/login (repeatable)
+        #[arg(long = "vars")]
+        vars: Vec<String>,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
@@ -361,12 +438,14 @@ async fn run() -> anyhow::Result<()> {
             git_ref,
             cancel,
             no_gh_key,
+            env,
+            vars,
             connect,
         } => {
             if cancel {
-                cli::commands::deploy_cancel(connect).await
+                cli::commands::deploy_cancel(env, vars, connect).await
             } else {
-                cli::commands::deploy(git_ref, no_gh_key, connect).await
+                cli::commands::deploy(git_ref, no_gh_key, env, vars, connect).await
             }
         }
         Cmd::Ls { connect } => cli::commands::ls(connect).await,
@@ -381,8 +460,10 @@ async fn run() -> anyhow::Result<()> {
             name,
             args,
             full,
+            env,
+            vars,
             connect,
-        } => cli::commands::command(name, args, full, connect).await,
+        } => cli::commands::command(name, args, full, env, vars, connect).await,
         Cmd::Stats {
             project,
             json,
@@ -437,11 +518,17 @@ async fn run() -> anyhow::Result<()> {
             connect,
         } => cli::upgrade::run(version, yes, connect).await,
         Cmd::Secrets {
-            cmd: SecretsCmd::Send { apply, connect },
-        } => cli::commands::secrets_send(apply, connect).await,
+            cmd:
+                SecretsCmd::Send {
+                    apply,
+                    env,
+                    vars,
+                    connect,
+                },
+        } => cli::commands::secrets_send(apply, env, vars, connect).await,
         Cmd::Secrets {
-            cmd: SecretsCmd::Ls { connect },
-        } => cli::commands::secrets_ls(connect).await,
+            cmd: SecretsCmd::Ls { env, vars, connect },
+        } => cli::commands::secrets_ls(env, vars, connect).await,
         Cmd::Agent {
             cmd: AgentCmd::Run { .. },
         } => unreachable!(),
@@ -501,6 +588,30 @@ async fn run() -> anyhow::Result<()> {
         Cmd::Agent {
             cmd: AgentCmd::Uninstall { purge, yes },
         } => agent::uninstall::run_cmd(purge, yes).await,
+        Cmd::Config {
+            cmd: ConfigCmd::Show { env, vars },
+        } => cli::commands::config_show(env, vars).await,
+        Cmd::Env {
+            cmd: EnvCmd::Ls { all, connect },
+        } => cli::envcmds::env_ls(all, connect).await,
+        Cmd::Env {
+            cmd:
+                EnvCmd::Destroy {
+                    env,
+                    vars,
+                    yes,
+                    connect,
+                },
+        } => cli::envcmds::env_destroy(env, vars, yes, connect).await,
+        Cmd::Env {
+            cmd:
+                EnvCmd::ResetData {
+                    env,
+                    vars,
+                    yes,
+                    connect,
+                },
+        } => cli::envcmds::env_reset_data(env, vars, yes, connect).await,
     }
 }
 

@@ -149,6 +149,7 @@ mod tests {
             timeouts: Default::default(),
             commands: Default::default(),
             command_timeout_secs: None,
+            environment: None,
         };
         config.commands.insert(
             "create-invite".into(),
@@ -158,6 +159,8 @@ mod tests {
             config,
             host_port: 8000,
             created_at: 1,
+            on_create_done: false,
+            last_success_at: None,
         }
     }
 

@@ -8,6 +8,7 @@ pi-domain = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 pi-domain = { workspace = true, features = ["mocks"] }

@@ -29,3 +29,4 @@ Start with the three system documents, then dip into flows as needed.
 | [commands](flows/commands.md) — running a project's own declared script inside its running container | `rpi command <name>` |
 | [observability](flows/observability.md) — where logs, stats, and doctor checks each get their data | logs / stats / doctor |
 | [gc](flows/gc.md) — what cleanup removes, when it runs, and what it always leaves alone | what gets cleaned, when |
+| [environments](flows/environments.md) — overlay resolution, deploy-time guards, `on_create`, `rpi env`, and the TTL reaper | test/preview environments, `rpi deploy --env` |

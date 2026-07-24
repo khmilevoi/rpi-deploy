@@ -29,6 +29,7 @@ pub enum Feature {
     Commands,
     SourceCheck,
     Stats,
+    Environments,
 }
 
 impl Feature {
@@ -37,6 +38,7 @@ impl Feature {
         Feature::Commands,
         Feature::SourceCheck,
         Feature::Stats,
+        Feature::Environments,
     ];
 
     /// The string this feature advertises in the `/v1/version` handshake.
@@ -46,6 +48,7 @@ impl Feature {
             Feature::Commands => "commands",
             Feature::SourceCheck => "source-check",
             Feature::Stats => "stats",
+            Feature::Environments => "environments",
         }
     }
 
@@ -56,6 +59,7 @@ impl Feature {
             Feature::Commands => "container commands",
             Feature::SourceCheck => "deploy-key preflight",
             Feature::Stats => "stats",
+            Feature::Environments => "environments",
         }
     }
 
@@ -65,6 +69,7 @@ impl Feature {
             Feature::Commands => Policy::Required,
             Feature::SourceCheck => Policy::Silent,
             Feature::Stats => Policy::Required,
+            Feature::Environments => Policy::Required,
         }
     }
 
@@ -76,6 +81,7 @@ impl Feature {
             Feature::Commands => "0.9.0",
             Feature::SourceCheck => "0.18.0",
             Feature::Stats => "0.9.0",
+            Feature::Environments => "0.24.0",
         }
     }
 
@@ -315,6 +321,7 @@ mod tests {
         assert_eq!(Feature::Commands.capability(), "commands");
         assert_eq!(Feature::SourceCheck.capability(), "source-check");
         assert_eq!(Feature::Stats.capability(), "stats");
+        assert_eq!(Feature::Environments.capability(), "environments");
     }
 
     #[test]

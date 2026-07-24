@@ -1,6 +1,6 @@
 ---
 name: rpi-toml
-description: Use when creating, editing, validating, reviewing, or troubleshooting rpi.toml files for rpi deployments, including schema 1 fields, project/source/build/ingress/healthcheck/env/timeouts sections, Docker Compose service and port mapping, public hostname ingress, worker services, and per-project deploy settings.
+description: Use when creating, editing, validating, reviewing, or troubleshooting rpi.toml files for rpi deployments, including schema 1 fields, project/source/build/ingress/healthcheck/env/timeouts sections, Docker Compose service and port mapping, public hostname ingress, worker services, per-project deploy settings, and rpi.<env>.toml environment overlays ([environment] ttl/on_create, merge rules, ${...} interpolation).
 ---
 
 # Rpi TOML
@@ -108,6 +108,83 @@ run     = "node dist/scripts/create-invite.cjs"   # string or array, same rules 
 service = "server"                                 # optional compose service to exec into; defaults to [ingress].service
 ```
 
+## Environment Overlays
+
+An overlay file `rpi.<env>.toml` next to `rpi.toml` lets `rpi deploy --env <env>`
+(and `rpi command`, `rpi secrets send/ls`, `rpi config show` with the same
+`--env`/`--vars` flags) deploy a variant of the project — a shared `test`
+environment, or a per-branch preview — under its own derived key, isolated
+runtime state, and its own secrets bundle:
+
+```text
+myapp/
+├── rpi.toml
+├── rpi.test.toml
+└── rpi.branch.toml
+```
+
+```toml
+# rpi.branch.toml — parameterized preview overlay
+[source]
+branch = "${BRANCH_NAME}"
+
+[ingress]
+hostname = "${RPI_ENV_SLUG}.preview.example.com"
+
+[environment]
+ttl = "7d"          # optional; overlay's [environment] is the only place this is valid
+on_create = "seed"  # optional; must name a command present in the merged [commands]
+```
+
+Rules:
+
+- `<env>` must match `^[a-z][a-z0-9-]*$` and must not be one of the reserved
+  words `show`, `ls`, `destroy`, `reset-data`.
+- Every overlay field is optional; unknown fields are a parse error, stricter
+  than the base file. `schema` and `[project]` are forbidden in an overlay —
+  schema version and the project name are properties of the base file (the
+  deployed name is always CLI-derived, see below).
+- `[environment]` (`ttl`, `on_create`) is valid **only** in an overlay, never
+  in the base `rpi.toml`. `ttl` uses the same duration format as `[timeouts]`.
+  `on_create` must name a command that exists in the *merged* `[commands]`
+  table (which the overlay may itself have replaced wholesale — see merge
+  rules below), checked at resolve time, before any agent contact.
+- **Merge rules** (base + overlay → deployed config): scalars replace
+  field-wise (an overlay field present overwrites the base value; absent
+  leaves the base value untouched); nested tables (`[ingress]`,
+  `[healthcheck]`, `[timeouts]`, `[secrets]`) merge field-wise the same way;
+  `[commands]` and array fields (`secrets.files`) replace **wholesale** — an
+  overlay `[commands]` table drops every base command not repeated in it; an
+  explicit empty string (`""`) on an optional field (e.g. `ingress.hostname`,
+  `secrets.env`) resets it to unset rather than being ignored.
+- **Interpolation** (`${VAR}`) is allowed only in `source.branch` and
+  `ingress.hostname` — anywhere else is a parse error, including inside
+  `[commands]`, an argv array, or a command table's `service`. Supported
+  variables: `BRANCH_NAME` (from `--vars BRANCH_NAME=<branch>`) and
+  `RPI_ENV_SLUG`, derived from `BRANCH_NAME` on demand — only computed when
+  actually referenced — by lower-casing, collapsing runs of non-`[a-z0-9]`
+  characters to a single `-`, truncating to 30 characters, and trimming a
+  trailing `-`. An overlay with no `${...}` reference rejects `--vars`
+  ("not parameterized"); a parameterized overlay without
+  `--vars BRANCH_NAME=...` is an error.
+- **Key derivation**: the deployed `project.name` is always CLI-derived, never
+  read from the overlay — `<base>--<env>` for a static overlay, or
+  `<base>--<env>--<slug>` once `${RPI_ENV_SLUG}` was actually substituted.
+  `--` in a project name is reserved for this; a base `rpi.toml` whose
+  `project.name` contains `--` is rejected agent-side.
+- If the base `rpi.toml` sets `[ingress].hostname`, the overlay must
+  override it to a different value or clear it with `hostname = ""` —
+  inheriting or repeating the base hostname is rejected (CLI resolve-time
+  error, and a 409 from the agent as a second line of defense), since it
+  would otherwise hijack the production route on the environment's first
+  successful deploy.
+- `rpi config show --env <env> [--vars ...]` prints the fully resolved
+  configuration (base + overlay merged, `[environment]` appended) without
+  contacting the agent — the fastest way to check what a deploy would send.
+
+See `docs/architecture/flows/environments.md` for the full resolution,
+deploy-time guard, `on_create`, and `rpi env`/TTL-reaper flow.
+
 ## Authoring Workflow
 
 1. Identify the Compose service name and container port first.
@@ -177,5 +254,7 @@ services:
 When editing the parser or adding fields, update:
 
 - `crates/bin/src/cli/rpitoml.rs`
+- `crates/bin/src/cli/overlay.rs` (overlay schema, merge, and interpolation live here, separate from the base parser)
 - `README.md`
 - examples in this skill if the public config surface changes
+- `docs/architecture/flows/environments.md` if overlay resolution behavior changes (see the `architecture-diagrams` skill)

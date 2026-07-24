@@ -209,6 +209,7 @@ impl Ingress for CloudflaredIngress {
             log.line(&format!(
                 "ingress: no route for {hostname}; cloudflared untouched"
             ));
+            self.delete_dns(hostname, &log).await?;
             return Ok(());
         }
         let updated = serde_yaml::to_string(&doc).map_err(ingress_err)?;
@@ -234,6 +235,7 @@ impl Ingress for CloudflaredIngress {
             return Err(ingress_err(format!("restart cloudflared: {err}")));
         }
         log.line("ingress: cloudflared restarted");
+        self.delete_dns(hostname, &log).await?;
         Ok(())
     }
 }
@@ -264,6 +266,15 @@ impl CloudflaredIngress {
             .await
             .map_err(|e| ingress_err(format!("restart cloudflared: {e}")))?;
         log.line("ingress: cloudflared restarted");
+        Ok(())
+    }
+
+    async fn delete_dns(&self, hostname: &str, log: &Arc<dyn LogSink>) -> Result<(), DomainError> {
+        self.cf
+            .delete_tunnel_cname(&self.zone, hostname)
+            .await
+            .map_err(|err| ingress_err(format!("delete dns: {err}")))?;
+        log.line(&format!("DNS record for {hostname} removed"));
         Ok(())
     }
 }
@@ -514,5 +525,72 @@ mod tests {
             .upsert("a.example.com", 8002, CollectSink::new())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_dns_record() {
+        use pi_domain::contracts::MockCloudflareApi;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, BASE).unwrap();
+
+        let mut cf = MockCloudflareApi::new();
+        cf.expect_delete_tunnel_cname()
+            .withf(|zone, name| zone == "example.com" && name == "old.example.com")
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        let ingress = CloudflaredIngress::new(
+            path.clone(),
+            "tid".into(),
+            "example.com".into(),
+            vec!["true".into()], // restart command that succeeds
+            std::sync::Arc::new(cf),
+        );
+        ingress
+            .remove("old.example.com", CollectSink::new())
+            .await
+            .unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("old.example.com"),
+            "rule removed from config"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_without_matching_rule_still_deletes_dns() {
+        use pi_domain::contracts::MockCloudflareApi;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, BASE).unwrap();
+
+        let mut cf = MockCloudflareApi::new();
+        cf.expect_delete_tunnel_cname()
+            .withf(|zone, name| zone == "example.com" && name == "missing.example.com")
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        // restart would fail (binary does not exist) if it were invoked: the
+        // no-matching-rule path must not restart cloudflared.
+        let ingress = CloudflaredIngress::new(
+            path.clone(),
+            "tid".into(),
+            "example.com".into(),
+            vec!["pi-test-no-such-binary".into()],
+            std::sync::Arc::new(cf),
+        );
+        ingress
+            .remove("missing.example.com", CollectSink::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            BASE,
+            "config untouched since no rule matched"
+        );
     }
 }

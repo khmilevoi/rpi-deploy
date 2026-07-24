@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use pi_application::list::ProjectView;
 use pi_application::remove::RemoveReport;
 use pi_domain::entities::{
-    AgentOverview, CommandSpec, Deployment, DiagnosticCheck, DiagnosticReport, ExposeMode,
-    HealthcheckConfig, HostSample, HostStats, ProjectConfig, ProjectStats, ServiceStats,
-    StageTimeoutOverrides, StatsReport,
+    AgentOverview, CommandSpec, Deployment, DiagnosticCheck, DiagnosticReport, EnvironmentMeta,
+    ExposeMode, HealthcheckConfig, HostSample, HostStats, ProjectConfig, ProjectStats,
+    ServiceStats, StageTimeoutOverrides, StatsReport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +87,8 @@ impl From<ProjectDto> for ProjectConfig {
                 .unwrap_or_default(),
             commands: dto.commands,
             command_timeout_secs,
+            // The handler fills this in from the request's `environment` block.
+            environment: None,
         }
     }
 }
@@ -370,11 +372,80 @@ impl From<RemoveReport> for RemoveResponse {
     }
 }
 
+/// Environment overlay metadata from the deploy request (environment-overlays
+/// spec). Field-for-field mirror of `EnvironmentMeta`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentDto {
+    pub env: String,
+    pub base: String,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub on_create: Option<String>,
+}
+
+impl From<EnvironmentDto> for EnvironmentMeta {
+    fn from(dto: EnvironmentDto) -> EnvironmentMeta {
+        EnvironmentMeta {
+            env: dto.env,
+            base: dto.base,
+            slug: dto.slug,
+            ttl_secs: dto.ttl_secs,
+            on_create: dto.on_create,
+        }
+    }
+}
+
+impl From<&EnvironmentMeta> for EnvironmentDto {
+    fn from(meta: &EnvironmentMeta) -> EnvironmentDto {
+        EnvironmentDto {
+            env: meta.env.clone(),
+            base: meta.base.clone(),
+            slug: meta.slug.clone(),
+            ttl_secs: meta.ttl_secs,
+            on_create: meta.on_create.clone(),
+        }
+    }
+}
+
+/// `GET /v1/environments` element (`rpi env ls`, environment-overlays
+/// spec): registry-level view of one environment overlay, distinct from
+/// [`EnvironmentDto`] (the deploy-request metadata block) because it also
+/// carries the project's key and lifecycle timestamps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentViewDto {
+    pub key: String,
+    pub base: String,
+    pub env: String,
+    #[serde(default)]
+    pub slug: Option<String>,
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_success_at: Option<i64>,
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+/// `DELETE /v1/environments/{key}` and `POST /v1/environments/{key}/reset-data`
+/// response body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentActionResponse {
+    pub key: String,
+    #[serde(default)]
+    pub already_absent: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployRequest {
     pub project: ProjectDto,
     #[serde(rename = "ref")]
     pub git_ref: Option<String>,
+    /// Environment overlay block (environment-overlays spec). Absent for
+    /// plain deploys and for pre-overlay CLIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<EnvironmentDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -607,6 +678,7 @@ mod tests {
             timeouts: Default::default(),
             commands: Default::default(),
             command_timeout_secs: Some(1800),
+            environment: None,
         };
         config.commands.insert(
             "migrate".into(),
@@ -636,6 +708,7 @@ mod tests {
             timeouts: Default::default(),
             commands: Default::default(),
             command_timeout_secs: None,
+            environment: None,
         };
         config.commands.insert(
             "create-invite".into(),
@@ -702,5 +775,19 @@ mod tests {
         let dto: ServiceStatsDto = serde_json::from_str(json).unwrap();
         assert_eq!(dto.state, "");
         assert_eq!(dto.health, None);
+    }
+
+    #[test]
+    fn deploy_request_environment_roundtrips_and_is_optional() {
+        let json = r#"{"project":{"name":"myapp--test","repo":"r","branch":"b","compose":"docker-compose.yml","service":"web","port":3000,"hostname":null},"ref":null,"environment":{"env":"test","base":"myapp"}}"#;
+        let req: DeployRequest = serde_json::from_str(json).unwrap();
+        let env = req.environment.unwrap();
+        assert_eq!(env.env, "test");
+        assert_eq!(env.base, "myapp");
+        assert_eq!(env.slug, None);
+        // absent block (old CLI) still deserializes
+        let json = r#"{"project":{"name":"myapp","repo":"r","branch":"b","compose":"c","service":"web","port":3000,"hostname":null},"ref":null}"#;
+        let req: DeployRequest = serde_json::from_str(json).unwrap();
+        assert!(req.environment.is_none());
     }
 }

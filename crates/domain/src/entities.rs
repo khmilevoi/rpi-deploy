@@ -214,6 +214,18 @@ impl<'de> Deserialize<'de> for CommandSpec {
     }
 }
 
+/// Environment overlay metadata (received in the deploy request's
+/// `environment` block, environment-overlays spec). Not persisted by this
+/// task — registry persistence is Task 9, handler logic is Task 10.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentMeta {
+    pub env: String,
+    pub base: String,
+    pub slug: Option<String>,
+    pub ttl_secs: Option<u64>,
+    pub on_create: Option<String>,
+}
+
 /// Project config from rpi.toml (received in deploy request, §12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectConfig {
@@ -241,6 +253,9 @@ pub struct ProjectConfig {
     /// [timeouts].command override in seconds. Persisted alongside commands
     /// because it is needed at invocation time, not deploy time.
     pub command_timeout_secs: Option<u64>,
+    /// Environment overlay metadata from the deploy request's `environment`
+    /// block. `None` for plain (non-overlay) deploys.
+    pub environment: Option<EnvironmentMeta>,
 }
 
 /// Registered project: config + allocated host port (§4).
@@ -249,6 +264,10 @@ pub struct Project {
     pub config: ProjectConfig,
     pub host_port: u16,
     pub created_at: i64,
+    /// Whether the overlay's `on_create` command has already run once.
+    pub on_create_done: bool,
+    /// Timestamp (unix seconds) of the most recent successful deploy.
+    pub last_success_at: Option<i64>,
 }
 
 /// Branch or specific commit-sha (§4).

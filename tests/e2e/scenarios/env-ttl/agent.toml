@@ -1,0 +1,21 @@
+data_dir = "/var/lib/rpi"
+socket = "/run/rpi/agent.sock"
+port_min = 18080
+port_max = 18089
+build_concurrency = 1
+history_keep = 10
+
+[timeouts]
+fetch = "60s"
+build = "5m"
+up = "60s"
+
+[gc]
+disk_threshold_percent = 95
+
+[logs]
+dir = "/var/log/rpi"
+retention_days = 1
+
+[environments]
+reap_interval = "5s"

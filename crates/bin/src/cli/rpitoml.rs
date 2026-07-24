@@ -1,13 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use crate::duration::parse_duration_secs;
 use pi_domain::entities::{
     CommandSpec, ExposeMode, HealthcheckConfig, ProjectConfig, StageTimeoutOverrides,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RpiToml {
     pub schema: u32,
     pub project: ProjectSection,
@@ -23,18 +22,22 @@ pub struct RpiToml {
     pub secrets: SecretsSection,
     /// Legacy [env] table: rejected in parse() with a migration hint. Detected
     /// via Option<toml::Value> because serde tolerates unknown sections.
-    #[serde(default, rename = "env")]
+    #[serde(default, rename = "env", skip_serializing)]
     legacy_env: Option<toml::Value>,
-    #[serde(default)]
+    /// [environment] is only valid in overlay files; detected here so the
+    /// base file can reject it with a clear error.
+    #[serde(default, rename = "environment", skip_serializing)]
+    environment_section: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<BTreeMap<String, CommandValue>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ProjectSection {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SourceSection {
     pub repo: String,
     #[serde(default = "default_branch")]
@@ -45,7 +48,7 @@ fn default_branch() -> String {
     "main".into()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct BuildSection {
     #[serde(default = "default_compose")]
     pub compose: String,
@@ -63,8 +66,9 @@ fn default_compose() -> String {
     "docker-compose.yml".into()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct IngressSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
     pub service: String,
     pub port: u16,
@@ -74,43 +78,51 @@ pub struct IngressSection {
     /// published ports via its own `DOCKER` chain, so firewall rules will not
     /// block it. Use `"lan"` only on trusted networks or behind an external
     /// firewall/router. Defaults to `"private"` (127.0.0.1).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expose: Option<String>,
 }
 
 /// [timeouts] in rpi.toml — per-project stage overrides (§12, §8.1).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct TimeoutsSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fetch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub up: Option<String>,
     /// Budget for one `rpi command` run on the agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct HealthcheckSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// "2xx" | "3xx" | exact code like "204".
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expect: Option<String>,
     /// "60s" | "2m" | bare seconds. Default 60s (§22).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
 }
 
 /// [secrets] in rpi.toml (secrets spec §3): what `rpi secrets send` reads.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct SecretsSection {
     /// Local env file. None -> default ".env" (missing file is fine then);
     /// Some(path) -> the file must exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
     /// Secret files, relative forward-slash paths (recreated verbatim on the Pi).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
 }
 
 /// [commands] value: a shell-word string, an explicit argv array, or a table
 /// with `run` (string/array) plus an optional `service` (§spec).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum CommandValue {
     Line(String),
@@ -123,7 +135,7 @@ pub enum CommandValue {
 }
 
 /// The `run` of a table-form command: same two shapes as the shorthand value.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum CommandRun {
     Line(String),
@@ -179,6 +191,32 @@ fn command_spec(name: &str, value: &CommandValue) -> anyhow::Result<CommandSpec>
     Ok(CommandSpec { argv, service })
 }
 
+/// RFC-1123-style hostname check: total length, per-label length/charset,
+/// no leading/trailing '-' per label. Runs post-substitution (base file and
+/// merged overlay result alike), so a parameterized `${BRANCH_NAME}` value
+/// containing `/` or other illegal characters is caught here rather than
+/// silently producing an unroutable ingress rule.
+fn validate_hostname(hostname: &str) -> Result<(), String> {
+    if hostname.is_empty() || hostname.len() > 253 {
+        return Err(format!(
+            "invalid [ingress].hostname '{hostname}' (not a valid DNS hostname)"
+        ));
+    }
+    for label in hostname.split('.') {
+        let ok = !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if !ok {
+            return Err(format!(
+                "invalid [ingress].hostname '{hostname}' (not a valid DNS hostname)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_expect(expect: &str) -> Result<(), String> {
     let ok = matches!(expect, "2xx" | "3xx")
         || (expect.len() == 3 && expect.chars().all(|c| c.is_ascii_digit()));
@@ -200,49 +238,73 @@ impl RpiToml {
                 parsed.schema
             );
         }
-        if let Some(timeout) = &parsed.healthcheck.timeout {
+        if parsed.project.name.contains("--") {
+            anyhow::bail!(
+                "rpi.toml [project].name '{}' must not contain '--' (reserved for environment keys; rename the project)",
+                parsed.project.name
+            );
+        }
+        if parsed.environment_section.is_some() {
+            anyhow::bail!(
+                "rpi.toml: [environment] is only allowed in overlay files (rpi.<env>.toml)"
+            );
+        }
+        parsed.validate_common()?;
+        Ok(parsed)
+    }
+
+    /// Validation shared by the base file (`parse`) and a merged overlay
+    /// result: duration formats, `[healthcheck].expect`, `[ingress].expose`,
+    /// legacy `[env]` rejection, secret-path checks and `[commands]` checks.
+    /// Excludes the schema check and the `--` project-name ban, which only
+    /// apply to the base file before a merge.
+    pub fn validate_common(&self) -> anyhow::Result<()> {
+        if let Some(timeout) = &self.healthcheck.timeout {
             parse_duration_secs(timeout)
                 .map_err(|e| anyhow::anyhow!("rpi.toml [healthcheck]: {e}"))?;
         }
         for (field, value) in [
-            ("fetch", &parsed.timeouts.fetch),
-            ("build", &parsed.timeouts.build),
-            ("up", &parsed.timeouts.up),
-            ("command", &parsed.timeouts.command),
+            ("fetch", &self.timeouts.fetch),
+            ("build", &self.timeouts.build),
+            ("up", &self.timeouts.up),
+            ("command", &self.timeouts.command),
         ] {
             if let Some(timeout) = value {
                 parse_duration_secs(timeout)
                     .map_err(|e| anyhow::anyhow!("rpi.toml [timeouts].{field}: {e}"))?;
             }
         }
-        if let Some(expect) = &parsed.healthcheck.expect {
+        if let Some(expect) = &self.healthcheck.expect {
             validate_expect(expect).map_err(|e| anyhow::anyhow!("rpi.toml [healthcheck]: {e}"))?;
         }
-        if let Some(expose) = &parsed.ingress.expose {
+        if let Some(hostname) = &self.ingress.hostname {
+            validate_hostname(hostname).map_err(|e| anyhow::anyhow!(e))?;
+        }
+        if let Some(expose) = &self.ingress.expose {
             if ExposeMode::parse(expose).is_none() {
                 anyhow::bail!(
                     "invalid rpi.toml [ingress].expose '{expose}' (use \"private\" or \"lan\")"
                 );
             }
         }
-        if parsed.legacy_env.is_some() {
+        if self.legacy_env.is_some() {
             anyhow::bail!(
                 "rpi.toml: [env] was replaced by [secrets]; move `file = \"...\"` to:\n[secrets]\nenv = \"...\""
             );
         }
-        if let Some(env) = &parsed.secrets.env {
+        if let Some(env) = &self.secrets.env {
             pi_infrastructure::secretpath::validate_rel_path(env)
                 .map_err(|e| anyhow::anyhow!("rpi.toml [secrets].env: '{env}': {e}"))?;
         }
         let mut seen = std::collections::BTreeSet::new();
-        for path in &parsed.secrets.files {
+        for path in &self.secrets.files {
             pi_infrastructure::secretpath::validate_rel_path(path)
                 .map_err(|e| anyhow::anyhow!("rpi.toml [secrets].files: '{path}': {e}"))?;
             if !seen.insert(path.as_str()) {
                 anyhow::bail!("rpi.toml [secrets].files: duplicate path '{path}'");
             }
         }
-        if let Some(commands) = &parsed.commands {
+        if let Some(commands) = &self.commands {
             if commands.is_empty() {
                 anyhow::bail!(
                     "rpi.toml [commands] is empty - declare a command or remove the section"
@@ -257,17 +319,7 @@ impl RpiToml {
                 command_spec(name, value)?;
             }
         }
-        Ok(parsed)
-    }
-
-    pub fn load(path: &Path) -> anyhow::Result<RpiToml> {
-        let text = std::fs::read_to_string(path).map_err(|e| {
-            anyhow::anyhow!(
-                "cannot read {}: {e} (run from the project root, see §12)",
-                path.display()
-            )
-        })?;
-        RpiToml::parse(&text)
+        Ok(())
     }
 
     pub fn to_project_config(&self) -> ProjectConfig {
@@ -330,6 +382,9 @@ impl RpiToml {
                 .command
                 .as_deref()
                 .and_then(|t| parse_duration_secs(t).ok()),
+            // The deploy path fills this from the resolved `EnvSelection`
+            // (later task); rpi.toml alone never carries an environment.
+            environment: None,
         }
     }
 }
@@ -507,6 +562,18 @@ files = ["certs/server.pem"]
     }
 
     #[test]
+    fn invalid_hostname_is_rejected() {
+        for bad in ["feature/login.example.com", "-bad.example.com"] {
+            let toml = SAMPLE.replace(
+                "hostname = \"rateme.isskelo.com\"",
+                &format!("hostname = \"{bad}\""),
+            );
+            let err = RpiToml::parse(&toml).unwrap_err().to_string();
+            assert!(err.contains("hostname"), "{bad}: got: {err}");
+        }
+    }
+
+    #[test]
     fn invalid_expose_is_rejected() {
         let bad = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"public\"");
         let err = RpiToml::parse(&bad).unwrap_err().to_string();
@@ -635,6 +702,20 @@ files = ["certs/server.pem"]
         );
         let err = RpiToml::parse(&toml).unwrap_err().to_string();
         assert!(err.contains("quote"), "got: {err}");
+    }
+
+    #[test]
+    fn base_name_with_double_dash_is_rejected() {
+        let toml = SAMPLE.replace("name = \"rateme\"", "name = \"rate--me\"");
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("--"), "got: {err}");
+    }
+
+    #[test]
+    fn environment_section_in_base_is_rejected() {
+        let toml = format!("{SAMPLE}\n[environment]\nttl = \"7d\"\n");
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("[environment]"), "got: {err}");
     }
 
     #[test]

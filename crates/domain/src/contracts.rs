@@ -126,6 +126,14 @@ pub trait ProjectRepository: Send + Sync {
     async fn get(&self, name: &str) -> Result<Option<Project>, DomainError>;
     async fn list(&self) -> Result<Vec<Project>, DomainError>;
     async fn remove(&self, name: &str) -> Result<(), DomainError>;
+    /// Environment entries only (env_name set); base=None -> all bases.
+    async fn list_environments<'a>(
+        &self,
+        base: Option<&'a str>,
+    ) -> Result<Vec<Project>, DomainError>;
+    /// Sets last_success_at (TTL sliding anchor).
+    async fn mark_deploy_success(&self, name: &str, at: i64) -> Result<(), DomainError>;
+    async fn set_on_create_done(&self, name: &str, done: bool) -> Result<(), DomainError>;
 }
 
 /// Deployment history (§6, §18).
@@ -260,6 +268,8 @@ pub trait CloudflareApi: Send + Sync {
         name: &str,
         tunnel_id: &str,
     ) -> Result<(), DomainError>;
+    /// Delete the proxied CNAME for <name> if it exists. Absent record is Ok.
+    async fn delete_tunnel_cname(&self, zone: &str, name: &str) -> Result<(), DomainError>;
 }
 
 #[cfg_attr(feature = "mocks", automock)]

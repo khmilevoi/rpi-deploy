@@ -1,5 +1,10 @@
 # Environment overlays (idea)
 
+> Superseded by the approved design and implementation:
+> [`docs/superpowers/specs/2026-07-24-environment-overlays-design.md`](../superpowers/specs/2026-07-24-environment-overlays-design.md)
+> (see `docs/architecture/flows/environments.md` for how it works). This
+> page is kept for historical context only.
+
 Status: potential feature; not an implementation specification.
 
 ## Goal

@@ -10,7 +10,8 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use pi_application::logs::DEFAULT_LOG_TAIL;
 use pi_domain::entities::{
-    DeployRef, DeploymentStatus, LifecycleAction, ProjectConfig, SecretsBundle,
+    DeployRef, DeploymentStatus, EnvironmentMeta, LifecycleAction, Project, ProjectConfig,
+    SecretsBundle,
 };
 use pi_domain::error::DomainError;
 use pi_infrastructure::events::DeployEvent;
@@ -22,9 +23,9 @@ use crate::agent::state::AppState;
 use crate::proto::{
     AgentOverviewDto, CommandRunRequest, CommandsResponse, DeployAccepted, DeployRequest,
     DeploymentDto, DiagnosticReportDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
-    GcResponse, LifecycleResponse, ProjectViewDto, RemoveResponse, SecretsListResponse,
-    SecretsSendRequest, SecretsSendResponse, SourceCheckRequest, SourceCheckResponse,
-    StatsReportDto, VersionInfo,
+    EnvironmentActionResponse, EnvironmentViewDto, GcResponse, LifecycleResponse, ProjectViewDto,
+    RemoveResponse, SecretsListResponse, SecretsSendRequest, SecretsSendResponse,
+    SourceCheckRequest, SourceCheckResponse, StatsReportDto, VersionInfo,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -60,6 +61,15 @@ pub fn router(state: AppState) -> Router {
             put(send_secrets_handler).get(list_secrets_handler),
         )
         .route("/v1/projects/{name}/source/check", post(source_check))
+        .route("/v1/environments", get(list_environments_handler))
+        .route(
+            "/v1/environments/{key}",
+            delete(destroy_environment_handler),
+        )
+        .route(
+            "/v1/environments/{key}/reset-data",
+            post(reset_environment_handler),
+        )
         // base64 inflates the 8 MiB bundle limit by ~4/3; leave headroom
         .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
         .with_state(state)
@@ -97,11 +107,23 @@ fn is_valid_name(s: &str) -> bool {
         && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
 }
 
+fn is_valid_env_part(s: &str, max_len: usize) -> bool {
+    !s.is_empty()
+        && s.len() <= max_len
+        && !s.contains("--")
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && s.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+}
+
 async fn create_deployment(
     State(state): State<AppState>,
     Json(req): Json<DeployRequest>,
 ) -> Result<Response, ApiError> {
-    let config: ProjectConfig = req.project.into();
+    let mut config: ProjectConfig = req.project.into();
     if !is_valid_name(&config.name) {
         return Err(ApiError(DomainError::Invalid(
             "project.name must match ^[a-z0-9][a-z0-9_-]*$".into(),
@@ -134,6 +156,85 @@ async fn create_deployment(
             ))));
         }
     }
+    let env_meta: Option<EnvironmentMeta> = req.environment.map(Into::into);
+    match &env_meta {
+        Some(env) => {
+            if !is_valid_name(&env.base) || env.base.contains("--") {
+                return Err(ApiError(DomainError::Invalid(
+                    "environment.base must match ^[a-z0-9][a-z0-9_-]*$ and must not contain '--'"
+                        .into(),
+                )));
+            }
+            if !is_valid_env_part(&env.env, 64)
+                || !env
+                    .env
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase())
+            {
+                return Err(ApiError(DomainError::Invalid(
+                    "environment.env must match ^[a-z][a-z0-9-]*$ without '--'".into(),
+                )));
+            }
+            if let Some(slug) = &env.slug {
+                if !is_valid_env_part(slug, 30) {
+                    return Err(ApiError(DomainError::Invalid(
+                        "environment.slug must be lowercase [a-z0-9-], max 30 chars, no '--', no edge '-'".into(),
+                    )));
+                }
+            }
+            let expected = match &env.slug {
+                Some(slug) => format!("{}--{}--{}", env.base, env.env, slug),
+                None => format!("{}--{}", env.base, env.env),
+            };
+            if expected != config.name {
+                return Err(ApiError(DomainError::Invalid(format!(
+                    "project.name '{}' does not match the environment key '{expected}'",
+                    config.name
+                ))));
+            }
+        }
+        None => {
+            if config.name.contains("--") {
+                return Err(ApiError(DomainError::Invalid(
+                    "project.name must not contain '--' (reserved for environment keys; deploy with --env)"
+                        .into(),
+                )));
+            }
+        }
+    }
+    if let Some(existing) = state.projects.get(&config.name).await.map_err(ApiError)? {
+        let existing_is_env = existing.config.environment.is_some();
+        if existing_is_env != env_meta.is_some() {
+            let (a, b) = if existing_is_env {
+                ("an environment", "a base project")
+            } else {
+                ("a base project", "an environment")
+            };
+            return Err(ApiError(DomainError::Conflict(format!(
+                "'{}' is registered as {a}; refusing to deploy it as {b}",
+                config.name
+            ))));
+        }
+    }
+    config.environment = env_meta;
+
+    // Production-key protection (hostname edition): the CLI already refuses
+    // to resolve an overlay that inherits or repeats the base project's
+    // hostname, but a stale or hand-crafted CLI could still send one. Reject
+    // it here too, so the agent never routes an environment's host port
+    // under the production hostname.
+    if let (Some(env), Some(hostname)) = (&config.environment, &config.hostname) {
+        if let Some(base_project) = state.projects.get(&env.base).await.map_err(ApiError)? {
+            if base_project.config.hostname.as_deref() == Some(hostname.as_str()) {
+                return Err(ApiError(DomainError::Conflict(format!(
+                    "environment hostname '{hostname}' equals the hostname of base project '{}'",
+                    env.base
+                ))));
+            }
+        }
+    }
+
     let git_ref = DeployRef::parse(req.git_ref.as_deref().unwrap_or(&config.branch));
 
     let deployment_id = state.ids.new_id();
@@ -752,6 +853,93 @@ async fn list_secrets_handler(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct EnvListQuery {
+    base: Option<String>,
+}
+
+/// `GET /v1/environments` (`rpi env ls`, environment-overlays spec).
+async fn list_environments_handler(
+    State(state): State<AppState>,
+    Query(q): Query<EnvListQuery>,
+) -> Result<Json<Vec<EnvironmentViewDto>>, ApiError> {
+    let envs = state
+        .list_envs
+        .execute(q.base.as_deref())
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(
+        envs.into_iter().filter_map(environment_view).collect(),
+    ))
+}
+
+/// `list_environments` only ever returns rows with `env_name` set (the SQL
+/// query filters on it), so `config.environment` should always be `Some`
+/// here. Skipping a `None` row instead of `.expect()`-panicking keeps this
+/// handler from taking the whole request down if that invariant is ever
+/// violated by a future migration or bug.
+fn environment_view(p: Project) -> Option<EnvironmentViewDto> {
+    let meta = p.config.environment?;
+    Some(EnvironmentViewDto {
+        key: p.config.name,
+        base: meta.base,
+        env: meta.env,
+        slug: meta.slug,
+        created_at: p.created_at,
+        last_success_at: p.last_success_at,
+        ttl_secs: meta.ttl_secs,
+    })
+}
+
+/// `DELETE /v1/environments/{key}` (`rpi env rm`, environment-overlays
+/// spec). Idempotent: a missing key reports `already_absent` instead of
+/// 404. A base-project key and an active deployment both come back as 409
+/// (the latter via `RemoveProject`'s own guard).
+async fn destroy_environment_handler(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<EnvironmentActionResponse>, ApiError> {
+    if !is_valid_name(&key) {
+        return Err(ApiError(DomainError::Invalid(
+            "environment key must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    let outcome = state
+        .destroy_env
+        .execute(&key, Arc::new(TracingSink))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(EnvironmentActionResponse {
+        key: outcome.key,
+        already_absent: outcome.already_absent,
+    }))
+}
+
+/// `POST /v1/environments/{key}/reset-data` (`rpi env reset-data`,
+/// environment-overlays spec): drops the overlay's containers/volumes and
+/// clears `on_create_done` so the next deploy re-seeds. Missing key,
+/// base-project key, and active deployment are all rejected by
+/// `ResetEnvironmentData`'s own guards.
+async fn reset_environment_handler(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<EnvironmentActionResponse>, ApiError> {
+    if !is_valid_name(&key) {
+        return Err(ApiError(DomainError::Invalid(
+            "environment key must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    state
+        .reset_env
+        .execute(&key, Arc::new(TracingSink))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(EnvironmentActionResponse {
+        key,
+        already_absent: false,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,6 +947,9 @@ mod tests {
     use http_body_util::BodyExt;
     use pi_application::deploy::DeployProject;
     use pi_application::diagnostics::{AgentStatus, RunDiagnostics};
+    use pi_application::environments::{
+        DestroyEnvironment, ListEnvironments, ResetEnvironmentData,
+    };
     use pi_application::gc::RunGc;
     use pi_application::lifecycle::ControlLifecycle;
     use pi_application::list::ListProjects;
@@ -767,9 +958,13 @@ mod tests {
     use pi_application::secrets::{ListSecrets, SendSecrets};
     use pi_application::stats::GetStats;
     use pi_domain::contracts::{
-        ContainerRuntime, LogSink, MockContainerRuntime, MockDiskProbe, MockSource, Source,
+        ContainerRuntime, LogSink, MockContainerRuntime, MockDiskProbe, MockProjectRepository,
+        MockSource, ProjectRepository, Source,
     };
-    use pi_domain::entities::{FetchedSource, StageTimeouts};
+    use pi_domain::entities::{
+        EnvironmentMeta, ExposeMode, FetchedSource, HealthcheckConfig, Project,
+        StageTimeoutOverrides, StageTimeouts,
+    };
     use pi_infrastructure::events::DeployEventsHub;
     use pi_infrastructure::history::SqliteHistory;
     use pi_infrastructure::overrides::FsOverrideStore;
@@ -927,6 +1122,15 @@ mod tests {
             secrets.clone(),
             overrides.clone(),
         );
+        let list_envs = ListEnvironments::new(projects.clone());
+        let destroy_env = DestroyEnvironment::new(projects.clone(), Arc::clone(&remove));
+        let reset_env = ResetEnvironmentData::new(
+            projects.clone(),
+            Arc::clone(&history),
+            Arc::clone(&runtime),
+            source.clone(),
+            overrides.clone(),
+        );
         let probe = HostSystemProbe::new(
             Arc::new(SystemRunner),
             disk,
@@ -940,6 +1144,7 @@ mod tests {
         );
         let diagnostics = RunDiagnostics::new(probe.clone());
         let agent_status = AgentStatus::new(probe, projects.clone(), Arc::clone(&history));
+        let projects_repo: Arc<dyn ProjectRepository> = projects.clone();
         let send_secrets = SendSecrets::new(
             secrets.clone(),
             projects,
@@ -964,13 +1169,250 @@ mod tests {
             lifecycle,
             commands,
             remove,
+            list_envs,
+            destroy_env,
+            reset_env,
             diagnostics,
             agent_status,
             host_network: Arc::new(UdpHostNetwork::new()),
             log_dir: dir.join("logs"),
             log_dir_available: true,
             metrics,
+            projects: projects_repo,
         }
+    }
+
+    /// Like `state_with`, but swaps in a caller-controlled `ProjectRepository`
+    /// (typically a `MockProjectRepository`) for the deploy-time environment
+    /// guard tests — the rest of the state (scheduler, source, runtime) still
+    /// comes from a real (empty) sqlite-backed instance.
+    fn state_with_projects(
+        dir: &std::path::Path,
+        projects: Arc<dyn ProjectRepository>,
+    ) -> AppState {
+        let mut state = state_with(dir, Arc::new(ok_source()), Arc::new(ok_runtime()));
+        state.projects = projects;
+        state
+    }
+
+    /// Builds a registered `Project` for guard tests, with `environment`
+    /// set as needed to simulate an existing base project (`None`) or an
+    /// existing environment overlay (`Some(..)`).
+    fn project_with_environment(name: &str, environment: Option<EnvironmentMeta>) -> Project {
+        Project {
+            config: ProjectConfig {
+                name: name.into(),
+                repo: "https://github.com/x/y.git".into(),
+                branch: "main".into(),
+                compose_path: "docker-compose.yml".into(),
+                service: "web".into(),
+                container_port: 3000,
+                hostname: None,
+                expose: ExposeMode::default(),
+                healthcheck: HealthcheckConfig::default(),
+                timeouts: StageTimeoutOverrides::default(),
+                commands: Default::default(),
+                command_timeout_secs: None,
+                environment,
+            },
+            host_port: 8000,
+            created_at: 0,
+            on_create_done: false,
+            last_success_at: None,
+        }
+    }
+
+    /// Like `state_with_projects`, but also rewires `list_envs`/`destroy_env`/
+    /// `reset_env` (and the `remove` delegate `destroy_env` wraps) onto the
+    /// same mock `ProjectRepository` — `state_with_projects` only swaps the
+    /// `projects` field, so without this the environment use-cases would
+    /// still see the throwaway sqlite-backed repo baked in by `state_with`.
+    fn state_with_environments(
+        dir: &std::path::Path,
+        projects: Arc<dyn ProjectRepository>,
+    ) -> AppState {
+        let mut state = state_with_projects(dir, Arc::clone(&projects));
+        let overrides = FsOverrideStore::new(dir.join("env-overrides"));
+        let remove = RemoveProject::new(
+            Arc::clone(&projects),
+            Arc::clone(&state.history),
+            Arc::new(ok_runtime()) as Arc<dyn ContainerRuntime>,
+            pi_infrastructure::cloudflared::DisabledIngress::new(),
+            Arc::clone(&state.source),
+            pi_infrastructure::secrets::EncryptedFileStore::open(dir).unwrap(),
+            overrides.clone(),
+        );
+        state.list_envs = ListEnvironments::new(Arc::clone(&projects));
+        state.destroy_env = DestroyEnvironment::new(Arc::clone(&projects), Arc::clone(&remove));
+        state.reset_env = ResetEnvironmentData::new(
+            projects,
+            Arc::clone(&state.history),
+            Arc::new(ok_runtime()) as Arc<dyn ContainerRuntime>,
+            Arc::clone(&state.source),
+            overrides,
+        );
+        state.remove = remove;
+        state
+    }
+
+    fn deploy_body_with_environment(
+        name: &str,
+        env: &str,
+        base: &str,
+        slug: Option<&str>,
+    ) -> serde_json::Value {
+        let mut body = deploy_body(name);
+        body["environment"] = serde_json::json!({
+            "env": env,
+            "base": base,
+            "slug": slug,
+        });
+        body
+    }
+
+    #[tokio::test]
+    async fn deploy_env_key_mismatch_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().times(0).returning(|_| Ok(None));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // environment { env:"test", base:"myapp" } expects key "myapp--test",
+        // but project.name is "myapp--prod" -> mismatch is rejected before
+        // the registry is ever consulted.
+        let body = deploy_body_with_environment("myapp--prod", "test", "myapp", None);
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("environment key"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn base_deploy_into_environment_key_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp")
+            .returning(|_| {
+                Ok(Some(project_with_environment(
+                    "myapp",
+                    Some(EnvironmentMeta {
+                        env: "test".into(),
+                        base: "myapp".into(),
+                        slug: None,
+                        ttl_secs: None,
+                        on_create: None,
+                    }),
+                )))
+            });
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // No `environment` block (a plain/base deploy) targeting a name
+        // already registered as an environment overlay -> conflict.
+        let body = deploy_body("myapp");
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("registered as an environment"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn env_deploy_into_base_key_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp--test")
+            .returning(|_| Ok(Some(project_with_environment("myapp--test", None))));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // `environment` block present and matching the key, but the key is
+        // already registered as a base project -> conflict.
+        let body = deploy_body_with_environment("myapp--test", "test", "myapp", None);
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("registered as a base project"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn env_deploy_hostname_equal_to_base_hostname_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        // The environment key itself isn't registered yet (fresh deploy).
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp--test")
+            .returning(|_| Ok(None));
+        // The base project is registered with the same hostname the
+        // environment deploy is trying to use.
+        let mut base_project = project_with_environment("myapp", None);
+        base_project.config.hostname = Some("app.example.com".into());
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp")
+            .returning(move |_| Ok(Some(base_project.clone())));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        let mut body = deploy_body_with_environment("myapp--test", "test", "myapp", None);
+        body["project"]["hostname"] = serde_json::json!("app.example.com");
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("hostname"), "got: {msg}");
+        assert!(msg.contains("myapp"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn base_name_with_double_dash_is_rejected_agent_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().times(0).returning(|_| Ok(None));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // No `environment` block, but the name uses the reserved '--'
+        // separator -> rejected agent-side, before the registry is consulted.
+        let body = deploy_body("my--app");
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("'--'"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn malformed_env_and_slug_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().times(0).returning(|_| Ok(None));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // env with "--": expected 400
+        let body = deploy_body_with_environment("myapp--branch", "te--st", "myapp", None);
+        let (status, json) = request(app.clone(), post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("environment.env"), "got: {msg}");
+
+        // slug with "--": expected 400
+        let body = deploy_body_with_environment(
+            "myapp--branch--sl--ug",
+            "branch",
+            "myapp",
+            Some("sl--ug"),
+        );
+        let (status, json) = request(app.clone(), post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("environment.slug"), "got: {msg}");
+
+        // slug with uppercase: expected 400
+        let body =
+            deploy_body_with_environment("myapp--branch--slug", "branch", "myapp", Some("SLUG"));
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("environment.slug"), "got: {msg}");
     }
 
     fn deploy_body(name: &str) -> serde_json::Value {
@@ -1737,6 +2179,124 @@ mod tests {
         let mut body = deploy_body("rateme");
         body["project"]["commands"] = serde_json::json!({ "x": [] });
         let (status, _) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_environments_returns_the_view_of_a_mocked_env_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        let proj = project_with_environment(
+            "myapp--test",
+            Some(EnvironmentMeta {
+                env: "test".into(),
+                base: "myapp".into(),
+                slug: Some("pr-42".into()),
+                ttl_secs: Some(3600),
+                on_create: None,
+            }),
+        );
+        projects
+            .expect_list_environments()
+            .withf(|base: &Option<&str>| base.is_none())
+            .times(1)
+            .returning(move |_| Ok(vec![proj.clone()]));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, get_req("/v1/environments")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json[0]["key"], "myapp--test");
+        assert_eq!(json[0]["base"], "myapp");
+        assert_eq!(json[0]["env"], "test");
+        assert_eq!(json[0]["slug"], "pr-42");
+        assert_eq!(json[0]["ttl_secs"], 3600);
+    }
+
+    #[tokio::test]
+    async fn list_environments_forwards_the_base_query_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_list_environments()
+            .withf(|base: &Option<&str>| *base == Some("myapp"))
+            .times(1)
+            .returning(|_| Ok(vec![]));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, get_req("/v1/environments?base=myapp")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn destroy_environment_on_base_key_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp")
+            .returning(|_| Ok(Some(project_with_environment("myapp", None))));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, delete_req("/v1/environments/myapp")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("base project"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn destroy_environment_missing_key_reports_already_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().returning(|_| Ok(None));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, delete_req("/v1/environments/ghost--test")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["key"], "ghost--test");
+        assert_eq!(json["already_absent"], true);
+    }
+
+    #[tokio::test]
+    async fn reset_environment_data_of_missing_key_is_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().returning(|_| Ok(None));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, _) = request(app, post_empty("/v1/environments/ghost--test/reset-data")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reset_environment_data_on_base_key_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp")
+            .returning(|_| Ok(Some(project_with_environment("myapp", None))));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, post_empty("/v1/environments/myapp/reset-data")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("base project"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn environment_routes_reject_invalid_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+
+        let (status, _) = request(app.clone(), delete_req("/v1/environments/UPPER")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = request(app, post_empty("/v1/environments/UPPER/reset-data")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

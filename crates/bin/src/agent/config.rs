@@ -30,6 +30,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub timeouts: TimeoutsSection,
     #[serde(default)]
+    pub environments: EnvironmentsSection,
+    #[serde(default)]
     pub gc: GcSection,
     #[serde(default)]
     pub logs: LogsSection,
@@ -44,6 +46,13 @@ pub struct TimeoutsSection {
     pub fetch: Option<String>,
     pub build: Option<String>,
     pub up: Option<String>,
+}
+
+/// [environments] in agent.toml (environment-overlays spec): TTL reaper tuning.
+#[derive(Debug, Default, Deserialize)]
+pub struct EnvironmentsSection {
+    /// Reaper tick interval ("1h", "30m", bare seconds). Default 1h.
+    pub reap_interval: Option<String>,
 }
 
 /// [gc] in agent.toml (§8.1).
@@ -149,6 +158,7 @@ impl AgentConfig {
             );
         }
         config.stage_timeouts()?;
+        config.reap_interval_secs()?;
         Ok(config)
     }
 
@@ -173,6 +183,23 @@ impl AgentConfig {
             t.up_secs = secs;
         }
         Ok(t)
+    }
+
+    /// Reaper tick interval in seconds (environment-overlays spec), parsed
+    /// with the same duration grammar as `[timeouts]`. Default 3600 (1h).
+    /// Must be greater than 0 to avoid panicking `tokio::time::interval`.
+    pub fn reap_interval_secs(&self) -> anyhow::Result<u64> {
+        match &self.environments.reap_interval {
+            Some(s) => {
+                let secs = parse_duration_secs(s)
+                    .map_err(|e| anyhow::anyhow!("agent.toml [environments].reap_interval: {e}"))?;
+                if secs == 0 {
+                    anyhow::bail!("[environments].reap_interval must be greater than 0");
+                }
+                Ok(secs)
+            }
+            None => Ok(3600),
+        }
     }
 
     pub fn load(path: Option<&Path>) -> anyhow::Result<AgentConfig> {
@@ -286,6 +313,42 @@ mod tests {
     fn rejects_future_schema() {
         let err = AgentConfig::parse("schema = 2").unwrap_err().to_string();
         assert!(err.contains("schema"), "got: {err}");
+    }
+
+    #[test]
+    fn reap_interval_secs_defaults_to_one_hour() {
+        let config = AgentConfig::parse("").unwrap();
+        assert_eq!(config.reap_interval_secs().unwrap(), 3600);
+    }
+
+    #[test]
+    fn reap_interval_secs_parses_environments_section() {
+        let config = AgentConfig::parse("[environments]\nreap_interval = \"5s\"").unwrap();
+        assert_eq!(config.reap_interval_secs().unwrap(), 5);
+    }
+
+    #[test]
+    fn reap_interval_secs_rejects_invalid_duration() {
+        let err = AgentConfig::parse("[environments]\nreap_interval = \"soon\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reap_interval"), "got: {err}");
+    }
+
+    #[test]
+    fn reap_interval_secs_rejects_zero() {
+        let err = AgentConfig::parse("[environments]\nreap_interval = \"0\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("greater than 0"), "got: {err}");
+    }
+
+    #[test]
+    fn reap_interval_secs_rejects_zero_seconds_suffix() {
+        let err = AgentConfig::parse("[environments]\nreap_interval = \"0s\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("greater than 0"), "got: {err}");
     }
 
     #[test]

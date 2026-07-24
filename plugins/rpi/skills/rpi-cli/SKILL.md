@@ -1,6 +1,6 @@
 ---
 name: rpi-cli
-description: Use when operating, installing, testing, or troubleshooting the rpi deploy CLI, including rpi deploy, rpi ls, rpi secrets send, rpi secrets ls, rpi command, rpi logs, rpi stats, rpi start/stop/restart/rm, rpi status, rpi doctor, rpi gc, rpi agent run, rpi setup, rpi init, rpi agent setup, rpi upgrade, rpi agent update, install.sh, SSH profiles, PI_SERVER, PI_AGENT_URL, local dev agents, and CLI-to-agent connection failures.
+description: Use when operating, installing, testing, or troubleshooting the rpi deploy CLI, including rpi deploy, rpi ls, rpi secrets send, rpi secrets ls, rpi command, rpi logs, rpi stats, rpi start/stop/restart/rm, rpi status, rpi doctor, rpi gc, rpi agent run, rpi setup, rpi init, rpi agent setup, rpi upgrade, rpi agent update, install.sh, SSH profiles, PI_SERVER, PI_AGENT_URL, local dev agents, CLI-to-agent connection failures, rpi config show, rpi env ls/destroy/reset-data, and --env/--vars environment overlays.
 ---
 
 # Rpi CLI
@@ -23,10 +23,15 @@ Primary references in this repo:
 | Deploy current project | `rpi deploy` |
 | Deploy a ref | `rpi deploy --ref <branch-tag-or-sha>` |
 | Cancel active deploys for current `rpi.toml` project | `rpi deploy --cancel` |
+| Deploy an environment overlay (`rpi.<env>.toml`) | `rpi deploy --env <env> [--vars KEY=VALUE]` |
+| Print the resolved config (base + overlay), no agent contact | `rpi config show [--env <env>] [--vars KEY=VALUE]` |
+| List environments (this project's, or `--all`) | `rpi env ls [--all]` |
+| Destroy an environment (stack, volumes, ingress, DNS, secrets, registry) | `rpi env destroy <env> [--vars ...] [--yes]` |
+| Remove an environment's volumes; next deploy re-runs `on_create` | `rpi env reset-data <env> [--vars ...] [--yes]` |
 | List projects | `rpi ls` or `rpi ps` |
-| Send secrets bundle (env + files) | `rpi secrets send` |
+| Send secrets bundle (env + files) | `rpi secrets send [--env <env>] [--vars ...]` |
 | Send secrets bundle and restart running stack | `rpi secrets send --apply` |
-| List stored secret keys | `rpi secrets ls` |
+| List stored secret keys | `rpi secrets ls [--env <env>] [--vars ...]` |
 | Stream container logs | `rpi logs <project> [-f] [--tail N]` |
 | Live CPU/memory/disk metrics | `rpi stats [project]` |
 | Start / stop / restart project containers | `rpi start\|stop\|restart <project>` |
@@ -37,6 +42,7 @@ Primary references in this repo:
 | List commands deployed on the agent | `rpi command` |
 | Run a deployed `[commands]` entry | `rpi command <name>` |
 | Run a deployed entry with extra args | `rpi command <name> -- <extra-args>` |
+| Run a command against an environment overlay | `rpi command <name> --env <env> [--vars ...]` |
 | Run foreground agent | `rpi agent run --config <agent.toml>` |
 | Agent status on the Pi | `rpi agent status` |
 | Agent logs on the Pi | `rpi agent logs [-f] [--since 2h]` |
@@ -84,6 +90,45 @@ rpi command create-invite -- --email x@y.com  # `--` separates extra args, appen
 - A 404 from an old agent that predates `[commands]` support surfaces as
   "agent does not support [commands]; update rpi-agent on the Pi" — update the
   agent binary and redeploy.
+
+## Environment Overlays
+
+`--env <name>` (with an optional repeatable `--vars KEY=VALUE`) deploys or
+operates a variant of the current project defined by an `rpi.<env>.toml`
+overlay next to `rpi.toml` — a shared `test` environment, or a per-branch
+preview keyed off `BRANCH_NAME`. Accepted by `rpi deploy`, `rpi command`,
+`rpi secrets send`, and `rpi secrets ls`; see the `rpi-toml` skill for the
+overlay file's schema, merge rules, and `${...}` interpolation.
+
+```bash
+rpi deploy --env test                              # static overlay: rpi.test.toml
+rpi deploy --env branch --vars BRANCH_NAME=feature/login  # parameterized overlay
+rpi config show --env branch --vars BRANCH_NAME=feature/login  # preview the merge, no agent contact
+```
+
+`rpi env` manages what a `--env` deploy already put on the agent:
+
+```bash
+rpi env ls                 # this project's environments (resolves ./rpi.toml for the base filter)
+rpi env ls --all           # every environment on the agent
+rpi env destroy test       # tears down stack, volumes, ingress, DNS, secrets, and the registry entry
+rpi env reset-data test    # drops volumes only; next `rpi deploy --env test` re-runs on_create
+```
+
+- `rpi env destroy`/`reset-data` resolve the local overlay to compute the
+  target key (same validation as `rpi deploy --env`), then prompt for that
+  key to be typed back for confirmation unless `--yes` is passed.
+- `rpi env destroy` is idempotent — a key that no longer exists reports
+  "already absent" instead of erroring.
+- These commands require an agent that advertises the `environments`
+  feature (agent `>= 0.24.0`); an older agent gets an upgrade message
+  instead of a raw connection error.
+- An environment's `[environment].ttl` (set in its overlay) is enforced
+  agent-side by a background reaper, not by the CLI: the agent sweeps every
+  environment on a timer (`[environments].reap_interval` in `agent.toml`,
+  duration format, default one hour) and tears down any whose TTL has
+  elapsed since its last successful deploy. See
+  `docs/architecture/flows/environments.md` for the full flow.
 
 ## Client Profile
 

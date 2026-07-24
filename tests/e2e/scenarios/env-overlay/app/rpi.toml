@@ -1,0 +1,27 @@
+schema = 1
+
+[project]
+name = "e2e-fixture"
+
+[source]
+repo = "git://git-fixture/fixture.git"
+branch = "main"
+
+[build]
+compose = "compose.yaml"
+
+[ingress]
+service = "web"
+port = 8080
+
+[healthcheck]
+path = "/health"
+expect = "200"
+timeout = "30s"
+
+[commands]
+# Referenced by app/rpi.test.toml's [environment].on_create. An overlay's own
+# [commands] table (if it declared one) would replace this wholesale, so
+# on_create must resolve against the MERGED set -- since rpi.test.toml here
+# declares no [commands] at all, this base declaration is what on_create sees.
+seed = "sh -c 'test ! -f /data/seeded && date > /data/seeded'"

@@ -2278,6 +2278,7 @@ dependencies = [
  "pi-domain",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]

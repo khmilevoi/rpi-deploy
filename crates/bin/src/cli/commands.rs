@@ -6,7 +6,7 @@ use base64::Engine as _;
 use crate::cli::api::{ApiClient, DeployStreamEvent};
 use crate::cli::config::ConnectOpts;
 use crate::cli::connect::AgentConn;
-use crate::cli::rpitoml::{RpiToml, SecretsSection};
+use crate::cli::rpitoml::SecretsSection;
 use crate::cli::ssh::SshExec;
 use crate::cli::tunnel::SshTunnel;
 use crate::duration::parse_duration_secs;
@@ -16,9 +16,13 @@ use crate::proto::{DeployRequest, DiagnosticCheckDto};
 pub async fn deploy(
     git_ref: Option<String>,
     no_gh_key: bool,
+    env: Option<String>,
+    vars: Vec<String>,
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let rpitoml = resolved.rpitoml;
+    let env_selection = resolved.env;
     let project = rpitoml.to_project_config();
     output::show_deploy_banner(&rpitoml.project.name);
 
@@ -32,6 +36,10 @@ pub async fn deploy(
         compat.agent_version(),
         compat.agent_api()
     ));
+
+    if env_selection.is_some() {
+        compat.gate(crate::compat::Feature::Environments)?;
+    }
 
     if compat.gate(crate::compat::Feature::SourceCheck)? {
         crate::cli::sourcekey::preflight(
@@ -47,6 +55,15 @@ pub async fn deploy(
     let req = DeployRequest {
         project: (&project).into(),
         git_ref,
+        environment: env_selection
+            .as_ref()
+            .map(|s| crate::proto::EnvironmentDto {
+                env: s.env.clone(),
+                base: s.base.clone(),
+                slug: s.slug.clone(),
+                ttl_secs: s.ttl_secs,
+                on_create: s.on_create.clone(),
+            }),
     };
     let started = std::time::Instant::now();
     let accepted = api.deploy(&req).await?;
@@ -118,8 +135,13 @@ pub async fn deploy(
     Ok(())
 }
 
-pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+pub async fn deploy_cancel(
+    env: Option<String>,
+    vars: Vec<String>,
+    connect: ConnectOpts,
+) -> anyhow::Result<()> {
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
 
     let AgentConn {
@@ -158,8 +180,15 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn secrets_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+pub async fn secrets_send(
+    apply: bool,
+    env: Option<String>,
+    vars: Vec<String>,
+    connect: ConnectOpts,
+) -> anyhow::Result<()> {
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let is_env = resolved.env.is_some();
+    let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
     let (vars, files) = collect_secrets(Path::new("."), &rpitoml.secrets)?;
     if vars.is_empty() && files.is_empty() {
@@ -172,6 +201,9 @@ pub async fn secrets_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<(
         compat,
     } = crate::cli::connect::connect_agent(connect).await?;
     compat.gate(crate::compat::Feature::Secrets)?;
+    if is_env {
+        compat.gate(crate::compat::Feature::Environments)?;
+    }
 
     let (n, m) = (vars.len(), files.len());
     let resp = api.send_secrets(&project_name, vars, files, apply).await?;
@@ -278,8 +310,14 @@ pub async fn gc(connect: ConnectOpts) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn secrets_ls(connect: ConnectOpts) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+pub async fn secrets_ls(
+    env: Option<String>,
+    vars: Vec<String>,
+    connect: ConnectOpts,
+) -> anyhow::Result<()> {
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let is_env = resolved.env.is_some();
+    let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
 
     let AgentConn {
@@ -288,6 +326,9 @@ pub async fn secrets_ls(connect: ConnectOpts) -> anyhow::Result<()> {
         compat,
     } = crate::cli::connect::connect_agent(connect).await?;
     compat.gate(crate::compat::Feature::Secrets)?;
+    if is_env {
+        compat.gate(crate::compat::Feature::Environments)?;
+    }
 
     let resp = api.list_secrets(&project_name).await?;
     if resp.keys.is_empty() && resp.files.is_empty() {
@@ -461,9 +502,13 @@ pub async fn command(
     name: Option<String>,
     args: Vec<String>,
     full: bool,
+    env: Option<String>,
+    vars: Vec<String>,
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let is_env = resolved.env.is_some();
+    let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
 
     let AgentConn {
@@ -472,6 +517,9 @@ pub async fn command(
         compat,
     } = crate::cli::connect::connect_agent(connect).await?;
     compat.gate(crate::compat::Feature::Commands)?;
+    if is_env {
+        compat.gate(crate::compat::Feature::Environments)?;
+    }
 
     let Some(name) = name else {
         // List mode: the agent's answer is the deployed reality; the local
@@ -557,7 +605,8 @@ pub async fn rm(
     ));
     if let Some(hostname) = resp.hostname {
         output::note(format!(
-            "the DNS record for {hostname} may still exist; delete it manually: Cloudflare dashboard -> your zone -> DNS -> remove the {hostname} CNAME"
+            "if the agent has Cloudflare ingress enabled, the DNS record for {hostname} was removed; \
+             otherwise delete it manually in the Cloudflare dashboard"
         ));
     }
     Ok(())
@@ -811,6 +860,15 @@ pub(crate) fn human_duration(secs: u64) -> String {
 /// final summary so it cannot scroll away with the stream.
 fn deploy_warning(line: &str) -> Option<&str> {
     line.strip_prefix("warning: ")
+}
+
+/// `rpi config show`: resolve `./rpi.toml` (+ `./rpi.<env>.toml` overlay when
+/// `--env` is given) and print the merged configuration as TOML. Local-only
+/// — no agent connection.
+pub async fn config_show(env: Option<String>, vars: Vec<String>) -> anyhow::Result<()> {
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    print!("{}", crate::cli::overlay::render_resolved(&resolved)?);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 pub mod command;
 pub mod deploy;
 pub mod diagnostics;
+pub mod environments;
 pub mod gc;
 pub mod lifecycle;
 pub mod list;
