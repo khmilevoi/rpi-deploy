@@ -50,6 +50,7 @@
 - **Version-skew aware** — the CLI and agent handshake on `connect`, gate commands against advertised agent features, and print a banner instead of a confusing error when they're out of sync.
 - **Fast install** — `npm install -g rpi-deploy` downloads a checksum-verified prebuilt binary (Windows x64, Linux x64/aarch64) in seconds, falling back to a source build elsewhere. A no-npm `install.sh` one-liner bootstraps binary-only hosts.
 - **Client-triggered updates** — `rpi upgrade` brings the board's agent up to your CLI's version over the existing SSH + sudo path (download → SHA-256 verify → atomic swap → restart), no manual SSH session required.
+- **Environment overlays** — `rpi deploy --env <name>` deploys a project's shared `test` environment or an ephemeral per-branch preview from an `rpi.<env>.toml` overlay next to the base `rpi.toml`, with its own hostname, an optional TTL that self-destructs it, and a one-time `on_create` hook; `rpi env ls/destroy/reset-data` manage the deployed set.
 
 ## Quick Start
 
@@ -85,7 +86,7 @@ That's it — `rpi ls` shows the project, its host port, and its public hostname
 
 | Command | Description |
 |---|---|
-| `rpi deploy [--ref <git-ref>] [--no-gh-key]` | Deploy the current project (reads `./rpi.toml`) |
+| `rpi deploy [--ref <git-ref>] [--no-gh-key] [--env <name> --vars K=V]` | Deploy the current project (reads `./rpi.toml`), or an environment overlay with `--env` |
 | `rpi deploy --cancel` | Cancel active deploys of the current project |
 | `rpi ls` (alias: `rpi ps`) | List projects on the agent |
 | `rpi logs <project> [-f] [--tail N]` | Stream container logs |
@@ -95,9 +96,13 @@ That's it — `rpi ls` shows the project, its host port, and its public hostname
 | `rpi status [--json]` | Agent and host overview |
 | `rpi doctor` | Environment self-diagnosis |
 | `rpi gc` | Prune Docker images and build cache on the Pi |
-| `rpi command [name] [-- <args>]` | Run a `[commands]` entry in the service container; no name lists them |
-| `rpi secrets send [--apply]` | Send the env file and secret files (encrypted at rest) |
-| `rpi secrets ls` | List stored env keys and file paths (values are never transmitted) |
+| `rpi command [name] [-- <args>] [--env <name> --vars K=V]` | Run a `[commands]` entry in the service container; no name lists them |
+| `rpi secrets send [--apply] [--env <name> --vars K=V]` | Send the env file and secret files (encrypted at rest) |
+| `rpi secrets ls [--env <name> --vars K=V]` | List stored env keys and file paths (values are never transmitted) |
+| `rpi config show [--env <name> --vars K=V]` | Print the resolved `rpi.toml`, overlay merged in, without contacting the agent |
+| `rpi env ls [--all]` | List deployed environments for this project, or every environment with `--all` |
+| `rpi env destroy <name> [--vars K=V] [--yes]` | Tear down an environment: stack, volumes, ingress route, DNS, secrets, registry row |
+| `rpi env reset-data <name> [--vars K=V] [--yes]` | Wipe an environment's containers and volumes; the next deploy re-runs `on_create` |
 | `rpi setup` | Wizard: server profile + SSH key + client config |
 | `rpi init` | Wizard: generate `rpi.toml` in the current project |
 | `rpi agent setup` | Bootstrap the agent on the Pi (run with `sudo`; idempotent) |
@@ -313,6 +318,30 @@ service = "server"                    # optional; omitted => ingress service
 - Commands are registered on the agent **at deploy time** and run via `docker compose exec -T` in the `ingress.service` container by default. The agent only executes deployed commands — there is no generic remote exec.
 - `rpi command` (no name) lists the deployed commands; extra args after `--` are appended to the declared argv. The remote exit code becomes the `rpi` exit code. Ctrl+C detaches and best-effort kills the run.
 - The live pane shows only the last 10 lines while streaming; on success only that tail stays on screen. Pass `--full` to also dump the complete captured output after it finishes. On failure the full output is always dumped.
+
+## Environments
+
+An overlay file `rpi.<env>.toml` next to `rpi.toml` deploys the same project under a distinct key — a shared `test` environment, or an ephemeral per-branch preview — without duplicating the whole config:
+
+```toml
+# rpi.preview.toml
+[ingress]
+hostname = "${RPI_ENV_SLUG}.preview.example.com"
+
+[environment]
+ttl = "72h"                 # optional; the reaper destroys it once expired
+on_create = "migrate"       # optional; runs once, after the first successful health check
+```
+
+```bash
+rpi deploy --env preview --vars BRANCH_NAME=feature/login
+```
+
+- Only `source.branch` and `ingress.hostname` may reference `${BRANCH_NAME}`/`${RPI_ENV_SLUG}` (the branch name lower-cased, sanitized to `[a-z0-9-]`, truncated to 30 chars); an overlay that doesn't reference either rejects `--vars`, and one that does requires it.
+- The overlay merges onto the base field by field — scalars replace, tables merge key by key, `[commands]` and array fields replace wholesale, and an explicit `""` resets a field to unset. The deployed project key becomes `<base>--<env>` (or `<base>--<env>--<slug>` when `${RPI_ENV_SLUG}` was substituted), and its hostname must differ from the base project's.
+- `rpi config show --env preview --vars BRANCH_NAME=feature/login` prints the fully resolved config without touching the agent — the way to check what a deploy would actually send.
+- With no TTL, an environment lives until `rpi env destroy` removes it. With one, the agent's reaper tears it down on its own once it's past due (`agent.toml`'s `[environments] reap_interval`, default 1h) — as long as it isn't mid-deploy.
+- `on_create` runs exactly once per environment key, after the first successful health check; `rpi env reset-data` clears the flag so the next deploy re-runs it against a clean database.
 
 ## Docker Compose Requirements
 
