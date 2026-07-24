@@ -55,6 +55,19 @@ run_capture() {
   [[ $status -eq 0 ]] || fail "$file command exited with $status"
 }
 
+# expect_fail <artifact-file> <cmd...> — run, tee output into the artifact,
+# fail the scenario when the command unexpectedly exits ZERO. The negative
+# counterpart to run_capture: assert_log then checks the error text.
+expect_fail() {
+  local file=$1
+  shift
+  set +e
+  "$@" 2>&1 | tee "$ARTIFACTS/$file"
+  local status=${PIPESTATUS[0]}
+  set -e
+  [[ $status -ne 0 ]] || fail "$file command unexpectedly succeeded"
+}
+
 # assert_log <artifact-file> <text> — literal substring match.
 assert_log() {
   local file=$1

@@ -1,0 +1,4 @@
+[environment]
+# 'ghost' is not declared in the merged [commands]: resolution must fail
+# locally, before any agent contact.
+on_create = "ghost"

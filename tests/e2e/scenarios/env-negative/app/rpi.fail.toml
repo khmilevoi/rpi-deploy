@@ -1,0 +1,2 @@
+[environment]
+on_create = "boom"

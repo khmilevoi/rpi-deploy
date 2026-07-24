@@ -1,0 +1,27 @@
+schema = 1
+
+[project]
+name = "e2e-fixture"
+
+[source]
+repo = "git://git-fixture/fixture.git"
+branch = "main"
+
+[build]
+compose = "compose.yaml"
+
+[ingress]
+service = "web"
+port = 8080
+
+[healthcheck]
+path = "/health"
+expect = "200"
+timeout = "30s"
+
+[commands]
+# Referenced by rpi.fail.toml's [environment].on_create. Starts broken (exit
+# 1) so the first `rpi deploy --env fail` fails at the on_create stage; the
+# scenario then rewrites this line to a passing command and redeploys to
+# prove on_create_done stayed false and the stage is retried.
+boom = "sh -c 'exit 1'"

@@ -1,0 +1,3 @@
+# Deliberately empty: inherits everything from the base file and sets no
+# [environment].ttl -- the reaper must never touch this environment,
+# regardless of age.
