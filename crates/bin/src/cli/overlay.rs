@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cli::rpitoml::{CommandValue, RpiToml};
 
@@ -539,27 +539,27 @@ pub fn render_resolved(r: &Resolved) -> anyhow::Result<String> {
     let mut text = toml::to_string_pretty(&r.rpitoml)?;
     if let Some(env) = &r.env {
         text.push_str("\n[environment]\n");
-        text.push_str(&format!("env = {}\n", toml_str(&env.env)));
-        text.push_str(&format!("base = {}\n", toml_str(&env.base)));
-        if let Some(slug) = &env.slug {
-            text.push_str(&format!("slug = {}\n", toml_str(slug)));
-        }
-        if let Some(ttl) = env.ttl_secs {
-            text.push_str(&format!("ttl_secs = {ttl}\n"));
-        }
-        if let Some(cmd) = &env.on_create {
-            text.push_str(&format!("on_create = {}\n", toml_str(cmd)));
-        }
+        text.push_str(&toml::to_string(&EnvironmentRender {
+            env: &env.env,
+            base: &env.base,
+            slug: env.slug.as_deref(),
+            ttl_secs: env.ttl_secs,
+            on_create: env.on_create.as_deref(),
+        })?);
     }
     Ok(text)
 }
 
-/// TOML basic-string escaping for the synthetic `[environment]` fields we
-/// hand-render above (Rust's `{:?}` shares JSON-style escaping with TOML for
-/// our charset — env/base/slug/on_create are plain identifiers or shell text
-/// without control characters).
-fn toml_str(s: &str) -> String {
-    format!("{:?}", s)
+#[derive(Serialize)]
+struct EnvironmentRender<'a> {
+    env: &'a str,
+    base: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slug: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_create: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -979,5 +979,23 @@ seed = "node seed.js"
         assert!(text.contains("on_create = \"seed\""));
         // resolved output must round-trip as valid TOML
         toml::from_str::<toml::Value>(&text).unwrap();
+    }
+
+    #[test]
+    fn render_resolved_escapes_control_characters_as_valid_toml() {
+        // Verify that EnvironmentRender serialization produces valid TOML
+        // even when fields contain control characters.
+        let render = EnvironmentRender {
+            env: "test",
+            base: "my\u{0007}app", // bell character (control char)
+            slug: None,
+            ttl_secs: None,
+            on_create: None,
+        };
+        let text = toml::to_string(&render).unwrap();
+        // The serialized output must parse as valid TOML
+        let parsed = toml::from_str::<toml::Value>(&text).unwrap();
+        // Verify the control character was preserved in round-trip
+        assert_eq!(parsed["base"].as_str().unwrap(), "my\u{0007}app");
     }
 }
