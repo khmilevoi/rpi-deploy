@@ -1,0 +1,13 @@
+services:
+  web:
+    build: .
+    expose:
+      - "8080"
+    # Named volume, isolated per Compose project (i.e. per environment key):
+    # reset-data downs this stack with -v, which drops it, and on_create
+    # re-seeds a fresh /data/seeded on the next deploy of that key.
+    volumes:
+      - data:/data
+
+volumes:
+  data:
