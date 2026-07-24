@@ -68,6 +68,27 @@ pub async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     if swept > 0 {
         tracing::warn!("marked {swept} unfinished deployment(s) as interrupted (agent restart)");
     }
+
+    let reap_secs = config.reap_interval_secs()?;
+    {
+        let reaper = pi_application::environments::ReapEnvironments::new(
+            Arc::clone(&state.projects),
+            Arc::clone(&state.history),
+            Arc::clone(&state.destroy_env),
+            pi_infrastructure::sys::SystemClock::new(),
+        );
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(reap_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(err) = reaper.execute().await {
+                    tracing::warn!("environment reaper sweep failed: {err}");
+                }
+            }
+        });
+    }
+
     let app = router(state);
 
     // windows
