@@ -25,6 +25,71 @@ pub fn validate_env_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
+const MAX_SLUG_LEN: usize = 30;
+
+fn is_valid_var_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('A'..='Z'))
+        && chars.all(|c| matches!(c, 'A'..='Z' | '0'..='9' | '_'))
+}
+
+#[allow(dead_code)]
+pub fn parse_vars(pairs: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut vars = BTreeMap::new();
+    for pair in pairs {
+        let Some((key, value)) = pair.split_once('=') else {
+            anyhow::bail!("--vars expects KEY=VALUE, got '{pair}'");
+        };
+        if !is_valid_var_name(key) {
+            anyhow::bail!("--vars: variable name '{key}' must match ^[A-Z][A-Z0-9_]*$");
+        }
+        if key.starts_with("RPI_") {
+            anyhow::bail!(
+                "--vars: the RPI_ prefix is reserved for rpi-provided variables ('{key}')"
+            );
+        }
+        if key != "BRANCH_NAME" {
+            anyhow::bail!(
+                "--vars: unknown variable '{key}' (this version supports only BRANCH_NAME)"
+            );
+        }
+        if vars.insert(key.to_string(), value.to_string()).is_some() {
+            anyhow::bail!("--vars: duplicate variable '{key}'");
+        }
+    }
+    Ok(vars)
+}
+
+#[allow(dead_code)]
+pub fn derive_slug(branch: &str) -> anyhow::Result<String> {
+    let mut slug = String::new();
+    for c in branch.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            slug.push(c);
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.truncate(MAX_SLUG_LEN);
+    let slug = slug.trim_end_matches('-').to_string();
+    if slug.is_empty() {
+        anyhow::bail!(
+            "cannot derive RPI_ENV_SLUG from BRANCH_NAME '{branch}' (no [a-z0-9] characters)"
+        );
+    }
+    Ok(slug)
+}
+
+#[allow(dead_code)]
+pub fn derive_key(base: &str, env: &str, slug: Option<&str>) -> String {
+    match slug {
+        Some(slug) => format!("{base}--{env}--{slug}"),
+        None => format!("{base}--{env}"),
+    }
+}
+
 /// Overlay file `rpi.<env>.toml`: every field optional; unknown fields are
 /// errors (stricter than the base file); `schema`/`[project]` forbidden.
 #[allow(dead_code)]
@@ -181,5 +246,45 @@ mod tests {
             let err = validate_env_name(reserved).unwrap_err().to_string();
             assert!(err.contains("reserved"), "{reserved}: {err}");
         }
+    }
+
+    #[test]
+    fn parse_vars_accepts_branch_name_only() {
+        let vars = parse_vars(&["BRANCH_NAME=feature/login".into()]).unwrap();
+        assert_eq!(vars["BRANCH_NAME"], "feature/login");
+        assert!(parse_vars(&[]).unwrap().is_empty());
+        for (bad, needle) in [
+            ("BRANCH_NAME", "KEY=VALUE"),      // no '='
+            ("branch=x", "^[A-Z][A-Z0-9_]*$"), // lowercase name
+            ("RPI_ENV_SLUG=x", "reserved"),    // RPI_ namespace
+            ("FOO=x", "BRANCH_NAME"),          // unknown var in v1
+        ] {
+            let err = parse_vars(&[bad.to_string()]).unwrap_err().to_string();
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
+        let err = parse_vars(&["BRANCH_NAME=a".into(), "BRANCH_NAME=b".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn slug_normalizes_truncates_and_rejects_empty() {
+        assert_eq!(derive_slug("feature/login").unwrap(), "feature-login");
+        assert_eq!(derive_slug("Feature//Big__X").unwrap(), "feature-big-x");
+        assert_eq!(derive_slug("-x-").unwrap(), "x");
+        let long = derive_slug("abcdefghij-abcdefghij-abcdefghij-tail").unwrap();
+        assert!(long.len() <= 30, "got len {}: {long}", long.len());
+        assert!(!long.ends_with('-'));
+        assert!(derive_slug("///").is_err());
+    }
+
+    #[test]
+    fn key_derivation() {
+        assert_eq!(derive_key("myapp", "test", None), "myapp--test");
+        assert_eq!(
+            derive_key("myapp", "branch", Some("feature-login")),
+            "myapp--branch--feature-login"
+        );
     }
 }
