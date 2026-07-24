@@ -397,7 +397,9 @@ impl DeployProject {
                     .service
                     .clone()
                     .unwrap_or_else(|| config.service.clone());
-                let secs = config.command_timeout_secs.unwrap_or(600);
+                let secs = config
+                    .command_timeout_secs
+                    .unwrap_or(crate::command::DEFAULT_COMMAND_TIMEOUT_SECS);
                 let argv = spec.argv.clone();
                 tracked(
                     &log,

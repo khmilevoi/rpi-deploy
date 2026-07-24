@@ -203,6 +203,32 @@ impl ReapEnvironments {
                     continue;
                 }
             }
+            // TOCTOU guard: the listing above and the active-deploy check
+            // just did can both be stale by the time we get here — a
+            // redeploy that started and finished successfully in between
+            // would refresh `last_success_at` without ever showing up as
+            // "active" at the instant we checked. Re-fetch the row fresh
+            // and recompute expiry from it before actually destroying
+            // anything; a stale anchor here would tear down an environment
+            // that was just redeployed.
+            let fresh = match self.projects.get(&key).await {
+                Ok(Some(p)) => p,
+                Ok(None) => continue, // already gone
+                Err(err) => {
+                    tracing::warn!("reaper: cannot re-check {key}: {err}");
+                    continue;
+                }
+            };
+            let Some(fresh_meta) = &fresh.config.environment else {
+                continue;
+            };
+            let Some(fresh_ttl) = fresh_meta.ttl_secs else {
+                continue;
+            };
+            let fresh_anchor = fresh.last_success_at.unwrap_or(fresh.created_at);
+            if fresh_anchor.saturating_add(i64::try_from(fresh_ttl).unwrap_or(i64::MAX)) > now {
+                continue; // redeployed while we were sweeping
+            }
             match self.destroy.execute(&key, Arc::new(ReaperSink)).await {
                 Ok(_) => {
                     tracing::info!(
@@ -852,6 +878,56 @@ mod tests {
         assert!(
             destroyed.is_empty(),
             "huge ttl environment must not be destroyed"
+        );
+    }
+
+    /// TOCTOU guard (I4): the listing snapshot says the environment expired,
+    /// but a fresh re-fetch right before destroying shows it was redeployed
+    /// (recent `last_success_at`) while the sweep was in progress — the
+    /// stale anchor from the listing must not be used to destroy it.
+    #[tokio::test]
+    async fn reaper_skips_environment_whose_fresh_recheck_shows_recent_deploy() {
+        let now: i64 = 1_000_000;
+        let key = "myapp--fresh";
+        // Listing snapshot: ttl 100, last_success_at now-200 -> looks expired.
+        let stale_listed = reaper_project(key, Some(100), Some(now - 200), now - 500);
+        // Fresh re-fetch: redeployed mid-sweep, last_success_at now-10 -> no
+        // longer expired.
+        let fresh = reaper_project(key, Some(100), Some(now - 10), now - 500);
+
+        let mut projects = MockProjectRepository::new();
+        let listed = vec![stale_listed];
+        projects
+            .expect_list_environments()
+            .times(1)
+            .returning(move |_| Ok(listed.clone()));
+        projects
+            .expect_get()
+            .withf(move |k| k == key)
+            .times(1)
+            .returning(move |_| Ok(Some(fresh.clone())));
+        // Destroy must never be reached: the fresh re-check finds it no
+        // longer expired.
+        projects.expect_remove().times(0);
+        let projects: Arc<dyn ProjectRepository> = Arc::new(projects);
+
+        let mut history = MockDeploymentHistory::new();
+        history.expect_active().times(1).returning(|_| Ok(vec![]));
+        let history: Arc<dyn DeploymentHistory> = Arc::new(history);
+
+        let remove = untouched_remove(Arc::clone(&projects));
+        let destroy = DestroyEnvironment::new(Arc::clone(&projects), remove);
+
+        let reaper = ReapEnvironments::new(
+            Arc::clone(&projects),
+            Arc::clone(&history),
+            destroy,
+            fixed_clock(now),
+        );
+        let destroyed = reaper.execute().await.unwrap();
+        assert!(
+            destroyed.is_empty(),
+            "environment redeployed mid-sweep must not be destroyed: {destroyed:?}"
         );
     }
 }

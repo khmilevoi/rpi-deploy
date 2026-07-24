@@ -395,13 +395,16 @@ pub fn apply_overlay(base: &mut RpiToml, overlay: RpiTomlOverlay) {
 }
 
 /// The environment an overlay resolution selected, plus everything derived
-/// from it that the deploy path (and later `rpi env`) needs.
+/// from it that the deploy path needs. The derived key itself lives on
+/// `Resolved::rpitoml.project.name` (set by `resolve_from` before this is
+/// built), so it is not duplicated here — `rpi env destroy`/`reset-data`
+/// compute the key directly via `derive_key` instead of going through a
+/// full overlay resolution (see `envcmds::resolve_key`).
 #[derive(Debug)]
 pub struct EnvSelection {
     pub env: String,
     pub base: String,
     pub slug: Option<String>,
-    pub key: String,
     pub ttl_secs: Option<u64>,
     pub on_create: Option<String>,
 }
@@ -494,11 +497,25 @@ pub fn resolve_from(
 
     let environment = overlay.environment.take();
     let base_name = base.project.name.clone();
+    let base_hostname = base.ingress.hostname.clone();
     apply_overlay(&mut base, overlay);
     let key = derive_key(&base_name, env_name, slug.as_deref());
     base.project.name = key.clone();
     base.validate_common()
         .map_err(|e| anyhow::anyhow!("{file}: merged configuration is invalid: {e}"))?;
+
+    // Production-key protection (hostname edition): an environment that
+    // silently inherits the base project's hostname would hijack its route
+    // the moment it deploys successfully (ingress upserts the same hostname
+    // to the environment's host port). The overlay must override or clear
+    // (`hostname = ""`) a hostname the base sets.
+    if let (Some(base_h), Some(merged_h)) = (&base_hostname, &base.ingress.hostname) {
+        if base_h == merged_h {
+            anyhow::bail!(
+                "{file}: [ingress].hostname equals the base hostname '{base_h}' - an environment must override it or clear it (hostname = \"\")"
+            );
+        }
+    }
 
     let ttl_secs = match environment.as_ref().and_then(|e| e.ttl.as_deref()) {
         Some(ttl) => Some(
@@ -523,7 +540,6 @@ pub fn resolve_from(
             env: env_name.to_string(),
             base: base_name,
             slug,
-            key,
             ttl_secs,
             on_create,
         }),
@@ -861,14 +877,13 @@ seed = "node seed.js"
             BASE,
             Some((
                 "test",
-                "[source]\nbranch = \"develop\"\n\n[environment]\nttl = \"7d\"\non_create = \"seed\"\n",
+                "[source]\nbranch = \"develop\"\n\n[ingress]\nhostname = \"test.example.com\"\n\n[environment]\nttl = \"7d\"\non_create = \"seed\"\n",
             )),
             &[],
         )
         .unwrap();
         assert_eq!(r.rpitoml.project.name, "myapp--test");
         let env = r.env.unwrap();
-        assert_eq!(env.key, "myapp--test");
         assert_eq!(env.base, "myapp");
         assert_eq!(env.slug, None);
         assert_eq!(env.ttl_secs, Some(7 * 24 * 3600));
@@ -918,10 +933,32 @@ seed = "node seed.js"
     }
 
     #[test]
+    fn raw_branch_name_in_hostname_is_rejected_as_invalid_dns() {
+        // The slash in a raw BRANCH_NAME like "feature/login" makes an
+        // invalid DNS label once substituted directly into the hostname;
+        // ${RPI_ENV_SLUG} (not ${BRANCH_NAME}) is the sanitized variable
+        // meant for this field.
+        let err = resolve_from(
+            BASE,
+            Some((
+                "branch",
+                "[ingress]\nhostname = \"${BRANCH_NAME}.preview.example.com\"\n",
+            )),
+            &["BRANCH_NAME=feature/login".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("hostname"), "got: {err}");
+    }
+
+    #[test]
     fn on_create_must_reference_a_merged_command() {
         let err = resolve_from(
             BASE,
-            Some(("test", "[environment]\non_create = \"nope\"\n")),
+            Some((
+                "test",
+                "[ingress]\nhostname = \"test.example.com\"\n\n[environment]\non_create = \"nope\"\n",
+            )),
             &[],
         )
         .unwrap_err()
@@ -932,7 +969,7 @@ seed = "node seed.js"
             BASE,
             Some((
                 "test",
-                "[commands]\nother = \"run x\"\n\n[environment]\non_create = \"seed\"\n",
+                "[ingress]\nhostname = \"test.example.com\"\n\n[commands]\nother = \"run x\"\n\n[environment]\non_create = \"seed\"\n",
             )),
             &[],
         )
@@ -953,11 +990,79 @@ seed = "node seed.js"
         assert!(err.contains("expose"), "got: {err}");
     }
 
+    // BASE's [ingress].hostname is "app.example.com" (see the BASE const above).
+
+    #[test]
+    fn overlay_inheriting_base_hostname_is_rejected() {
+        // Minimal overlay with no [ingress] at all -> the merged hostname is
+        // still the base's, which would hijack the production route.
+        let err = resolve_from(
+            BASE,
+            Some(("test", "[source]\nbranch = \"develop\"\n")),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("hostname"), "got: {err}");
+        assert!(err.contains("app.example.com"), "got: {err}");
+    }
+
+    #[test]
+    fn overlay_explicitly_repeating_base_hostname_is_also_rejected() {
+        let err = resolve_from(
+            BASE,
+            Some(("test", "[ingress]\nhostname = \"app.example.com\"\n")),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("hostname"), "got: {err}");
+    }
+
+    #[test]
+    fn overlay_overriding_hostname_is_ok() {
+        let r = resolve_from(
+            BASE,
+            Some(("test", "[ingress]\nhostname = \"test.example.com\"\n")),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            r.rpitoml.ingress.hostname.as_deref(),
+            Some("test.example.com")
+        );
+    }
+
+    #[test]
+    fn overlay_clearing_hostname_is_ok() {
+        let r = resolve_from(BASE, Some(("test", "[ingress]\nhostname = \"\"\n")), &[]).unwrap();
+        assert_eq!(r.rpitoml.ingress.hostname, None);
+    }
+
+    #[test]
+    fn overlay_is_ok_when_base_has_no_hostname() {
+        let base_no_hostname = BASE.replace("hostname = \"app.example.com\"\n", "");
+        let r = resolve_from(
+            &base_no_hostname,
+            Some(("test", "[source]\nbranch = \"develop\"\n")),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(r.rpitoml.ingress.hostname, None);
+    }
+
     #[test]
     fn bad_ttl_is_rejected() {
-        let err = resolve_from(BASE, Some(("test", "[environment]\nttl = \"soon\"\n")), &[])
-            .unwrap_err()
-            .to_string();
+        let err = resolve_from(
+            BASE,
+            Some((
+                "test",
+                "[ingress]\nhostname = \"test.example.com\"\n\n[environment]\nttl = \"soon\"\n",
+            )),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("ttl"), "got: {err}");
     }
 
@@ -965,7 +1070,7 @@ seed = "node seed.js"
     fn render_resolved_prints_toml_with_key_and_environment() {
         let r = resolve_from(
             BASE,
-            Some(("test", "[source]\nbranch = \"develop\"\n\n[environment]\nttl = \"7d\"\non_create = \"seed\"\n")),
+            Some(("test", "[source]\nbranch = \"develop\"\n\n[ingress]\nhostname = \"test.example.com\"\n\n[environment]\nttl = \"7d\"\non_create = \"seed\"\n")),
             &[],
         )
         .unwrap();

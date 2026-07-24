@@ -191,6 +191,32 @@ fn command_spec(name: &str, value: &CommandValue) -> anyhow::Result<CommandSpec>
     Ok(CommandSpec { argv, service })
 }
 
+/// RFC-1123-style hostname check: total length, per-label length/charset,
+/// no leading/trailing '-' per label. Runs post-substitution (base file and
+/// merged overlay result alike), so a parameterized `${BRANCH_NAME}` value
+/// containing `/` or other illegal characters is caught here rather than
+/// silently producing an unroutable ingress rule.
+fn validate_hostname(hostname: &str) -> Result<(), String> {
+    if hostname.is_empty() || hostname.len() > 253 {
+        return Err(format!(
+            "invalid [ingress].hostname '{hostname}' (not a valid DNS hostname)"
+        ));
+    }
+    for label in hostname.split('.') {
+        let ok = !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if !ok {
+            return Err(format!(
+                "invalid [ingress].hostname '{hostname}' (not a valid DNS hostname)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_expect(expect: &str) -> Result<(), String> {
     let ok = matches!(expect, "2xx" | "3xx")
         || (expect.len() == 3 && expect.chars().all(|c| c.is_ascii_digit()));
@@ -250,6 +276,9 @@ impl RpiToml {
         }
         if let Some(expect) = &self.healthcheck.expect {
             validate_expect(expect).map_err(|e| anyhow::anyhow!("rpi.toml [healthcheck]: {e}"))?;
+        }
+        if let Some(hostname) = &self.ingress.hostname {
+            validate_hostname(hostname).map_err(|e| anyhow::anyhow!(e))?;
         }
         if let Some(expose) = &self.ingress.expose {
             if ExposeMode::parse(expose).is_none() {
@@ -530,6 +559,18 @@ files = ["certs/server.pem"]
         let lan = SAMPLE.replace("port = 3000", "port = 3000\nexpose = \"lan\"");
         let lan_cfg = RpiToml::parse(&lan).unwrap().to_project_config();
         assert_eq!(lan_cfg.expose, pi_domain::entities::ExposeMode::Lan);
+    }
+
+    #[test]
+    fn invalid_hostname_is_rejected() {
+        for bad in ["feature/login.example.com", "-bad.example.com"] {
+            let toml = SAMPLE.replace(
+                "hostname = \"rateme.isskelo.com\"",
+                &format!("hostname = \"{bad}\""),
+            );
+            let err = RpiToml::parse(&toml).unwrap_err().to_string();
+            assert!(err.contains("hostname"), "{bad}: got: {err}");
+        }
     }
 
     #[test]

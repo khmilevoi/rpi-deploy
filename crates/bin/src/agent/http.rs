@@ -219,6 +219,22 @@ async fn create_deployment(
     }
     config.environment = env_meta;
 
+    // Production-key protection (hostname edition): the CLI already refuses
+    // to resolve an overlay that inherits or repeats the base project's
+    // hostname, but a stale or hand-crafted CLI could still send one. Reject
+    // it here too, so the agent never routes an environment's host port
+    // under the production hostname.
+    if let (Some(env), Some(hostname)) = (&config.environment, &config.hostname) {
+        if let Some(base_project) = state.projects.get(&env.base).await.map_err(ApiError)? {
+            if base_project.config.hostname.as_deref() == Some(hostname.as_str()) {
+                return Err(ApiError(DomainError::Conflict(format!(
+                    "environment hostname '{hostname}' equals the hostname of base project '{}'",
+                    env.base
+                ))));
+            }
+        }
+    }
+
     let git_ref = DeployRef::parse(req.git_ref.as_deref().unwrap_or(&config.branch));
 
     let deployment_id = state.ids.new_id();
@@ -1318,6 +1334,34 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{json}");
         let msg = json["error"].as_str().unwrap();
         assert!(msg.contains("registered as a base project"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn env_deploy_hostname_equal_to_base_hostname_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        // The environment key itself isn't registered yet (fresh deploy).
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp--test")
+            .returning(|_| Ok(None));
+        // The base project is registered with the same hostname the
+        // environment deploy is trying to use.
+        let mut base_project = project_with_environment("myapp", None);
+        base_project.config.hostname = Some("app.example.com".into());
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp")
+            .returning(move |_| Ok(Some(base_project.clone())));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        let mut body = deploy_body_with_environment("myapp--test", "test", "myapp", None);
+        body["project"]["hostname"] = serde_json::json!("app.example.com");
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("hostname"), "got: {msg}");
+        assert!(msg.contains("myapp"), "got: {msg}");
     }
 
     #[tokio::test]

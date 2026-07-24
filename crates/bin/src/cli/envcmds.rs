@@ -1,15 +1,26 @@
 use crate::cli::config::ConnectOpts;
 use crate::cli::connect::AgentConn;
+use crate::cli::overlay::{derive_key, derive_slug, parse_vars, validate_env_name};
 use crate::output;
 
-/// Derive the target key from ./rpi.toml + overlay: full resolution, so the
-/// same validation applies as on deploy.
+/// Derive the target key for `rpi env destroy`/`rpi env reset-data` without
+/// reading the overlay file: both actions only need the key, and requiring
+/// `rpi.<env>.toml` to still exist (and still resolve cleanly) would make it
+/// impossible to destroy/reset an environment whose overlay was deleted or
+/// is currently broken — exactly the situation a cleanup command must
+/// survive. Only `./rpi.toml` is read (for the base project name).
 fn resolve_key(env: &str, vars: &[String]) -> anyhow::Result<String> {
-    let resolved = crate::cli::overlay::resolve(Some(env), vars)?;
-    Ok(resolved
-        .env
-        .expect("resolve with env returns selection")
-        .key)
+    validate_env_name(env)?;
+    let user_vars = parse_vars(vars)?;
+    let base = crate::cli::overlay::resolve(None, &[])?
+        .rpitoml
+        .project
+        .name;
+    let slug = user_vars
+        .get("BRANCH_NAME")
+        .map(|branch| derive_slug(branch))
+        .transpose()?;
+    Ok(derive_key(&base, env, slug.as_deref()))
 }
 
 fn confirm_key(action: &str, key: &str, yes: bool) -> anyhow::Result<()> {
@@ -29,15 +40,20 @@ fn confirm_key(action: &str, key: &str, yes: bool) -> anyhow::Result<()> {
 }
 
 pub async fn env_ls(all: bool, connect: ConnectOpts) -> anyhow::Result<()> {
+    // Distinguish "no rpi.toml here" (friendly hint to use --all) from any
+    // other resolution failure (e.g. a malformed rpi.toml), which must
+    // propagate instead of being swallowed into the same generic message.
     let base = if all {
         None
+    } else if !std::path::Path::new("rpi.toml").exists() {
+        anyhow::bail!("no rpi.toml in the current directory - use `rpi env ls --all`")
     } else {
-        match crate::cli::overlay::resolve(None, &[]) {
-            Ok(r) => Some(r.rpitoml.project.name),
-            Err(_) => {
-                anyhow::bail!("no rpi.toml in the current directory - use `rpi env ls --all`")
-            }
-        }
+        Some(
+            crate::cli::overlay::resolve(None, &[])?
+                .rpitoml
+                .project
+                .name,
+        )
     };
     let AgentConn {
         tunnel: _tunnel,

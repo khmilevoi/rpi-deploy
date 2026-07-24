@@ -187,6 +187,7 @@ pub async fn secrets_send(
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
     let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let is_env = resolved.env.is_some();
     let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
     let (vars, files) = collect_secrets(Path::new("."), &rpitoml.secrets)?;
@@ -200,6 +201,9 @@ pub async fn secrets_send(
         compat,
     } = crate::cli::connect::connect_agent(connect).await?;
     compat.gate(crate::compat::Feature::Secrets)?;
+    if is_env {
+        compat.gate(crate::compat::Feature::Environments)?;
+    }
 
     let (n, m) = (vars.len(), files.len());
     let resp = api.send_secrets(&project_name, vars, files, apply).await?;
@@ -312,6 +316,7 @@ pub async fn secrets_ls(
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
     let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let is_env = resolved.env.is_some();
     let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
 
@@ -321,6 +326,9 @@ pub async fn secrets_ls(
         compat,
     } = crate::cli::connect::connect_agent(connect).await?;
     compat.gate(crate::compat::Feature::Secrets)?;
+    if is_env {
+        compat.gate(crate::compat::Feature::Environments)?;
+    }
 
     let resp = api.list_secrets(&project_name).await?;
     if resp.keys.is_empty() && resp.files.is_empty() {
@@ -499,6 +507,7 @@ pub async fn command(
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
     let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let is_env = resolved.env.is_some();
     let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
 
@@ -508,6 +517,9 @@ pub async fn command(
         compat,
     } = crate::cli::connect::connect_agent(connect).await?;
     compat.gate(crate::compat::Feature::Commands)?;
+    if is_env {
+        compat.gate(crate::compat::Feature::Environments)?;
+    }
 
     let Some(name) = name else {
         // List mode: the agent's answer is the deployed reality; the local
