@@ -410,6 +410,147 @@ pub fn apply_overlay(base: &mut RpiToml, overlay: RpiTomlOverlay) {
     }
 }
 
+/// The environment an overlay resolution selected, plus everything derived
+/// from it that the deploy path (and later `rpi env`) needs.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct EnvSelection {
+    pub env: String,
+    pub base: String,
+    pub slug: Option<String>,
+    pub key: String,
+    pub ttl_secs: Option<u64>,
+    pub on_create: Option<String>,
+}
+
+/// Outcome of resolving `rpi.toml` (+ an optional overlay): the merged,
+/// validated configuration and, when an environment was selected, the
+/// derived environment metadata.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct Resolved {
+    pub rpitoml: RpiToml,
+    pub env: Option<EnvSelection>,
+}
+
+/// Loads `./rpi.toml` (+ `./rpi.<env>.toml` when `env` is set) and resolves
+/// everything: interpolation, merge, revalidation and key/ttl derivation.
+#[allow(dead_code)]
+pub fn resolve(env: Option<&str>, vars: &[String]) -> anyhow::Result<Resolved> {
+    let base_text = std::fs::read_to_string("rpi.toml").map_err(|e| {
+        anyhow::anyhow!("cannot read rpi.toml: {e} (run from the project root, see §12)")
+    })?;
+    let overlay = match env {
+        None => None,
+        Some(name) => {
+            validate_env_name(name)?;
+            let file = format!("rpi.{name}.toml");
+            let text = std::fs::read_to_string(&file).map_err(|e| {
+                anyhow::anyhow!("cannot read {file}: {e}{}", available_overlays_hint())
+            })?;
+            Some((name, text))
+        }
+    };
+    resolve_from(
+        &base_text,
+        overlay.as_ref().map(|(n, t)| (*n, t.as_str())),
+        vars,
+    )
+}
+
+/// " (found overlays: rpi.test.toml, rpi.branch.toml)" or "" — for the
+/// missing-overlay-file error.
+#[allow(dead_code)]
+fn available_overlays_hint() -> String {
+    let mut found: Vec<String> = std::fs::read_dir(".")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("rpi.") && n.ends_with(".toml") && *n != "rpi.toml")
+        .collect();
+    found.sort();
+    if found.is_empty() {
+        String::new()
+    } else {
+        format!(" (found overlays: {})", found.join(", "))
+    }
+}
+
+/// Same as `resolve`, but from explicit texts — unit-testable without
+/// touching the filesystem.
+#[allow(dead_code)]
+pub fn resolve_from(
+    base_text: &str,
+    overlay: Option<(&str, &str)>,
+    vars: &[String],
+) -> anyhow::Result<Resolved> {
+    let mut base = RpiToml::parse(base_text)?;
+    let Some((env_name, overlay_text)) = overlay else {
+        if !vars.is_empty() {
+            anyhow::bail!("--vars requires --env (variables are only used in overlays)");
+        }
+        return Ok(Resolved {
+            rpitoml: base,
+            env: None,
+        });
+    };
+
+    validate_env_name(env_name)?;
+    let file = format!("rpi.{env_name}.toml");
+    let mut overlay = RpiTomlOverlay::parse(overlay_text, &file)?;
+    let user_vars = parse_vars(vars)?;
+    let parameterized = interpolate(&mut overlay, &user_vars)?;
+    if !parameterized && !user_vars.is_empty() {
+        anyhow::bail!("{file} is not parameterized (no ${{...}} references) - remove --vars");
+    }
+    let slug = if parameterized {
+        let Some(branch) = user_vars.get("BRANCH_NAME") else {
+            anyhow::bail!("parameterized overlay requires --vars BRANCH_NAME=<branch>");
+        };
+        Some(derive_slug(branch)?)
+    } else {
+        None
+    };
+
+    let environment = overlay.environment.take();
+    let base_name = base.project.name.clone();
+    apply_overlay(&mut base, overlay);
+    let key = derive_key(&base_name, env_name, slug.as_deref());
+    base.project.name = key.clone();
+    base.validate_common()
+        .map_err(|e| anyhow::anyhow!("{file}: merged configuration is invalid: {e}"))?;
+
+    let ttl_secs = match environment.as_ref().and_then(|e| e.ttl.as_deref()) {
+        Some(ttl) => Some(
+            crate::duration::parse_duration_secs(ttl)
+                .map_err(|e| anyhow::anyhow!("{file} [environment].ttl: {e}"))?,
+        ),
+        None => None,
+    };
+    let on_create = environment.and_then(|e| e.on_create);
+    if let Some(cmd) = &on_create {
+        let declared = base.commands.as_ref().is_some_and(|c| c.contains_key(cmd));
+        if !declared {
+            anyhow::bail!(
+                "{file} [environment].on_create: command '{cmd}' is not declared in the merged [commands]"
+            );
+        }
+    }
+
+    Ok(Resolved {
+        rpitoml: base,
+        env: Some(EnvSelection {
+            env: env_name.to_string(),
+            base: base_name,
+            slug,
+            key,
+            ttl_secs,
+            on_create,
+        }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,5 +844,111 @@ seed = "node seed.js"
                 "{text} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn resolve_named_env_derives_key_and_ttl() {
+        let r = resolve_from(
+            BASE,
+            Some((
+                "test",
+                "[source]\nbranch = \"develop\"\n\n[environment]\nttl = \"7d\"\non_create = \"seed\"\n",
+            )),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(r.rpitoml.project.name, "myapp--test");
+        let env = r.env.unwrap();
+        assert_eq!(env.key, "myapp--test");
+        assert_eq!(env.base, "myapp");
+        assert_eq!(env.slug, None);
+        assert_eq!(env.ttl_secs, Some(7 * 24 * 3600));
+        assert_eq!(env.on_create.as_deref(), Some("seed"));
+    }
+
+    #[test]
+    fn resolve_parameterized_env_uses_slug_in_key() {
+        let r = resolve_from(
+            BASE,
+            Some((
+                "branch",
+                "[source]\nbranch = \"${BRANCH_NAME}\"\n\n[ingress]\nhostname = \"${RPI_ENV_SLUG}.preview.example.com\"\n",
+            )),
+            &["BRANCH_NAME=feature/login".into()],
+        )
+        .unwrap();
+        assert_eq!(r.rpitoml.project.name, "myapp--branch--feature-login");
+        assert_eq!(
+            r.env.as_ref().unwrap().slug.as_deref(),
+            Some("feature-login")
+        );
+        assert_eq!(r.rpitoml.source.branch, "feature/login");
+    }
+
+    #[test]
+    fn resolve_without_env_keeps_base_and_rejects_vars() {
+        let r = resolve_from(BASE, None, &[]).unwrap();
+        assert_eq!(r.rpitoml.project.name, "myapp");
+        assert!(r.env.is_none());
+        let err = resolve_from(BASE, None, &["BRANCH_NAME=x".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--env"), "got: {err}");
+    }
+
+    #[test]
+    fn vars_for_static_overlay_are_rejected() {
+        let err = resolve_from(
+            BASE,
+            Some(("test", "[source]\nbranch = \"develop\"\n")),
+            &["BRANCH_NAME=x".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not parameterized"), "got: {err}");
+    }
+
+    #[test]
+    fn on_create_must_reference_a_merged_command() {
+        let err = resolve_from(
+            BASE,
+            Some(("test", "[environment]\non_create = \"nope\"\n")),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("nope"), "got: {err}");
+        // [commands] replaced wholesale without the referenced command -> error too
+        let err = resolve_from(
+            BASE,
+            Some((
+                "test",
+                "[commands]\nother = \"run x\"\n\n[environment]\non_create = \"seed\"\n",
+            )),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("seed"), "got: {err}");
+    }
+
+    #[test]
+    fn merged_config_is_revalidated() {
+        let err = resolve_from(
+            BASE,
+            Some(("test", "[ingress]\nexpose = \"public\"\n")),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expose"), "got: {err}");
+    }
+
+    #[test]
+    fn bad_ttl_is_rejected() {
+        let err = resolve_from(BASE, Some(("test", "[environment]\nttl = \"soon\"\n")), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ttl"), "got: {err}");
     }
 }
