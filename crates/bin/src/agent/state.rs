@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use pi_application::command::RunCommand;
 use pi_application::deploy::DeployProject;
 use pi_application::diagnostics::{AgentStatus, RunDiagnostics};
+use pi_application::environments::{DestroyEnvironment, ListEnvironments, ResetEnvironmentData};
 use pi_application::gc::RunGc;
 use pi_application::lifecycle::ControlLifecycle;
 use pi_application::list::ListProjects;
@@ -57,6 +58,12 @@ pub struct AppState {
     pub lifecycle: Arc<ControlLifecycle>,
     pub commands: Arc<RunCommand>,
     pub remove: Arc<RemoveProject>,
+    /// Environment overlay lifecycle (environment-overlays spec, `rpi env
+    /// ls/rm/reset-data`). `destroy_env` wraps `remove` above rather than
+    /// duplicating its teardown; `reset_env` has its own guard.
+    pub list_envs: Arc<ListEnvironments>,
+    pub destroy_env: Arc<DestroyEnvironment>,
+    pub reset_env: Arc<ResetEnvironmentData>,
     pub diagnostics: Arc<RunDiagnostics>,
     pub agent_status: Arc<AgentStatus>,
     pub host_network: Arc<dyn HostNetwork>,
@@ -186,6 +193,15 @@ pub fn build_state(
         secrets.clone(),
         overrides.clone(),
     );
+    let list_envs = ListEnvironments::new(projects.clone());
+    let destroy_env = DestroyEnvironment::new(projects.clone(), Arc::clone(&remove));
+    let reset_env = ResetEnvironmentData::new(
+        projects.clone(),
+        Arc::clone(&history),
+        runtime.clone(),
+        source.clone(),
+        overrides.clone(),
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -233,6 +249,9 @@ pub fn build_state(
             lifecycle,
             commands,
             remove,
+            list_envs,
+            destroy_env,
+            reset_env,
             diagnostics,
             agent_status,
             host_network: Arc::clone(&host_network),

@@ -410,6 +410,33 @@ impl From<&EnvironmentMeta> for EnvironmentDto {
     }
 }
 
+/// `GET /v1/environments` element (`rpi env ls`, environment-overlays
+/// spec): registry-level view of one environment overlay, distinct from
+/// [`EnvironmentDto`] (the deploy-request metadata block) because it also
+/// carries the project's key and lifecycle timestamps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentViewDto {
+    pub key: String,
+    pub base: String,
+    pub env: String,
+    #[serde(default)]
+    pub slug: Option<String>,
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_success_at: Option<i64>,
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+/// `DELETE /v1/environments/{key}` and `POST /v1/environments/{key}/reset-data`
+/// response body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentActionResponse {
+    pub key: String,
+    #[serde(default)]
+    pub already_absent: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployRequest {
     pub project: ProjectDto,

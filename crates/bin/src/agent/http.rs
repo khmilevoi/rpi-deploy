@@ -10,7 +10,8 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use pi_application::logs::DEFAULT_LOG_TAIL;
 use pi_domain::entities::{
-    DeployRef, DeploymentStatus, EnvironmentMeta, LifecycleAction, ProjectConfig, SecretsBundle,
+    DeployRef, DeploymentStatus, EnvironmentMeta, LifecycleAction, Project, ProjectConfig,
+    SecretsBundle,
 };
 use pi_domain::error::DomainError;
 use pi_infrastructure::events::DeployEvent;
@@ -22,9 +23,9 @@ use crate::agent::state::AppState;
 use crate::proto::{
     AgentOverviewDto, CommandRunRequest, CommandsResponse, DeployAccepted, DeployRequest,
     DeploymentDto, DiagnosticReportDto, EnvKeysResponse, EnvSendRequest, EnvSendResponse,
-    GcResponse, LifecycleResponse, ProjectViewDto, RemoveResponse, SecretsListResponse,
-    SecretsSendRequest, SecretsSendResponse, SourceCheckRequest, SourceCheckResponse,
-    StatsReportDto, VersionInfo,
+    EnvironmentActionResponse, EnvironmentViewDto, GcResponse, LifecycleResponse, ProjectViewDto,
+    RemoveResponse, SecretsListResponse, SecretsSendRequest, SecretsSendResponse,
+    SourceCheckRequest, SourceCheckResponse, StatsReportDto, VersionInfo,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -60,6 +61,15 @@ pub fn router(state: AppState) -> Router {
             put(send_secrets_handler).get(list_secrets_handler),
         )
         .route("/v1/projects/{name}/source/check", post(source_check))
+        .route("/v1/environments", get(list_environments_handler))
+        .route(
+            "/v1/environments/{key}",
+            delete(destroy_environment_handler),
+        )
+        .route(
+            "/v1/environments/{key}/reset-data",
+            post(reset_environment_handler),
+        )
         // base64 inflates the 8 MiB bundle limit by ~4/3; leave headroom
         .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
         .with_state(state)
@@ -827,6 +837,93 @@ async fn list_secrets_handler(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct EnvListQuery {
+    base: Option<String>,
+}
+
+/// `GET /v1/environments` (`rpi env ls`, environment-overlays spec).
+async fn list_environments_handler(
+    State(state): State<AppState>,
+    Query(q): Query<EnvListQuery>,
+) -> Result<Json<Vec<EnvironmentViewDto>>, ApiError> {
+    let envs = state
+        .list_envs
+        .execute(q.base.as_deref())
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(
+        envs.into_iter().filter_map(environment_view).collect(),
+    ))
+}
+
+/// `list_environments` only ever returns rows with `env_name` set (the SQL
+/// query filters on it), so `config.environment` should always be `Some`
+/// here. Skipping a `None` row instead of `.expect()`-panicking keeps this
+/// handler from taking the whole request down if that invariant is ever
+/// violated by a future migration or bug.
+fn environment_view(p: Project) -> Option<EnvironmentViewDto> {
+    let meta = p.config.environment?;
+    Some(EnvironmentViewDto {
+        key: p.config.name,
+        base: meta.base,
+        env: meta.env,
+        slug: meta.slug,
+        created_at: p.created_at,
+        last_success_at: p.last_success_at,
+        ttl_secs: meta.ttl_secs,
+    })
+}
+
+/// `DELETE /v1/environments/{key}` (`rpi env rm`, environment-overlays
+/// spec). Idempotent: a missing key reports `already_absent` instead of
+/// 404. A base-project key and an active deployment both come back as 409
+/// (the latter via `RemoveProject`'s own guard).
+async fn destroy_environment_handler(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<EnvironmentActionResponse>, ApiError> {
+    if !is_valid_name(&key) {
+        return Err(ApiError(DomainError::Invalid(
+            "environment key must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    let outcome = state
+        .destroy_env
+        .execute(&key, Arc::new(TracingSink))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(EnvironmentActionResponse {
+        key: outcome.key,
+        already_absent: outcome.already_absent,
+    }))
+}
+
+/// `POST /v1/environments/{key}/reset-data` (`rpi env reset-data`,
+/// environment-overlays spec): drops the overlay's containers/volumes and
+/// clears `on_create_done` so the next deploy re-seeds. Missing key,
+/// base-project key, and active deployment are all rejected by
+/// `ResetEnvironmentData`'s own guards.
+async fn reset_environment_handler(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<EnvironmentActionResponse>, ApiError> {
+    if !is_valid_name(&key) {
+        return Err(ApiError(DomainError::Invalid(
+            "environment key must match ^[a-z0-9][a-z0-9_-]*$".into(),
+        )));
+    }
+    state
+        .reset_env
+        .execute(&key, Arc::new(TracingSink))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(EnvironmentActionResponse {
+        key,
+        already_absent: false,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,6 +931,9 @@ mod tests {
     use http_body_util::BodyExt;
     use pi_application::deploy::DeployProject;
     use pi_application::diagnostics::{AgentStatus, RunDiagnostics};
+    use pi_application::environments::{
+        DestroyEnvironment, ListEnvironments, ResetEnvironmentData,
+    };
     use pi_application::gc::RunGc;
     use pi_application::lifecycle::ControlLifecycle;
     use pi_application::list::ListProjects;
@@ -1006,6 +1106,15 @@ mod tests {
             secrets.clone(),
             overrides.clone(),
         );
+        let list_envs = ListEnvironments::new(projects.clone());
+        let destroy_env = DestroyEnvironment::new(projects.clone(), Arc::clone(&remove));
+        let reset_env = ResetEnvironmentData::new(
+            projects.clone(),
+            Arc::clone(&history),
+            Arc::clone(&runtime),
+            source.clone(),
+            overrides.clone(),
+        );
         let probe = HostSystemProbe::new(
             Arc::new(SystemRunner),
             disk,
@@ -1044,6 +1153,9 @@ mod tests {
             lifecycle,
             commands,
             remove,
+            list_envs,
+            destroy_env,
+            reset_env,
             diagnostics,
             agent_status,
             host_network: Arc::new(UdpHostNetwork::new()),
@@ -1092,6 +1204,39 @@ mod tests {
             on_create_done: false,
             last_success_at: None,
         }
+    }
+
+    /// Like `state_with_projects`, but also rewires `list_envs`/`destroy_env`/
+    /// `reset_env` (and the `remove` delegate `destroy_env` wraps) onto the
+    /// same mock `ProjectRepository` — `state_with_projects` only swaps the
+    /// `projects` field, so without this the environment use-cases would
+    /// still see the throwaway sqlite-backed repo baked in by `state_with`.
+    fn state_with_environments(
+        dir: &std::path::Path,
+        projects: Arc<dyn ProjectRepository>,
+    ) -> AppState {
+        let mut state = state_with_projects(dir, Arc::clone(&projects));
+        let overrides = FsOverrideStore::new(dir.join("env-overrides"));
+        let remove = RemoveProject::new(
+            Arc::clone(&projects),
+            Arc::clone(&state.history),
+            Arc::new(ok_runtime()) as Arc<dyn ContainerRuntime>,
+            pi_infrastructure::cloudflared::DisabledIngress::new(),
+            Arc::clone(&state.source),
+            pi_infrastructure::secrets::EncryptedFileStore::open(dir).unwrap(),
+            overrides.clone(),
+        );
+        state.list_envs = ListEnvironments::new(Arc::clone(&projects));
+        state.destroy_env = DestroyEnvironment::new(Arc::clone(&projects), Arc::clone(&remove));
+        state.reset_env = ResetEnvironmentData::new(
+            projects,
+            Arc::clone(&state.history),
+            Arc::new(ok_runtime()) as Arc<dyn ContainerRuntime>,
+            Arc::clone(&state.source),
+            overrides,
+        );
+        state.remove = remove;
+        state
     }
 
     fn deploy_body_with_environment(
@@ -1990,6 +2135,124 @@ mod tests {
         let mut body = deploy_body("rateme");
         body["project"]["commands"] = serde_json::json!({ "x": [] });
         let (status, _) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_environments_returns_the_view_of_a_mocked_env_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        let proj = project_with_environment(
+            "myapp--test",
+            Some(EnvironmentMeta {
+                env: "test".into(),
+                base: "myapp".into(),
+                slug: Some("pr-42".into()),
+                ttl_secs: Some(3600),
+                on_create: None,
+            }),
+        );
+        projects
+            .expect_list_environments()
+            .withf(|base: &Option<&str>| base.is_none())
+            .times(1)
+            .returning(move |_| Ok(vec![proj.clone()]));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, get_req("/v1/environments")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json[0]["key"], "myapp--test");
+        assert_eq!(json[0]["base"], "myapp");
+        assert_eq!(json[0]["env"], "test");
+        assert_eq!(json[0]["slug"], "pr-42");
+        assert_eq!(json[0]["ttl_secs"], 3600);
+    }
+
+    #[tokio::test]
+    async fn list_environments_forwards_the_base_query_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_list_environments()
+            .withf(|base: &Option<&str>| *base == Some("myapp"))
+            .times(1)
+            .returning(|_| Ok(vec![]));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, get_req("/v1/environments?base=myapp")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn destroy_environment_on_base_key_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp")
+            .returning(|_| Ok(Some(project_with_environment("myapp", None))));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, delete_req("/v1/environments/myapp")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("base project"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn destroy_environment_missing_key_reports_already_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().returning(|_| Ok(None));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, delete_req("/v1/environments/ghost--test")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["key"], "ghost--test");
+        assert_eq!(json["already_absent"], true);
+    }
+
+    #[tokio::test]
+    async fn reset_environment_data_of_missing_key_is_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().returning(|_| Ok(None));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, _) = request(app, post_empty("/v1/environments/ghost--test/reset-data")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reset_environment_data_on_base_key_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp")
+            .returning(|_| Ok(Some(project_with_environment("myapp", None))));
+        let app = router(state_with_environments(dir.path(), Arc::new(projects)));
+
+        let (status, json) = request(app, post_empty("/v1/environments/myapp/reset-data")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("base project"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn environment_routes_reject_invalid_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_with(
+            dir.path(),
+            Arc::new(ok_source()),
+            Arc::new(ok_runtime()),
+        ));
+
+        let (status, _) = request(app.clone(), delete_req("/v1/environments/UPPER")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = request(app, post_empty("/v1/environments/UPPER/reset-data")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
