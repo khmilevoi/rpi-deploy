@@ -193,6 +193,22 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AgentCmd,
     },
+    /// Show the resolved configuration (base + overlay), locally.
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print the resolved rpi.toml (with --env: base + overlay merged).
+    Show {
+        #[arg(long)]
+        env: Option<String>,
+        #[arg(long = "vars")]
+        vars: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -501,6 +517,9 @@ async fn run() -> anyhow::Result<()> {
         Cmd::Agent {
             cmd: AgentCmd::Uninstall { purge, yes },
         } => agent::uninstall::run_cmd(purge, yes).await,
+        Cmd::Config {
+            cmd: ConfigCmd::Show { env, vars },
+        } => cli::commands::config_show(env, vars).await,
     }
 }
 

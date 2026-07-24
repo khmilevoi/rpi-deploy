@@ -813,6 +813,15 @@ fn deploy_warning(line: &str) -> Option<&str> {
     line.strip_prefix("warning: ")
 }
 
+/// `rpi config show`: resolve `./rpi.toml` (+ `./rpi.<env>.toml` overlay when
+/// `--env` is given) and print the merged configuration as TOML. Local-only
+/// — no agent connection.
+pub async fn config_show(env: Option<String>, vars: Vec<String>) -> anyhow::Result<()> {
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    print!("{}", crate::cli::overlay::render_resolved(&resolved)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

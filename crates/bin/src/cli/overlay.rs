@@ -5,10 +5,8 @@ use serde::Deserialize;
 
 use crate::cli::rpitoml::{CommandValue, RpiToml};
 
-#[allow(dead_code)]
 pub const RESERVED_ENV_NAMES: &[&str] = &["show", "ls", "destroy", "reset-data"];
 
-#[allow(dead_code)]
 pub fn validate_env_name(name: &str) -> anyhow::Result<()> {
     let mut chars = name.chars();
     let ok = matches!(chars.next(), Some('a'..='z'))
@@ -25,7 +23,6 @@ pub fn validate_env_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 const MAX_SLUG_LEN: usize = 30;
 
 fn is_valid_var_name(s: &str) -> bool {
@@ -34,7 +31,6 @@ fn is_valid_var_name(s: &str) -> bool {
         && chars.all(|c| matches!(c, 'A'..='Z' | '0'..='9' | '_'))
 }
 
-#[allow(dead_code)]
 pub fn parse_vars(pairs: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
     let mut vars = BTreeMap::new();
     for pair in pairs {
@@ -61,7 +57,6 @@ pub fn parse_vars(pairs: &[String]) -> anyhow::Result<BTreeMap<String, String>> 
     Ok(vars)
 }
 
-#[allow(dead_code)]
 pub fn derive_slug(branch: &str) -> anyhow::Result<String> {
     let mut slug = String::new();
     for c in branch.chars() {
@@ -82,7 +77,6 @@ pub fn derive_slug(branch: &str) -> anyhow::Result<String> {
     Ok(slug)
 }
 
-#[allow(dead_code)]
 pub fn derive_key(base: &str, env: &str, slug: Option<&str>) -> String {
     match slug {
         Some(slug) => format!("{base}--{env}--{slug}"),
@@ -92,7 +86,6 @@ pub fn derive_key(base: &str, env: &str, slug: Option<&str>) -> String {
 
 /// Overlay file `rpi.<env>.toml`: every field optional; unknown fields are
 /// errors (stricter than the base file); `schema`/`[project]` forbidden.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RpiTomlOverlay {
@@ -110,7 +103,6 @@ pub struct RpiTomlOverlay {
     pub environment: Option<EnvironmentSection>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverlaySource {
@@ -118,14 +110,12 @@ pub struct OverlaySource {
     pub branch: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverlayBuild {
     pub compose: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverlayIngress {
@@ -135,7 +125,6 @@ pub struct OverlayIngress {
     pub expose: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverlayTimeouts {
@@ -145,7 +134,6 @@ pub struct OverlayTimeouts {
     pub command: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverlayHealthcheck {
@@ -154,7 +142,6 @@ pub struct OverlayHealthcheck {
     pub timeout: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverlaySecrets {
@@ -162,7 +149,6 @@ pub struct OverlaySecrets {
     pub files: Option<Vec<String>>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentSection {
@@ -249,7 +235,6 @@ fn command_strings(value: &CommandValue) -> Vec<&str> {
     }
 }
 
-#[allow(dead_code)]
 pub fn interpolate(
     overlay: &mut RpiTomlOverlay,
     user_vars: &BTreeMap<String, String>,
@@ -343,7 +328,6 @@ fn reset_or(value: String) -> Option<String> {
 
 /// Typed schema-aware merge (spec: scalars replace, tables field-wise,
 /// arrays and [commands] wholesale, "" resets optionals).
-#[allow(dead_code)]
 pub fn apply_overlay(base: &mut RpiToml, overlay: RpiTomlOverlay) {
     if let Some(s) = overlay.source {
         if let Some(repo) = s.repo {
@@ -412,12 +396,13 @@ pub fn apply_overlay(base: &mut RpiToml, overlay: RpiTomlOverlay) {
 
 /// The environment an overlay resolution selected, plus everything derived
 /// from it that the deploy path (and later `rpi env`) needs.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct EnvSelection {
     pub env: String,
     pub base: String,
     pub slug: Option<String>,
+    /// Not yet read outside tests — wired into the deploy path in a later task.
+    #[allow(dead_code)]
     pub key: String,
     pub ttl_secs: Option<u64>,
     pub on_create: Option<String>,
@@ -426,7 +411,6 @@ pub struct EnvSelection {
 /// Outcome of resolving `rpi.toml` (+ an optional overlay): the merged,
 /// validated configuration and, when an environment was selected, the
 /// derived environment metadata.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Resolved {
     pub rpitoml: RpiToml,
@@ -435,7 +419,6 @@ pub struct Resolved {
 
 /// Loads `./rpi.toml` (+ `./rpi.<env>.toml` when `env` is set) and resolves
 /// everything: interpolation, merge, revalidation and key/ttl derivation.
-#[allow(dead_code)]
 pub fn resolve(env: Option<&str>, vars: &[String]) -> anyhow::Result<Resolved> {
     let base_text = std::fs::read_to_string("rpi.toml").map_err(|e| {
         anyhow::anyhow!("cannot read rpi.toml: {e} (run from the project root, see §12)")
@@ -460,7 +443,6 @@ pub fn resolve(env: Option<&str>, vars: &[String]) -> anyhow::Result<Resolved> {
 
 /// " (found overlays: rpi.test.toml, rpi.branch.toml)" or "" — for the
 /// missing-overlay-file error.
-#[allow(dead_code)]
 fn available_overlays_hint() -> String {
     let mut found: Vec<String> = std::fs::read_dir(".")
         .into_iter()
@@ -479,7 +461,6 @@ fn available_overlays_hint() -> String {
 
 /// Same as `resolve`, but from explicit texts — unit-testable without
 /// touching the filesystem.
-#[allow(dead_code)]
 pub fn resolve_from(
     base_text: &str,
     overlay: Option<(&str, &str)>,
@@ -549,6 +530,36 @@ pub fn resolve_from(
             on_create,
         }),
     })
+}
+
+/// Render the resolved configuration (base + overlay merge) as TOML text,
+/// appending a synthetic `[environment]` section describing the selected
+/// environment when one was resolved (`rpi config show`).
+pub fn render_resolved(r: &Resolved) -> anyhow::Result<String> {
+    let mut text = toml::to_string_pretty(&r.rpitoml)?;
+    if let Some(env) = &r.env {
+        text.push_str("\n[environment]\n");
+        text.push_str(&format!("env = {}\n", toml_str(&env.env)));
+        text.push_str(&format!("base = {}\n", toml_str(&env.base)));
+        if let Some(slug) = &env.slug {
+            text.push_str(&format!("slug = {}\n", toml_str(slug)));
+        }
+        if let Some(ttl) = env.ttl_secs {
+            text.push_str(&format!("ttl_secs = {ttl}\n"));
+        }
+        if let Some(cmd) = &env.on_create {
+            text.push_str(&format!("on_create = {}\n", toml_str(cmd)));
+        }
+    }
+    Ok(text)
+}
+
+/// TOML basic-string escaping for the synthetic `[environment]` fields we
+/// hand-render above (Rust's `{:?}` shares JSON-style escaping with TOML for
+/// our charset — env/base/slug/on_create are plain identifiers or shell text
+/// without control characters).
+fn toml_str(s: &str) -> String {
+    format!("{:?}", s)
 }
 
 #[cfg(test)]
@@ -950,5 +961,23 @@ seed = "node seed.js"
             .unwrap_err()
             .to_string();
         assert!(err.contains("ttl"), "got: {err}");
+    }
+
+    #[test]
+    fn render_resolved_prints_toml_with_key_and_environment() {
+        let r = resolve_from(
+            BASE,
+            Some(("test", "[source]\nbranch = \"develop\"\n\n[environment]\nttl = \"7d\"\non_create = \"seed\"\n")),
+            &[],
+        )
+        .unwrap();
+        let text = render_resolved(&r).unwrap();
+        assert!(text.contains("name = \"myapp--test\""), "got:\n{text}");
+        assert!(text.contains("branch = \"develop\""));
+        assert!(text.contains("[environment]"));
+        assert!(text.contains("ttl_secs = 604800"));
+        assert!(text.contains("on_create = \"seed\""));
+        // resolved output must round-trip as valid TOML
+        toml::from_str::<toml::Value>(&text).unwrap();
     }
 }
