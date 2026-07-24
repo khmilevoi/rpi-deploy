@@ -17,7 +17,8 @@ use pi_application::scheduler::{DeployRunner, DeployScheduler};
 use pi_application::secrets::{ListSecrets, SendSecrets};
 use pi_application::stats::GetStats;
 use pi_domain::contracts::{
-    DeploymentHistory, HostMetricsStore, HostNetwork, IdGen, Ingress, Source, TempProbe,
+    DeploymentHistory, HostMetricsStore, HostNetwork, IdGen, Ingress, ProjectRepository, Source,
+    TempProbe,
 };
 use pi_infrastructure::cloudflared::{CloudflaredIngress, DisabledIngress};
 use pi_infrastructure::disk::SysinfoDiskProbe;
@@ -61,6 +62,10 @@ pub struct AppState {
     pub host_network: Arc<dyn HostNetwork>,
     pub log_dir: PathBuf,
     pub log_dir_available: bool,
+    /// Project registry, consulted by `create_deployment` for the base/
+    /// environment kind guard (environment-overlays spec) before submitting
+    /// the deploy.
+    pub projects: Arc<dyn ProjectRepository>,
     // Not read directly today — `stats` already holds its own clone via
     // `CompositeStats`. Kept on `AppState` as the shared handle for handlers
     // added by later stats-modes work (e.g. a live/SSE metrics endpoint).
@@ -201,6 +206,7 @@ pub fn build_state(
     );
     let diagnostics = RunDiagnostics::new(probe.clone());
     let agent_status = AgentStatus::new(probe, projects.clone(), Arc::clone(&history));
+    let projects_repo: Arc<dyn ProjectRepository> = projects.clone();
     let send_secrets = SendSecrets::new(
         secrets.clone(),
         projects,
@@ -232,6 +238,7 @@ pub fn build_state(
             host_network: Arc::clone(&host_network),
             log_dir: config.logs.dir.clone(),
             log_dir_available,
+            projects: projects_repo,
             metrics,
         },
         sampler,

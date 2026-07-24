@@ -10,7 +10,7 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use pi_application::logs::DEFAULT_LOG_TAIL;
 use pi_domain::entities::{
-    DeployRef, DeploymentStatus, LifecycleAction, ProjectConfig, SecretsBundle,
+    DeployRef, DeploymentStatus, EnvironmentMeta, LifecycleAction, ProjectConfig, SecretsBundle,
 };
 use pi_domain::error::DomainError;
 use pi_infrastructure::events::DeployEvent;
@@ -101,7 +101,7 @@ async fn create_deployment(
     State(state): State<AppState>,
     Json(req): Json<DeployRequest>,
 ) -> Result<Response, ApiError> {
-    let config: ProjectConfig = req.project.into();
+    let mut config: ProjectConfig = req.project.into();
     if !is_valid_name(&config.name) {
         return Err(ApiError(DomainError::Invalid(
             "project.name must match ^[a-z0-9][a-z0-9_-]*$".into(),
@@ -134,6 +134,51 @@ async fn create_deployment(
             ))));
         }
     }
+    let env_meta: Option<EnvironmentMeta> = req.environment.map(Into::into);
+    match &env_meta {
+        Some(env) => {
+            if !is_valid_name(&env.base) || env.base.contains("--") {
+                return Err(ApiError(DomainError::Invalid(
+                    "environment.base must match ^[a-z0-9][a-z0-9_-]*$ and must not contain '--'"
+                        .into(),
+                )));
+            }
+            let expected = match &env.slug {
+                Some(slug) => format!("{}--{}--{}", env.base, env.env, slug),
+                None => format!("{}--{}", env.base, env.env),
+            };
+            if expected != config.name {
+                return Err(ApiError(DomainError::Invalid(format!(
+                    "project.name '{}' does not match the environment key '{expected}'",
+                    config.name
+                ))));
+            }
+        }
+        None => {
+            if config.name.contains("--") {
+                return Err(ApiError(DomainError::Invalid(
+                    "project.name must not contain '--' (reserved for environment keys; deploy with --env)"
+                        .into(),
+                )));
+            }
+        }
+    }
+    if let Some(existing) = state.projects.get(&config.name).await.map_err(ApiError)? {
+        let existing_is_env = existing.config.environment.is_some();
+        if existing_is_env != env_meta.is_some() {
+            let (a, b) = if existing_is_env {
+                ("an environment", "a base project")
+            } else {
+                ("a base project", "an environment")
+            };
+            return Err(ApiError(DomainError::Conflict(format!(
+                "'{}' is registered as {a}; refusing to deploy it as {b}",
+                config.name
+            ))));
+        }
+    }
+    config.environment = env_meta;
+
     let git_ref = DeployRef::parse(req.git_ref.as_deref().unwrap_or(&config.branch));
 
     let deployment_id = state.ids.new_id();
@@ -767,9 +812,13 @@ mod tests {
     use pi_application::secrets::{ListSecrets, SendSecrets};
     use pi_application::stats::GetStats;
     use pi_domain::contracts::{
-        ContainerRuntime, LogSink, MockContainerRuntime, MockDiskProbe, MockSource, Source,
+        ContainerRuntime, LogSink, MockContainerRuntime, MockDiskProbe, MockProjectRepository,
+        MockSource, ProjectRepository, Source,
     };
-    use pi_domain::entities::{FetchedSource, StageTimeouts};
+    use pi_domain::entities::{
+        EnvironmentMeta, ExposeMode, FetchedSource, HealthcheckConfig, Project,
+        StageTimeoutOverrides, StageTimeouts,
+    };
     use pi_infrastructure::events::DeployEventsHub;
     use pi_infrastructure::history::SqliteHistory;
     use pi_infrastructure::overrides::FsOverrideStore;
@@ -940,6 +989,7 @@ mod tests {
         );
         let diagnostics = RunDiagnostics::new(probe.clone());
         let agent_status = AgentStatus::new(probe, projects.clone(), Arc::clone(&history));
+        let projects_repo: Arc<dyn ProjectRepository> = projects.clone();
         let send_secrets = SendSecrets::new(
             secrets.clone(),
             projects,
@@ -970,7 +1020,145 @@ mod tests {
             log_dir: dir.join("logs"),
             log_dir_available: true,
             metrics,
+            projects: projects_repo,
         }
+    }
+
+    /// Like `state_with`, but swaps in a caller-controlled `ProjectRepository`
+    /// (typically a `MockProjectRepository`) for the deploy-time environment
+    /// guard tests — the rest of the state (scheduler, source, runtime) still
+    /// comes from a real (empty) sqlite-backed instance.
+    fn state_with_projects(
+        dir: &std::path::Path,
+        projects: Arc<dyn ProjectRepository>,
+    ) -> AppState {
+        let mut state = state_with(dir, Arc::new(ok_source()), Arc::new(ok_runtime()));
+        state.projects = projects;
+        state
+    }
+
+    /// Builds a registered `Project` for guard tests, with `environment`
+    /// set as needed to simulate an existing base project (`None`) or an
+    /// existing environment overlay (`Some(..)`).
+    fn project_with_environment(name: &str, environment: Option<EnvironmentMeta>) -> Project {
+        Project {
+            config: ProjectConfig {
+                name: name.into(),
+                repo: "https://github.com/x/y.git".into(),
+                branch: "main".into(),
+                compose_path: "docker-compose.yml".into(),
+                service: "web".into(),
+                container_port: 3000,
+                hostname: None,
+                expose: ExposeMode::default(),
+                healthcheck: HealthcheckConfig::default(),
+                timeouts: StageTimeoutOverrides::default(),
+                commands: Default::default(),
+                command_timeout_secs: None,
+                environment,
+            },
+            host_port: 8000,
+            created_at: 0,
+            on_create_done: false,
+            last_success_at: None,
+        }
+    }
+
+    fn deploy_body_with_environment(
+        name: &str,
+        env: &str,
+        base: &str,
+        slug: Option<&str>,
+    ) -> serde_json::Value {
+        let mut body = deploy_body(name);
+        body["environment"] = serde_json::json!({
+            "env": env,
+            "base": base,
+            "slug": slug,
+        });
+        body
+    }
+
+    #[tokio::test]
+    async fn deploy_env_key_mismatch_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().times(0).returning(|_| Ok(None));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // environment { env:"test", base:"myapp" } expects key "myapp--test",
+        // but project.name is "myapp--prod" -> mismatch is rejected before
+        // the registry is ever consulted.
+        let body = deploy_body_with_environment("myapp--prod", "test", "myapp", None);
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("environment key"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn base_deploy_into_environment_key_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp")
+            .returning(|_| {
+                Ok(Some(project_with_environment(
+                    "myapp",
+                    Some(EnvironmentMeta {
+                        env: "test".into(),
+                        base: "myapp".into(),
+                        slug: None,
+                        ttl_secs: None,
+                        on_create: None,
+                    }),
+                )))
+            });
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // No `environment` block (a plain/base deploy) targeting a name
+        // already registered as an environment overlay -> conflict.
+        let body = deploy_body("myapp");
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("registered as an environment"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn env_deploy_into_base_key_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_get()
+            .withf(|n| n == "myapp--test")
+            .returning(|_| Ok(Some(project_with_environment("myapp--test", None))));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // `environment` block present and matching the key, but the key is
+        // already registered as a base project -> conflict.
+        let body = deploy_body_with_environment("myapp--test", "test", "myapp", None);
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("registered as a base project"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn base_name_with_double_dash_is_rejected_agent_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projects = MockProjectRepository::new();
+        projects.expect_get().times(0).returning(|_| Ok(None));
+        let app = router(state_with_projects(dir.path(), Arc::new(projects)));
+
+        // No `environment` block, but the name uses the reserved '--'
+        // separator -> rejected agent-side, before the registry is consulted.
+        let body = deploy_body("my--app");
+        let (status, json) = request(app, post_json("/v1/deployments", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let msg = json["error"].as_str().unwrap();
+        assert!(msg.contains("'--'"), "got: {msg}");
     }
 
     fn deploy_body(name: &str) -> serde_json::Value {
