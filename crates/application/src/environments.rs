@@ -190,7 +190,8 @@ impl ReapEnvironments {
                 continue;
             };
             let anchor = p.last_success_at.unwrap_or(p.created_at);
-            if anchor + ttl as i64 > now {
+            let deadline = anchor.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX));
+            if deadline > now {
                 continue;
             }
             let key = p.config.name.clone();
@@ -814,5 +815,43 @@ mod tests {
         );
         let destroyed = reaper.execute().await.unwrap();
         assert_eq!(destroyed, vec![key2.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn reaper_keeps_environment_with_huge_ttl() {
+        let now: i64 = 1_000_000;
+        let key = "myapp--huge";
+        // u64::MAX ttl with old last_success_at should NOT expire
+        let proj = reaper_project(key, Some(u64::MAX), Some(now - 200), now - 500);
+
+        let listed = vec![proj.clone()];
+        let mut projects = MockProjectRepository::new();
+        projects
+            .expect_list_environments()
+            .times(1)
+            .returning(move |_| Ok(listed.clone()));
+        // Destroy must never be called for this environment
+        projects.expect_get().times(0);
+        projects.expect_remove().times(0);
+        let projects: Arc<dyn ProjectRepository> = Arc::new(projects);
+
+        let mut history = MockDeploymentHistory::new();
+        history.expect_active().times(0);
+        let history: Arc<dyn DeploymentHistory> = Arc::new(history);
+
+        let remove = untouched_remove(Arc::clone(&projects));
+        let destroy = DestroyEnvironment::new(Arc::clone(&projects), remove);
+
+        let reaper = ReapEnvironments::new(
+            Arc::clone(&projects),
+            Arc::clone(&history),
+            destroy,
+            fixed_clock(now),
+        );
+        let destroyed = reaper.execute().await.unwrap();
+        assert!(
+            destroyed.is_empty(),
+            "huge ttl environment must not be destroyed"
+        );
     }
 }

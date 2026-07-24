@@ -187,10 +187,17 @@ impl AgentConfig {
 
     /// Reaper tick interval in seconds (environment-overlays spec), parsed
     /// with the same duration grammar as `[timeouts]`. Default 3600 (1h).
+    /// Must be greater than 0 to avoid panicking `tokio::time::interval`.
     pub fn reap_interval_secs(&self) -> anyhow::Result<u64> {
         match &self.environments.reap_interval {
-            Some(s) => parse_duration_secs(s)
-                .map_err(|e| anyhow::anyhow!("agent.toml [environments].reap_interval: {e}")),
+            Some(s) => {
+                let secs = parse_duration_secs(s)
+                    .map_err(|e| anyhow::anyhow!("agent.toml [environments].reap_interval: {e}"))?;
+                if secs == 0 {
+                    anyhow::bail!("[environments].reap_interval must be greater than 0");
+                }
+                Ok(secs)
+            }
             None => Ok(3600),
         }
     }
@@ -326,6 +333,22 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("reap_interval"), "got: {err}");
+    }
+
+    #[test]
+    fn reap_interval_secs_rejects_zero() {
+        let err = AgentConfig::parse("[environments]\nreap_interval = \"0\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("greater than 0"), "got: {err}");
+    }
+
+    #[test]
+    fn reap_interval_secs_rejects_zero_seconds_suffix() {
+        let err = AgentConfig::parse("[environments]\nreap_interval = \"0s\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("greater than 0"), "got: {err}");
     }
 
     #[test]
