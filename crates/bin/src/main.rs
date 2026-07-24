@@ -77,6 +77,12 @@ enum Cmd {
         /// for manual setup instead
         #[arg(long, conflicts_with = "cancel")]
         no_gh_key: bool,
+        /// Deploy/operate an environment defined by rpi.<env>.toml
+        #[arg(long)]
+        env: Option<String>,
+        /// Overlay variables, e.g. --vars BRANCH_NAME=feature/login (repeatable)
+        #[arg(long = "vars")]
+        vars: Vec<String>,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
@@ -111,6 +117,12 @@ enum Cmd {
         /// Print the full output instead of just the last lines
         #[arg(long)]
         full: bool,
+        /// Deploy/operate an environment defined by rpi.<env>.toml
+        #[arg(long)]
+        env: Option<String>,
+        /// Overlay variables, e.g. --vars BRANCH_NAME=feature/login (repeatable)
+        #[arg(long = "vars")]
+        vars: Vec<String>,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
@@ -218,11 +230,23 @@ enum SecretsCmd {
         /// Also apply the new secrets to running containers
         #[arg(long)]
         apply: bool,
+        /// Deploy/operate an environment defined by rpi.<env>.toml
+        #[arg(long)]
+        env: Option<String>,
+        /// Overlay variables, e.g. --vars BRANCH_NAME=feature/login (repeatable)
+        #[arg(long = "vars")]
+        vars: Vec<String>,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
     /// List stored env keys and file paths (values are never transmitted)
     Ls {
+        /// Deploy/operate an environment defined by rpi.<env>.toml
+        #[arg(long)]
+        env: Option<String>,
+        /// Overlay variables, e.g. --vars BRANCH_NAME=feature/login (repeatable)
+        #[arg(long = "vars")]
+        vars: Vec<String>,
         #[command(flatten)]
         connect: cli::config::ConnectOpts,
     },
@@ -377,12 +401,14 @@ async fn run() -> anyhow::Result<()> {
             git_ref,
             cancel,
             no_gh_key,
+            env,
+            vars,
             connect,
         } => {
             if cancel {
-                cli::commands::deploy_cancel(connect).await
+                cli::commands::deploy_cancel(env, vars, connect).await
             } else {
-                cli::commands::deploy(git_ref, no_gh_key, connect).await
+                cli::commands::deploy(git_ref, no_gh_key, env, vars, connect).await
             }
         }
         Cmd::Ls { connect } => cli::commands::ls(connect).await,
@@ -397,8 +423,10 @@ async fn run() -> anyhow::Result<()> {
             name,
             args,
             full,
+            env,
+            vars,
             connect,
-        } => cli::commands::command(name, args, full, connect).await,
+        } => cli::commands::command(name, args, full, env, vars, connect).await,
         Cmd::Stats {
             project,
             json,
@@ -453,11 +481,17 @@ async fn run() -> anyhow::Result<()> {
             connect,
         } => cli::upgrade::run(version, yes, connect).await,
         Cmd::Secrets {
-            cmd: SecretsCmd::Send { apply, connect },
-        } => cli::commands::secrets_send(apply, connect).await,
+            cmd:
+                SecretsCmd::Send {
+                    apply,
+                    env,
+                    vars,
+                    connect,
+                },
+        } => cli::commands::secrets_send(apply, env, vars, connect).await,
         Cmd::Secrets {
-            cmd: SecretsCmd::Ls { connect },
-        } => cli::commands::secrets_ls(connect).await,
+            cmd: SecretsCmd::Ls { env, vars, connect },
+        } => cli::commands::secrets_ls(env, vars, connect).await,
         Cmd::Agent {
             cmd: AgentCmd::Run { .. },
         } => unreachable!(),

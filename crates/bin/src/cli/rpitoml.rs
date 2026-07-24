@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use crate::duration::parse_duration_secs;
 use pi_domain::entities::{
@@ -292,16 +291,6 @@ impl RpiToml {
             }
         }
         Ok(())
-    }
-
-    pub fn load(path: &Path) -> anyhow::Result<RpiToml> {
-        let text = std::fs::read_to_string(path).map_err(|e| {
-            anyhow::anyhow!(
-                "cannot read {}: {e} (run from the project root, see §12)",
-                path.display()
-            )
-        })?;
-        RpiToml::parse(&text)
     }
 
     pub fn to_project_config(&self) -> ProjectConfig {

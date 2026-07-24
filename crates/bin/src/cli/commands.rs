@@ -6,7 +6,7 @@ use base64::Engine as _;
 use crate::cli::api::{ApiClient, DeployStreamEvent};
 use crate::cli::config::ConnectOpts;
 use crate::cli::connect::AgentConn;
-use crate::cli::rpitoml::{RpiToml, SecretsSection};
+use crate::cli::rpitoml::SecretsSection;
 use crate::cli::ssh::SshExec;
 use crate::cli::tunnel::SshTunnel;
 use crate::duration::parse_duration_secs;
@@ -16,9 +16,13 @@ use crate::proto::{DeployRequest, DiagnosticCheckDto};
 pub async fn deploy(
     git_ref: Option<String>,
     no_gh_key: bool,
+    env: Option<String>,
+    vars: Vec<String>,
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let rpitoml = resolved.rpitoml;
+    let _env_selection = resolved.env;
     let project = rpitoml.to_project_config();
     output::show_deploy_banner(&rpitoml.project.name);
 
@@ -118,8 +122,13 @@ pub async fn deploy(
     Ok(())
 }
 
-pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+pub async fn deploy_cancel(
+    env: Option<String>,
+    vars: Vec<String>,
+    connect: ConnectOpts,
+) -> anyhow::Result<()> {
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
 
     let AgentConn {
@@ -158,8 +167,14 @@ pub async fn deploy_cancel(connect: ConnectOpts) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn secrets_send(apply: bool, connect: ConnectOpts) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+pub async fn secrets_send(
+    apply: bool,
+    env: Option<String>,
+    vars: Vec<String>,
+    connect: ConnectOpts,
+) -> anyhow::Result<()> {
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
     let (vars, files) = collect_secrets(Path::new("."), &rpitoml.secrets)?;
     if vars.is_empty() && files.is_empty() {
@@ -278,8 +293,13 @@ pub async fn gc(connect: ConnectOpts) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn secrets_ls(connect: ConnectOpts) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+pub async fn secrets_ls(
+    env: Option<String>,
+    vars: Vec<String>,
+    connect: ConnectOpts,
+) -> anyhow::Result<()> {
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
 
     let AgentConn {
@@ -461,9 +481,12 @@ pub async fn command(
     name: Option<String>,
     args: Vec<String>,
     full: bool,
+    env: Option<String>,
+    vars: Vec<String>,
     connect: ConnectOpts,
 ) -> anyhow::Result<()> {
-    let rpitoml = RpiToml::load(Path::new("rpi.toml"))?;
+    let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
+    let rpitoml = resolved.rpitoml;
     let project_name = rpitoml.project.name.clone();
 
     let AgentConn {
