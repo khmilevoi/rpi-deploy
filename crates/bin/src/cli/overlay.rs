@@ -191,6 +191,134 @@ impl RpiTomlOverlay {
     }
 }
 
+/// Substitute ${VAR} in one allowed field. Marks `used` when a reference was found.
+fn substitute(
+    field: &str,
+    value: &str,
+    vars: &BTreeMap<String, String>,
+    used: &mut bool,
+) -> anyhow::Result<String> {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            anyhow::bail!("{field}: unclosed ${{...}} in '{value}'");
+        };
+        let name = &after[..end];
+        *used = true;
+        let Some(v) = vars.get(name) else {
+            anyhow::bail!(
+                "{field}: unknown variable '{name}' (available: {})",
+                vars.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+        };
+        out.push_str(v);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Error when a forbidden field contains a ${...} reference.
+fn forbid(field: &str, value: Option<&str>) -> anyhow::Result<()> {
+    if value.is_some_and(|v| v.contains("${")) {
+        anyhow::bail!(
+            "{field}: ${{...}} interpolation is only allowed in source.branch and ingress.hostname"
+        );
+    }
+    Ok(())
+}
+
+fn command_strings(value: &CommandValue) -> Vec<&str> {
+    use crate::cli::rpitoml::CommandRun;
+    match value {
+        CommandValue::Line(line) => vec![line.as_str()],
+        CommandValue::Argv(items) => items.iter().map(String::as_str).collect(),
+        CommandValue::Table { run, service } => {
+            let mut out = match run {
+                CommandRun::Line(line) => vec![line.as_str()],
+                CommandRun::Argv(items) => items.iter().map(String::as_str).collect(),
+            };
+            if let Some(s) = service {
+                out.push(s.as_str());
+            }
+            out
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn interpolate(
+    overlay: &mut RpiTomlOverlay,
+    user_vars: &BTreeMap<String, String>,
+) -> anyhow::Result<bool> {
+    // Forbid ${...} everywhere except the two allowed fields.
+    if let Some(s) = &overlay.source {
+        forbid("source.repo", s.repo.as_deref())?;
+    }
+    if let Some(b) = &overlay.build {
+        forbid("build.compose", b.compose.as_deref())?;
+    }
+    if let Some(i) = &overlay.ingress {
+        forbid("ingress.service", i.service.as_deref())?;
+        forbid("ingress.expose", i.expose.as_deref())?;
+    }
+    if let Some(t) = &overlay.timeouts {
+        for (f, v) in [
+            ("timeouts.fetch", &t.fetch),
+            ("timeouts.build", &t.build),
+            ("timeouts.up", &t.up),
+            ("timeouts.command", &t.command),
+        ] {
+            forbid(f, v.as_deref())?;
+        }
+    }
+    if let Some(h) = &overlay.healthcheck {
+        for (f, v) in [
+            ("healthcheck.path", &h.path),
+            ("healthcheck.expect", &h.expect),
+            ("healthcheck.timeout", &h.timeout),
+        ] {
+            forbid(f, v.as_deref())?;
+        }
+    }
+    if let Some(s) = &overlay.secrets {
+        forbid("secrets.env", s.env.as_deref())?;
+        for f in s.files.iter().flatten() {
+            forbid("secrets.files", Some(f))?;
+        }
+    }
+    for (name, value) in overlay.commands.iter().flatten() {
+        for s in command_strings(value) {
+            forbid(&format!("commands.{name}"), Some(s))?;
+        }
+    }
+    if let Some(e) = &overlay.environment {
+        forbid("environment.ttl", e.ttl.as_deref())?;
+        forbid("environment.on_create", e.on_create.as_deref())?;
+    }
+
+    let mut vars = user_vars.clone();
+    if let Some(branch) = user_vars.get("BRANCH_NAME") {
+        vars.insert("RPI_ENV_SLUG".to_string(), derive_slug(branch)?);
+    }
+
+    let mut used = false;
+    if let Some(s) = &mut overlay.source {
+        if let Some(branch) = &s.branch {
+            s.branch = Some(substitute("source.branch", branch, &vars, &mut used)?);
+        }
+    }
+    if let Some(i) = &mut overlay.ingress {
+        if let Some(hostname) = &i.hostname {
+            i.hostname = Some(substitute("ingress.hostname", hostname, &vars, &mut used)?);
+        }
+    }
+    Ok(used)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +414,72 @@ mod tests {
             derive_key("myapp", "branch", Some("feature-login")),
             "myapp--branch--feature-login"
         );
+    }
+
+    fn overlay(text: &str) -> RpiTomlOverlay {
+        RpiTomlOverlay::parse(text, "rpi.branch.toml").unwrap()
+    }
+
+    fn branch_vars() -> BTreeMap<String, String> {
+        parse_vars(&["BRANCH_NAME=feature/login".into()]).unwrap()
+    }
+
+    #[test]
+    fn interpolates_branch_and_hostname() {
+        let mut o = overlay(
+            "[source]\nbranch = \"${BRANCH_NAME}\"\n\n[ingress]\nhostname = \"${RPI_ENV_SLUG}.preview.example.com\"\n",
+        );
+        let parameterized = interpolate(&mut o, &branch_vars()).unwrap();
+        assert!(parameterized);
+        assert_eq!(
+            o.source.as_ref().unwrap().branch.as_deref(),
+            Some("feature/login")
+        );
+        assert_eq!(
+            o.ingress.as_ref().unwrap().hostname.as_deref(),
+            Some("feature-login.preview.example.com")
+        );
+    }
+
+    #[test]
+    fn static_overlay_is_not_parameterized() {
+        let mut o = overlay("[source]\nbranch = \"develop\"\n");
+        assert!(!interpolate(&mut o, &BTreeMap::new()).unwrap());
+    }
+
+    #[test]
+    fn unknown_var_and_unclosed_brace_are_errors() {
+        let mut o = overlay("[source]\nbranch = \"${NOPE}\"\n");
+        let err = interpolate(&mut o, &branch_vars()).unwrap_err().to_string();
+        assert!(err.contains("NOPE"), "got: {err}");
+        let mut o = overlay("[source]\nbranch = \"${BRANCH_NAME\"\n");
+        assert!(interpolate(&mut o, &branch_vars()).is_err());
+    }
+
+    #[test]
+    fn interpolation_outside_allowed_fields_is_rejected() {
+        for text in [
+            "[secrets]\nenv = \".env.${BRANCH_NAME}\"\n",
+            "[build]\ncompose = \"${BRANCH_NAME}.yml\"\n",
+            "[ingress]\nservice = \"${BRANCH_NAME}\"\n",
+            "[commands]\nseed = \"run ${BRANCH_NAME}\"\n",
+            "[environment]\non_create = \"${BRANCH_NAME}\"\n",
+        ] {
+            let mut o = overlay(text);
+            let err = interpolate(&mut o, &branch_vars()).unwrap_err().to_string();
+            assert!(
+                err.contains("source.branch") && err.contains("ingress.hostname"),
+                "{text}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_branch_name_for_parameterized_overlay_is_an_error() {
+        let mut o = overlay("[source]\nbranch = \"${BRANCH_NAME}\"\n");
+        let err = interpolate(&mut o, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("BRANCH_NAME"), "got: {err}");
     }
 }
