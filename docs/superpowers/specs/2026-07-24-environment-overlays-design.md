@@ -110,8 +110,12 @@ on_create = "seed"
      absent. This is the only deletion mechanism.
 4. Validate the merged result through the same code path as today's
    `RpiToml::parse` (durations, healthcheck expect, secret paths, command
-   argv), plus environment-specific checks: `on_create` must name a command
-   that exists in the merged `[commands]`; `ttl` must parse as a duration.
+   argv, and — post-substitution — `[ingress].hostname` as an RFC-1123-style
+   DNS name), plus environment-specific checks: `on_create` must name a
+   command that exists in the merged `[commands]`; `ttl` must parse as a
+   duration; the merged hostname, if present, must differ from the base
+   file's hostname (an environment must override it or clear it with
+   `hostname = ""` — see "Production-key protection" below).
 
 ## Variables and interpolation
 
@@ -164,6 +168,15 @@ keeps compose project names manageable.
   `environment` (plus base name, env name, slug). Deploying a base config
   into a key registered as an environment is rejected, and vice versa. This
   covers stale or modified CLIs sending the wrong key.
+- Hostname: an environment's resolved `[ingress].hostname` must differ from
+  its base project's hostname — otherwise the environment's first
+  successful deploy would re-route the production hostname to the
+  environment's own host port. The CLI enforces this at resolve time
+  (comparing the merged hostname against the base file's, before the key
+  even exists on the agent); the agent enforces it again at deploy time
+  (comparing the incoming hostname against the registered base project's,
+  by `environment.base`) with a 409, covering a stale or hand-crafted CLI
+  that skips the local check.
 
 ### Secrets
 

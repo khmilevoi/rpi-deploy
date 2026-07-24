@@ -35,6 +35,8 @@ sequenceDiagram
         alt key exists with the opposite kind (base vs environment)
             Reg-->>API: conflicting registration
             API-->>CLI: 409 - kind mismatch
+        else environment deploy with a hostname matching the registered base project's hostname
+            API-->>CLI: 409 - hostname collision with base
         else compatible or unregistered
             API->>P: run pipeline (fetch..start..health..route..on_create..gc)
             P-->>API: stage events, then final status
@@ -122,6 +124,19 @@ sequenceDiagram
    `on_create` is set, it must name a command that survives in the merged
    `[commands]` table (which the overlay may itself have replaced wholesale),
    or resolution fails right here, before any agent contact.
+   - *Failure*: `validate_common` now also rejects a merged `[ingress]
+     .hostname` that isn't a well-formed DNS name (RFC-1123-style: label
+     length, charset, no leading/trailing `-`) — this catches a raw
+     `${BRANCH_NAME}` substituted straight into the hostname (a `/` in a
+     branch name like `feature/login` is invalid DNS), which is why
+     `${RPI_ENV_SLUG}` is the variable meant for that field. Separately, if
+     the merged hostname is present and equals the *base* file's hostname —
+     whether inherited from an overlay with no `[ingress]` at all, or set
+     explicitly to the same string — resolution fails right here: an
+     environment must override the hostname to something else or clear it
+     with `hostname = ""`. Without this check, the environment's first
+     successful deploy would re-route the production hostname to the
+     environment's own host port.
 5. `rpi config show [--env <env>] [--vars ...]` runs this exact resolution
    and prints the merged TOML — plus a synthetic `[environment]` block when
    one was selected — without contacting the agent at all; it's the way to
@@ -151,7 +166,11 @@ sequenceDiagram
    plain-deploy name validation (no `--`) yet is *already* registered as an
    environment — for example a registry row seeded by a version that
    predates this validation, not something a current CLI can produce on
-   either side by accident.
+   either side by accident. Right after that, for an environment deploy that
+   carries a hostname, the agent looks up the registered *base* project (by
+   `environment.base`, not the derived key) and answers 409 if its hostname
+   matches — the same production-key protection as step 4's resolve-time
+   check, but covering a stale or hand-crafted CLI that skips it.
 9. From here the deploy pipeline (`flows/deploy.md`) runs unchanged through
    fetch, build, start, health, and the optional route stage. Right after
    that point — whether or not a hostname triggered an actual route — an
@@ -209,42 +228,68 @@ sequenceDiagram
 14. A background sweep (`agent/run.rs`, on a timer whose period comes from
     `agent.toml`'s `[environments].reap_interval`, default one hour) calls
     `ReapEnvironments::execute` once per tick. It lists every environment
-    and, for each one with a `ttl` set, computes an expiry anchor — the last
-    successful deploy time, or the row's creation time if it never deployed
-    successfully — and destroys the environment (the same
-    `DestroyEnvironment` path `rpi env destroy` uses) once
-    `anchor + ttl` has passed. An environment with no `ttl` is never touched
-    by the reaper, regardless of age. An environment with an active
-    deployment is skipped for this tick and retried on the next one; a
-    destroy failure for one environment is logged and retried next tick
-    without aborting the sweep for the others — only a failure to *list*
-    environments in the first place aborts the whole sweep, since there
-    would be nothing left to iterate.
+    and, for each one with a `ttl` set, computes an expiry anchor from that
+    listing snapshot — the last successful deploy time, or the row's
+    creation time if it never deployed successfully — as a first, cheap
+    filter for "possibly expired, not active". An environment with no `ttl`
+    is never touched by the reaper, regardless of age; one with an active
+    deployment is skipped for this tick and retried on the next one.
+    - *TOCTOU guard*: right before actually destroying a candidate that
+      passed both of those checks, the reaper re-fetches that one row fresh
+      and recomputes the same expiry test against it. A redeploy that
+      completed successfully *during* the sweep — after the listing snapshot
+      was taken but before the destroy call — refreshes `last_success_at`
+      without ever showing up as "active" at the instant the active-deploy
+      check ran; without this re-check the reaper would destroy an
+      environment that was just redeployed. If the fresh row is no longer
+      expired (or has vanished, or lost its environment metadata), the
+      candidate is skipped for this tick instead of destroyed.
+    - A destroy failure for one environment is logged and retried next tick
+      without aborting the sweep for the others — only a failure to *list*
+      environments in the first place aborts the whole sweep, since there
+      would be nothing left to iterate.
 
 ## Source anchors
 
 - `crates/bin/src/cli/overlay.rs` — overlay parsing (`RpiTomlOverlay`,
   `deny_unknown_fields`), `${...}` interpolation restricted to
   `source.branch`/`ingress.hostname`, `RPI_ENV_SLUG` derivation, the merge
-  (`apply_overlay`), key derivation (`derive_key`), and the
-  `resolve`/`resolve_from`/`render_resolved` entry points that
-  `rpi deploy --env`, `rpi config show`, `rpi command --env`, and
-  `rpi secrets send/ls --env` all call.
-- `crates/bin/src/cli/envcmds.rs` — `rpi env ls/destroy/reset-data`:
-  resolves the local overlay to compute the target key, confirms
-  destructive actions by requiring the key be typed back (unless `--yes`),
-  and calls the matching agent endpoint.
+  (`apply_overlay`), key derivation (`derive_key`), the base-hostname-hijack
+  check in `resolve_from` (merged hostname vs. the base file's, captured
+  before the merge), and the `resolve`/`resolve_from`/`render_resolved`
+  entry points that `rpi deploy --env`, `rpi config show`,
+  `rpi command --env`, and `rpi secrets send/ls --env` all call.
+- `crates/bin/src/cli/rpitoml.rs` — `validate_hostname` (RFC-1123-style:
+  length, labels, charset), run from `validate_common` on both the base
+  file and the merged overlay result, so a raw `${BRANCH_NAME}` (as opposed
+  to the sanitized `${RPI_ENV_SLUG}`) substituted into `[ingress].hostname`
+  is caught post-substitution.
+- `crates/bin/src/cli/envcmds.rs` — `rpi env ls/destroy/reset-data`.
+  `destroy`/`reset-data`'s `resolve_key` reads only `./rpi.toml` (never the
+  overlay file) to get the base name, then derives the key locally from
+  `--env`/`--vars` — so destroying or resetting an environment never
+  requires `rpi.<env>.toml` to still exist or still resolve; `env ls`
+  distinguishes "no `rpi.toml` here" (its friendly `--all` hint) from any
+  other resolution failure, which now propagates instead of being folded
+  into the same message.
 - `crates/bin/src/agent/http.rs` — `create_deployment`'s pre-registry shape
   guards (`is_valid_name`, `is_valid_env_part`, the `--`-rejection for plain
-  deploys, the base/env/slug/key-match checks for environment deploys) and
-  the post-lookup kind-mismatch 409; the `/v1/environments` routes
+  deploys, the base/env/slug/key-match checks for environment deploys), the
+  post-lookup kind-mismatch 409, and — once `config.environment` is set —
+  the base-project hostname-collision 409 (looks up `environment.base` in
+  the registry and compares hostnames); the `/v1/environments` routes
   (`list_environments_handler`, `destroy_environment_handler`,
   `reset_environment_handler`).
+- `crates/bin/src/cli/commands.rs` — `secrets_send`, `secrets_ls`, and
+  `command` each gate `Feature::Environments` in addition to their own
+  feature (`Secrets`/`Commands`) whenever the overlay resolution selected an
+  environment, matching `deploy`'s existing gate.
 - `crates/application/src/environments.rs` — the four environment use
   cases: `ListEnvironments`, `DestroyEnvironment` (idempotent delete,
   base-key guard, delegates teardown to `RemoveProject`),
   `ResetEnvironmentData` (its own active-deploy guard, `compose down -v`
-  plus `set_on_create_done(false)`), and `ReapEnvironments` (the TTL sweep).
+  plus `set_on_create_done(false)`), and `ReapEnvironments` (the TTL sweep,
+  including its pre-destroy fresh re-check of each candidate).
 - `crates/application/src/deploy.rs` — `run_stages`'s `on_create` block:
   runs once after health (and the optional route stage) when `on_create` is
   set and not yet done, fails the deploy on a nonzero exit or an undeclared

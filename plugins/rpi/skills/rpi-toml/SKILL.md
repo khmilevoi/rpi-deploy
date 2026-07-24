@@ -172,6 +172,12 @@ Rules:
   `<base>--<env>--<slug>` once `${RPI_ENV_SLUG}` was actually substituted.
   `--` in a project name is reserved for this; a base `rpi.toml` whose
   `project.name` contains `--` is rejected agent-side.
+- If the base `rpi.toml` sets `[ingress].hostname`, the overlay must
+  override it to a different value or clear it with `hostname = ""` —
+  inheriting or repeating the base hostname is rejected (CLI resolve-time
+  error, and a 409 from the agent as a second line of defense), since it
+  would otherwise hijack the production route on the environment's first
+  successful deploy.
 - `rpi config show --env <env> [--vars ...]` prints the fully resolved
   configuration (base + overlay merged, `[environment]` appended) without
   contacting the agent — the fastest way to check what a deploy would send.
