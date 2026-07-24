@@ -33,7 +33,8 @@ gets an isolated copy of each for free.
 
 - Base: `./rpi.toml` (unchanged; remains the production configuration).
 - Overlay: `./rpi.<env>.toml`, where `<env>` matches `^[a-z][a-z0-9-]*$` and
-  is not a reserved word (initially only `show`, reserved for CLI syntax).
+  is not a reserved word. Reserved: `show`, `ls`, `destroy`, `reset-data`
+  (current and likely future `rpi config` / `rpi env` subcommand names).
 - `rpi deploy --env test` requires `rpi.test.toml` to exist. A missing
   overlay file is an error (listing the `rpi.*.toml` files found), never a
   silent deploy of the base configuration.
@@ -101,8 +102,10 @@ on_create = "seed"
 3. Typed merge (schema-aware, not generic TOML deep-merge):
    - a scalar set in the overlay replaces the base value;
    - tables (`[source]`, `[ingress]`, …) merge field-wise;
-   - arrays (`[secrets].files`) and `[commands]` replace wholesale, never
-     concatenate;
+   - arrays (`[secrets].files`) replace wholesale, never concatenate;
+   - `[commands]` is the one exception to field-wise table merging: if the
+     overlay declares `[commands]` at all, the overlay's table replaces the
+     base table as a whole (no per-command merging);
    - an explicit empty string (`hostname = ""`) resets an optional field to
      absent. This is the only deletion mechanism.
 4. Validate the merged result through the same code path as today's
@@ -154,7 +157,9 @@ keeps compose project names manageable.
   and `[project].name` is forbidden in overlays — reaching the base key is
   syntactically impossible. New validation: `--` is forbidden inside a base
   `[project].name` (otherwise a base project named `myapp--test` would
-  collide with an environment key).
+  collide with an environment key). This is a deliberate breaking change for
+  any existing project whose name contains `--`: the CLI rejects it with an
+  error asking to rename the project.
 - Agent: the registry records each project's kind — `base` or
   `environment` (plus base name, env name, slug). Deploying a base config
   into a key registered as an environment is rejected, and vice versa. This
@@ -187,7 +192,8 @@ New commands:
 - `rpi env ls [--all]` — lists environments from the agent registry: key,
   base, env, slug, created, last deploy, TTL, time to expiry, status.
   Default scope is the current project (base name from `./rpi.toml`);
-  `--all` lists every environment on the agent.
+  `--all` lists every environment on the agent. Without an `rpi.toml` in the
+  current directory, `--all` is required.
 - `rpi env destroy <env> [--vars ...] [--yes]` — full teardown (see
   below). Interactive confirmation shows the derived key; `--yes` for CI.
 - `rpi env reset-data <env> [--vars ...] [--yes]` — stops the stack,
