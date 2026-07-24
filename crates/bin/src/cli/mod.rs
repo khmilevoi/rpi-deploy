@@ -4,6 +4,7 @@ pub mod config;
 pub mod connect;
 pub mod init;
 pub mod keys;
+pub mod overlay;
 pub mod prompt;
 pub mod rpitoml;
 pub mod setup;
