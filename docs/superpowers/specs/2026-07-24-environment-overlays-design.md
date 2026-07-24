@@ -287,7 +287,13 @@ CLI (all before any agent contact):
 
 Agent:
 
-- Kind mismatch (base vs environment) → 409 with a clear message.
+- A base (no `environment` block) deploy whose `project.name` contains `--`
+  is rejected 400 before the registry is ever consulted — `--` is reserved
+  for derived environment keys, so a base-into-environment-key collision
+  can't reach the kind check at all. Kind mismatch (base vs environment)
+  → 409 with a clear message fires only for a key that passes name
+  validation yet is already registered as the other kind (e.g. a legacy
+  registry entry predating this validation).
 - destroy/reset-data during an in-progress deploy → 409; reaper skips until
   the next tick.
 

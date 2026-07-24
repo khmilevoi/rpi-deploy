@@ -40,6 +40,10 @@ sequenceDiagram
         P->>CF: route — publish hostname to the stable host port
         CF-->>P: applied / skipped / error
     end
+    opt environment deploy, on_create declared and not yet run
+        P->>D: on_create — exec the declared command once
+        D-->>P: exit code (0 required)
+    end
     P->>P: gc — best-effort prune of dangling images
     P-->>API: stage events as they happen, then the final status
     API-->>CLI: SSE stream, rendered as a staged pipeline
@@ -70,7 +74,12 @@ stateDiagram-v2
    remote before submitting anything.
 2. The CLI submits the deploy request over the agent's HTTP API. The agent
    answers immediately with a deployment id and whether the deploy started
-   right away or was queued behind another one.
+   right away or was queued behind another one. A deploy for an environment
+   overlay (`rpi deploy --env`) carries an extra `environment` block that the
+   agent validates — name shape, and that the target key isn't already
+   registered as the other kind (base project vs. environment) — before it
+   ever reaches the queue; see `flows/environments.md` for that guard and
+   for the overlay resolution that produces the request in the first place.
 3. Queuing is per project and latest-wins: at most one deploy waits behind
    the one that's currently running. If a second request arrives while the
    first is running, it waits. If a third request arrives while the second
@@ -131,16 +140,25 @@ stateDiagram-v2
       the route call itself errors, the deploy **fails** here; the
       application stack is already up and healthy at this point, just not
       reachable at its public hostname.
-11. **Gc** — a best-effort prune of dangling Docker images to reclaim disk
+11. **On_create** — runs only for an environment deploy (`rpi deploy --env`)
+    whose overlay declared `[environment].on_create` and whose registry row
+    hasn't run it yet. Right after health (and the optional route above),
+    the agent execs that one declared command, once per environment key, and
+    flips a persisted flag so later redeploys of the same key skip it. Full
+    detail — including the flag, and `rpi env reset-data`'s way of clearing
+    it — is in `flows/environments.md`.
+    - *Failure*: a nonzero exit fails the deploy here; the flag stays unset,
+      so the next deploy of the same key retries it.
+12. **Gc** — a best-effort prune of dangling Docker images to reclaim disk
     space. A gc error, or its own timeout, is always downgraded to
     "skipped" — it never fails the deploy.
-12. The agent records the final status (success, failed, or canceled) and
+13. The agent records the final status (success, failed, or canceled) and
     closes the stream. The CLI prints a final stamp (success / superseded /
     failed) with elapsed time, service count, and hostname if any, and
     re-prints any warnings (like the ingress-disabled one) next to it so
     they can't scroll away unseen. A failed deploy makes the CLI exit
     non-zero.
-13. **Canceling** (`rpi deploy --cancel`) cancels every active deployment for
+14. **Canceling** (`rpi deploy --cancel`) cancels every active deployment for
     the project at once, not just one: a deploy still waiting in the queue
     is removed and marked canceled before it ever runs; a deploy that's
     already running is signaled to stop wherever it currently is (killing
@@ -152,11 +170,11 @@ stateDiagram-v2
     stream sees a status other than success or superseded, so an explicit
     `--cancel` still prints the same failed-style stamp and exits non-zero,
     just like a genuine failure.
-14. When a running deploy ends — success, failure, or cancellation — the
+15. When a running deploy ends — success, failure, or cancellation — the
     agent immediately promotes the one deploy waiting behind it (if any) to
     running. If nothing is queued, the project goes idle until the next
     `rpi deploy`.
-15. If the agent process itself restarts while a deployment is still queued
+16. If the agent process itself restarts while a deployment is still queued
     or running, that row is not resumed: every such deployment is marked
     interrupted at startup, and the project simply waits for the next
     `rpi deploy` to start fresh.
@@ -164,8 +182,11 @@ stateDiagram-v2
 ## Source anchors
 
 - `crates/application/src/deploy.rs` — the deploy use case: runs fetch →
-  build → start → health → route → gc in order, emits the stage/log events
-  the CLI renders, and records the final status.
+  build → start → health → route → on_create (environment deploys only) →
+  gc in order, emits the stage/log events the CLI renders, and records the
+  final status. The `on_create` stage itself, and the pre-queue
+  `environment`-block guards in `crates/bin/src/agent/http.rs`'s
+  `create_deployment`, are covered in full in `flows/environments.md`.
 - `crates/application/src/scheduler.rs` — the per-project deploy queue:
   starts a deploy immediately if the project is idle, otherwise queues it; a
   newer queued request supersedes the one waiting; drives cancel and

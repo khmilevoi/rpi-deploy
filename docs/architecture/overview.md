@@ -79,9 +79,11 @@ flowchart LR
    `agent.toml` sets one (Windows / local-dev only). That router is what
    every subcommand that talks to the agent ultimately calls: creating,
    inspecting, or cancelling deployments; listing, removing, or controlling
-   projects; streaming logs; sending env vars and secrets; and agent-level
-   status, stats, doctor, logs, and garbage collection (`rpi init` and `rpi
-   setup` never reach it, per step 3 above).
+   projects; streaming logs; sending env vars and secrets; listing,
+   destroying, or resetting environment overlays (`rpi env`, see
+   `flows/environments.md`); and agent-level status, stats, doctor, logs,
+   and garbage collection (`rpi init` and `rpi setup` never reach it, per
+   step 3 above).
 6. **A deploy drives Docker Compose and Git.** Handling a deploy request
    builds and starts the project's Docker Compose stack and clones or
    fetches the project's repository from GitHub as part of that pipeline
