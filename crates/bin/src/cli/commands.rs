@@ -583,7 +583,8 @@ pub async fn rm(
     ));
     if let Some(hostname) = resp.hostname {
         output::note(format!(
-            "the DNS record for {hostname} may still exist; delete it manually: Cloudflare dashboard -> your zone -> DNS -> remove the {hostname} CNAME"
+            "if the agent has Cloudflare ingress enabled, the DNS record for {hostname} was removed; \
+             otherwise delete it manually in the Cloudflare dashboard"
         ));
     }
     Ok(())

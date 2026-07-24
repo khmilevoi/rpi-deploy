@@ -268,6 +268,8 @@ pub trait CloudflareApi: Send + Sync {
         name: &str,
         tunnel_id: &str,
     ) -> Result<(), DomainError>;
+    /// Delete the proxied CNAME for <name> if it exists. Absent record is Ok.
+    async fn delete_tunnel_cname(&self, zone: &str, name: &str) -> Result<(), DomainError>;
 }
 
 #[cfg_attr(feature = "mocks", automock)]

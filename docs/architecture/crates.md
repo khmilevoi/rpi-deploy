@@ -134,9 +134,10 @@ sequenceDiagram
   layer defines, e.g. `Source` (fetch project code), `ContainerRuntime` (run
   containers), `ProjectRepository` / `DeploymentHistory` (persistence),
   `SecretStore` / `SecretsWriter` (secrets at rest and on disk),
-  `HealthGate` (deploy health check), `Ingress` (upserts hostname -> port on
-  the edge) / `CloudflareApi` (tunnel create/adopt and DNS CNAME writes),
-  `StatsProvider` / `SystemProbe` (host and service metrics).
+  `HealthGate` (deploy health check), `Ingress` (upserts/removes hostname ->
+  port on the edge) / `CloudflareApi` (tunnel create/adopt, DNS CNAME
+  writes and deletes), `StatsProvider` / `SystemProbe` (host and service
+  metrics).
 - `crates/bin/src/cli/upgrade.rs` and the `Cmd::Upgrade` arm in
   `crates/bin/src/main.rs` — `rpi upgrade`'s tunnel-for-version-only, then
   direct-SSH-update behavior.

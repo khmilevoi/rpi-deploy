@@ -4,10 +4,10 @@ When a project declares a public hostname, `rpi` publishes it to the internet
 through a Cloudflare Tunnel instead of opening any port on the Pi itself.
 This document covers the one-time setup that creates or adopts that tunnel,
 what happens on every deploy that keeps the hostname routed to the right
-place, and the path a real request takes to reach the container. See
-`flows/agent-setup.md` for the rest of the one-time bootstrap (installing the
-binary, the systemd unit) and `flows/deploy.md` for the full deploy pipeline
-this fits into.
+place, what happens when `rpi rm` removes that route again, and the path a
+real request takes to reach the container. See `flows/agent-setup.md` for the
+rest of the one-time bootstrap (installing the binary, the systemd unit) and
+`flows/deploy.md` for the full deploy pipeline this fits into.
 
 ```mermaid
 sequenceDiagram
@@ -15,6 +15,7 @@ sequenceDiagram
     participant CF as Cloudflare API
     participant CFD as cloudflared config (on Pi)
     participant Dep as Deploy route stage
+    participant Rm as rpi rm (ingress remove)
 
     Note over Setup: sudo rpi agent setup --with-cloudflared (token file + domain)
     alt config.yml already present (hand-built tunnel)
@@ -47,6 +48,15 @@ sequenceDiagram
             Dep->>CFD: roll back config.yml to its prior contents
         end
     end
+
+    Note over Rm: later, `rpi rm <project>` (project has a hostname)
+    Rm->>CFD: read config.yml
+    alt matching ingress rule found
+        Rm->>CFD: drop that one rule, restart cloudflared
+    else no matching rule (already caught up, or never routed)
+        Note over CFD,Rm: cloudflared config left untouched, no restart
+    end
+    Rm->>CF: delete the proxied DNS CNAME for hostname (already absent is fine)
 ```
 
 ```mermaid
@@ -123,12 +133,22 @@ flowchart LR
    routed?" check say yes, and it would never retry the DNS/restart step for
    this hostname again. A DNS record that already got written before the
    failure, though, is not and cannot be undone by this rollback.
-7. **Removing a route** (dropping the hostname, or removing the project)
-   edits `config.yml` to delete just that one ingress entry and restarts
-   `cloudflared` the same way — but it does not delete the DNS record. The
-   hostname keeps resolving to the tunnel; once `cloudflared` reloads
-   without a matching rule, requests to it simply fall through to the
-   catch-all (`http_status:404`) instead of reaching any container.
+7. **Removing a project** (`rpi rm`) undoes both sides of the route. If the
+   project's hostname still has a matching ingress rule, that one entry is
+   dropped from `config.yml` and `cloudflared` is restarted the same way a
+   route change would be; if there's no matching rule (already dropped by
+   hand, or the hostname was never actually routed), `config.yml` is left
+   untouched and `cloudflared` is not restarted. Either way, the DNS record
+   deletion happens next: the Cloudflare API is asked to delete the proxied
+   CNAME for that hostname, looking it up by name first — an already-absent
+   record is not an error. Only once both steps succeed does `rpi rm` tell
+   the operator the DNS record was removed; if Cloudflare isn't configured
+   (the disabled ingress backend), nothing is touched and the CLI's note
+   tells the operator to delete the record manually instead. If the restart
+   itself fails when a matching rule was found, `config.yml` is rolled back
+   the same way a failed route change is (step 6), and the whole remove
+   fails before the DNS delete ever runs — the CNAME is left in place for a
+   later retry.
 8. **The stable host port is why `config.yml` rarely needs to change at
    all.** Each project keeps the same host port across every redeploy
    (allocated once, kept stable elsewhere in the pipeline — see
@@ -184,13 +204,17 @@ flowchart LR
   enabling the `cloudflared` service.
 - `crates/infrastructure/src/cloudflare.rs` — the Cloudflare API client:
   resolves the account from the token, finds-or-creates (adopts) a tunnel by
-  name, and upserts the proxied DNS CNAME that points a hostname at the
-  tunnel.
+  name, upserts the proxied DNS CNAME that points a hostname at the tunnel,
+  and deletes that CNAME (looking it up by name first; an absent record is
+  not an error).
 - `crates/infrastructure/src/cloudflared.rs` — edits the local `cloudflared`
   `config.yml` (merges exactly one ingress rule, keeps the catch-all last),
   calls the Cloudflare API for DNS, restarts `cloudflared` only when the file
-  actually changed, and rolls the file back on any DNS/restart failure; also
-  the disabled-ingress fallback used whenever Cloudflare isn't configured.
+  actually changed, and rolls the file back on any DNS/restart failure; on
+  remove, drops the one matching ingress rule (or leaves the file untouched
+  if none matches) and either way deletes the hostname's DNS CNAME through
+  the same API client; also the disabled-ingress fallback used whenever
+  Cloudflare isn't configured.
 - `crates/infrastructure/src/hostnet.rs` — best-effort local network address
   detection, used only for the LAN-exposure log line; it does not
   participate in the Cloudflare Tunnel path and does not allocate the stable
