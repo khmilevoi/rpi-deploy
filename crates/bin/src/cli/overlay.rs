@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::cli::rpitoml::CommandValue;
+use crate::cli::rpitoml::{CommandValue, RpiToml};
 
 #[allow(dead_code)]
 pub const RESERVED_ENV_NAMES: &[&str] = &["show", "ls", "destroy", "reset-data"];
@@ -332,9 +332,175 @@ pub fn interpolate(
     Ok(used)
 }
 
+/// `""` resets an optional field to `None`; any other value replaces it.
+fn reset_or(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Typed schema-aware merge (spec: scalars replace, tables field-wise,
+/// arrays and [commands] wholesale, "" resets optionals).
+#[allow(dead_code)]
+pub fn apply_overlay(base: &mut RpiToml, overlay: RpiTomlOverlay) {
+    if let Some(s) = overlay.source {
+        if let Some(repo) = s.repo {
+            base.source.repo = repo;
+        }
+        if let Some(branch) = s.branch {
+            base.source.branch = branch;
+        }
+    }
+    if let Some(b) = overlay.build {
+        if let Some(compose) = b.compose {
+            base.build.compose = compose;
+        }
+    }
+    if let Some(i) = overlay.ingress {
+        if let Some(hostname) = i.hostname {
+            base.ingress.hostname = reset_or(hostname);
+        }
+        if let Some(service) = i.service {
+            base.ingress.service = service;
+        }
+        if let Some(port) = i.port {
+            base.ingress.port = port;
+        }
+        if let Some(expose) = i.expose {
+            base.ingress.expose = reset_or(expose);
+        }
+    }
+    if let Some(t) = overlay.timeouts {
+        if let Some(v) = t.fetch {
+            base.timeouts.fetch = reset_or(v);
+        }
+        if let Some(v) = t.build {
+            base.timeouts.build = reset_or(v);
+        }
+        if let Some(v) = t.up {
+            base.timeouts.up = reset_or(v);
+        }
+        if let Some(v) = t.command {
+            base.timeouts.command = reset_or(v);
+        }
+    }
+    if let Some(h) = overlay.healthcheck {
+        if let Some(v) = h.path {
+            base.healthcheck.path = reset_or(v);
+        }
+        if let Some(v) = h.expect {
+            base.healthcheck.expect = reset_or(v);
+        }
+        if let Some(v) = h.timeout {
+            base.healthcheck.timeout = reset_or(v);
+        }
+    }
+    if let Some(s) = overlay.secrets {
+        if let Some(env) = s.env {
+            base.secrets.env = reset_or(env);
+        }
+        if let Some(files) = s.files {
+            base.secrets.files = files;
+        }
+    }
+    if let Some(commands) = overlay.commands {
+        base.commands = Some(commands);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BASE: &str = r#"
+schema = 1
+
+[project]
+name = "myapp"
+
+[source]
+repo = "git@github.com:acme/myapp.git"
+branch = "main"
+
+[ingress]
+hostname = "app.example.com"
+service = "web"
+port = 3000
+
+[healthcheck]
+path = "/health"
+
+[secrets]
+env = ".env"
+
+[commands]
+seed = "node seed.js"
+"#;
+
+    #[test]
+    fn merge_replaces_scalars_field_wise() {
+        let mut base = crate::cli::rpitoml::RpiToml::parse(BASE).unwrap();
+        let o = overlay("[source]\nbranch = \"develop\"\n\n[ingress]\nhostname = \"test.example.com\"\n\n[secrets]\nenv = \".env.test\"\n");
+        apply_overlay(&mut base, o);
+        assert_eq!(base.source.branch, "develop");
+        assert_eq!(
+            base.source.repo, "git@github.com:acme/myapp.git",
+            "untouched"
+        );
+        assert_eq!(base.ingress.hostname.as_deref(), Some("test.example.com"));
+        assert_eq!(base.ingress.service, "web", "untouched");
+        assert_eq!(base.secrets.env.as_deref(), Some(".env.test"));
+    }
+
+    #[test]
+    fn empty_string_resets_optional_fields() {
+        let mut base = crate::cli::rpitoml::RpiToml::parse(BASE).unwrap();
+        let o = overlay(
+            "[ingress]\nhostname = \"\"\n\n[secrets]\nenv = \"\"\n\n[healthcheck]\npath = \"\"\n",
+        );
+        apply_overlay(&mut base, o);
+        assert_eq!(base.ingress.hostname, None);
+        assert_eq!(base.secrets.env, None);
+        assert_eq!(base.healthcheck.path, None);
+    }
+
+    #[test]
+    fn commands_table_replaces_wholesale() {
+        let mut base = crate::cli::rpitoml::RpiToml::parse(BASE).unwrap();
+        let o = overlay("[commands]\nmigrate = \"npx prisma migrate deploy\"\n");
+        apply_overlay(&mut base, o);
+        let commands = base.commands.as_ref().unwrap();
+        assert!(commands.contains_key("migrate"));
+        assert!(
+            !commands.contains_key("seed"),
+            "base commands must be replaced, not merged"
+        );
+    }
+
+    #[test]
+    fn secrets_files_replace_wholesale() {
+        let mut base = crate::cli::rpitoml::RpiToml::parse(&BASE.replace(
+            "env = \".env\"",
+            "env = \".env\"\nfiles = [\"a.pem\", \"b.pem\"]",
+        ))
+        .unwrap();
+        let o = overlay("[secrets]\nfiles = [\"c.pem\"]\n");
+        apply_overlay(&mut base, o);
+        assert_eq!(base.secrets.files, vec!["c.pem".to_string()]);
+    }
+
+    #[test]
+    fn merged_result_passes_common_validation() {
+        let mut base = crate::cli::rpitoml::RpiToml::parse(BASE).unwrap();
+        let o = overlay("[healthcheck]\ntimeout = \"soon\"\n");
+        apply_overlay(&mut base, o);
+        assert!(
+            base.validate_common().is_err(),
+            "bad merged duration must fail"
+        );
+    }
 
     #[test]
     fn parses_minimal_overlay() {

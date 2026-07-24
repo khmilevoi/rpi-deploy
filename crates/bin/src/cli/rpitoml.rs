@@ -25,6 +25,10 @@ pub struct RpiToml {
     /// via Option<toml::Value> because serde tolerates unknown sections.
     #[serde(default, rename = "env")]
     legacy_env: Option<toml::Value>,
+    /// [environment] is only valid in overlay files; detected here so the
+    /// base file can reject it with a clear error.
+    #[serde(default, rename = "environment")]
+    environment_section: Option<toml::Value>,
     #[serde(default)]
     pub commands: Option<BTreeMap<String, CommandValue>>,
 }
@@ -200,49 +204,70 @@ impl RpiToml {
                 parsed.schema
             );
         }
-        if let Some(timeout) = &parsed.healthcheck.timeout {
+        if parsed.project.name.contains("--") {
+            anyhow::bail!(
+                "rpi.toml [project].name '{}' must not contain '--' (reserved for environment keys; rename the project)",
+                parsed.project.name
+            );
+        }
+        if parsed.environment_section.is_some() {
+            anyhow::bail!(
+                "rpi.toml: [environment] is only allowed in overlay files (rpi.<env>.toml)"
+            );
+        }
+        parsed.validate_common()?;
+        Ok(parsed)
+    }
+
+    /// Validation shared by the base file (`parse`) and a merged overlay
+    /// result: duration formats, `[healthcheck].expect`, `[ingress].expose`,
+    /// legacy `[env]` rejection, secret-path checks and `[commands]` checks.
+    /// Excludes the schema check and the `--` project-name ban, which only
+    /// apply to the base file before a merge.
+    pub fn validate_common(&self) -> anyhow::Result<()> {
+        if let Some(timeout) = &self.healthcheck.timeout {
             parse_duration_secs(timeout)
                 .map_err(|e| anyhow::anyhow!("rpi.toml [healthcheck]: {e}"))?;
         }
         for (field, value) in [
-            ("fetch", &parsed.timeouts.fetch),
-            ("build", &parsed.timeouts.build),
-            ("up", &parsed.timeouts.up),
-            ("command", &parsed.timeouts.command),
+            ("fetch", &self.timeouts.fetch),
+            ("build", &self.timeouts.build),
+            ("up", &self.timeouts.up),
+            ("command", &self.timeouts.command),
         ] {
             if let Some(timeout) = value {
                 parse_duration_secs(timeout)
                     .map_err(|e| anyhow::anyhow!("rpi.toml [timeouts].{field}: {e}"))?;
             }
         }
-        if let Some(expect) = &parsed.healthcheck.expect {
+        if let Some(expect) = &self.healthcheck.expect {
             validate_expect(expect).map_err(|e| anyhow::anyhow!("rpi.toml [healthcheck]: {e}"))?;
         }
-        if let Some(expose) = &parsed.ingress.expose {
+        if let Some(expose) = &self.ingress.expose {
             if ExposeMode::parse(expose).is_none() {
                 anyhow::bail!(
                     "invalid rpi.toml [ingress].expose '{expose}' (use \"private\" or \"lan\")"
                 );
             }
         }
-        if parsed.legacy_env.is_some() {
+        if self.legacy_env.is_some() {
             anyhow::bail!(
                 "rpi.toml: [env] was replaced by [secrets]; move `file = \"...\"` to:\n[secrets]\nenv = \"...\""
             );
         }
-        if let Some(env) = &parsed.secrets.env {
+        if let Some(env) = &self.secrets.env {
             pi_infrastructure::secretpath::validate_rel_path(env)
                 .map_err(|e| anyhow::anyhow!("rpi.toml [secrets].env: '{env}': {e}"))?;
         }
         let mut seen = std::collections::BTreeSet::new();
-        for path in &parsed.secrets.files {
+        for path in &self.secrets.files {
             pi_infrastructure::secretpath::validate_rel_path(path)
                 .map_err(|e| anyhow::anyhow!("rpi.toml [secrets].files: '{path}': {e}"))?;
             if !seen.insert(path.as_str()) {
                 anyhow::bail!("rpi.toml [secrets].files: duplicate path '{path}'");
             }
         }
-        if let Some(commands) = &parsed.commands {
+        if let Some(commands) = &self.commands {
             if commands.is_empty() {
                 anyhow::bail!(
                     "rpi.toml [commands] is empty - declare a command or remove the section"
@@ -257,7 +282,7 @@ impl RpiToml {
                 command_spec(name, value)?;
             }
         }
-        Ok(parsed)
+        Ok(())
     }
 
     pub fn load(path: &Path) -> anyhow::Result<RpiToml> {
@@ -635,6 +660,20 @@ files = ["certs/server.pem"]
         );
         let err = RpiToml::parse(&toml).unwrap_err().to_string();
         assert!(err.contains("quote"), "got: {err}");
+    }
+
+    #[test]
+    fn base_name_with_double_dash_is_rejected() {
+        let toml = SAMPLE.replace("name = \"rateme\"", "name = \"rate--me\"");
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("--"), "got: {err}");
+    }
+
+    #[test]
+    fn environment_section_in_base_is_rejected() {
+        let toml = format!("{SAMPLE}\n[environment]\nttl = \"7d\"\n");
+        let err = RpiToml::parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("[environment]"), "got: {err}");
     }
 
     #[test]
