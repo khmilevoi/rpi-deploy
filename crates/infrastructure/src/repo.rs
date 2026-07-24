@@ -3,14 +3,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pi_domain::contracts::ProjectRepository;
 use pi_domain::entities::{
-    ExposeMode, HealthcheckConfig, Project, ProjectConfig, StageTimeoutOverrides,
+    EnvironmentMeta, ExposeMode, HealthcheckConfig, Project, ProjectConfig, StageTimeoutOverrides,
 };
 use pi_domain::error::DomainError;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::sqlite::{storage_err, Db};
 
-const SELECT: &str = "SELECT name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose, commands, command_timeout_secs FROM projects";
+const SELECT: &str = "SELECT name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose, commands, command_timeout_secs, env_name, env_base, env_slug, env_ttl_secs, env_on_create, env_on_create_done, last_success_at FROM projects";
 
 pub struct SqliteProjectRepo {
     db: Db,
@@ -29,6 +29,16 @@ impl SqliteProjectRepo {
 }
 
 fn row_to_project(row: &rusqlite::Row<'_>) -> Result<Project, rusqlite::Error> {
+    let environment = match row.get::<_, Option<String>>(12)? {
+        Some(env) => Some(EnvironmentMeta {
+            env,
+            base: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
+            slug: row.get(14)?,
+            ttl_secs: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
+            on_create: row.get(16)?,
+        }),
+        None => None,
+    };
     Ok(Project {
         config: ProjectConfig {
             name: row.get(0)?,
@@ -43,14 +53,12 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> Result<Project, rusqlite::Error> {
             timeouts: StageTimeoutOverrides::default(), // per-deploy input, not stored
             commands: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
             command_timeout_secs: row.get(11)?,
-            // Task 9 persists real overlay metadata; not stored yet.
-            environment: None,
+            environment,
         },
         host_port: row.get(7)?,
         created_at: row.get(8)?,
-        // Task 9 persists these fields; not stored yet.
-        on_create_done: false,
-        last_success_at: None,
+        on_create_done: row.get::<_, i64>(17)? != 0,
+        last_success_at: row.get(18)?,
     })
 }
 
@@ -98,9 +106,25 @@ impl ProjectRepository for SqliteProjectRepo {
                     )
                     .optional()
                     .map_err(storage_err)?;
+                let (env_name, env_base, env_slug, env_ttl_secs, env_on_create): (
+                    Option<&str>,
+                    Option<&str>,
+                    Option<&str>,
+                    Option<i64>,
+                    Option<&str>,
+                ) = match &config.environment {
+                    Some(meta) => (
+                        Some(meta.env.as_str()),
+                        Some(meta.base.as_str()),
+                        meta.slug.as_deref(),
+                        meta.ttl_secs.map(|v| v as i64),
+                        meta.on_create.as_deref(),
+                    ),
+                    None => (None, None, None, None, None),
+                };
                 if exists.is_some() {
                     tx.execute(
-                        "UPDATE projects SET repo=?2, branch=?3, compose_path=?4, service=?5, container_port=?6, hostname=?7, expose=?8, commands=?9, command_timeout_secs=?10 WHERE name=?1",
+                        "UPDATE projects SET repo=?2, branch=?3, compose_path=?4, service=?5, container_port=?6, hostname=?7, expose=?8, commands=?9, command_timeout_secs=?10, env_name=?11, env_base=?12, env_slug=?13, env_ttl_secs=?14, env_on_create=?15 WHERE name=?1",
                         params![
                             &config.name,
                             &config.repo,
@@ -113,14 +137,19 @@ impl ProjectRepository for SqliteProjectRepo {
                             serde_json::to_string(&config.commands)
                                 .unwrap_or_else(|_| "{}".into()),
                             config.command_timeout_secs,
+                            env_name,
+                            env_base,
+                            env_slug,
+                            env_ttl_secs,
+                            env_on_create,
                         ],
                     )
                     .map_err(storage_err)?;
                 } else {
                     let port = allocate_port(&tx, min, max)?;
                     tx.execute(
-                        "INSERT INTO projects (name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose, commands, command_timeout_secs)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch(), ?9, ?10, ?11)",
+                        "INSERT INTO projects (name, repo, branch, compose_path, service, container_port, hostname, host_port, created_at, expose, commands, command_timeout_secs, env_name, env_base, env_slug, env_ttl_secs, env_on_create)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch(), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                         params![
                             &config.name,
                             &config.repo,
@@ -134,6 +163,11 @@ impl ProjectRepository for SqliteProjectRepo {
                             serde_json::to_string(&config.commands)
                                 .unwrap_or_else(|_| "{}".into()),
                             config.command_timeout_secs,
+                            env_name,
+                            env_base,
+                            env_slug,
+                            env_ttl_secs,
+                            env_on_create,
                         ],
                     )
                     .map_err(storage_err)?;
@@ -189,6 +223,72 @@ impl ProjectRepository for SqliteProjectRepo {
                 conn.execute("DELETE FROM projects WHERE name = ?1", params![name])
                     .map(|_| ())
                     .map_err(storage_err)
+            })
+            .await
+    }
+
+    async fn list_environments<'a>(
+        &self,
+        base: Option<&'a str>,
+    ) -> Result<Vec<Project>, DomainError> {
+        let base = base.map(|b| b.to_string());
+        self.db
+            .call(move |conn| {
+                let projects = match &base {
+                    Some(base) => {
+                        let mut stmt = conn
+                            .prepare(&format!(
+                                "{SELECT} WHERE env_name IS NOT NULL AND env_base = ?1 ORDER BY name"
+                            ))
+                            .map_err(storage_err)?;
+                        let rows = stmt
+                            .query_map(params![base], row_to_project)
+                            .map_err(storage_err)?
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(storage_err)?;
+                        rows
+                    }
+                    None => {
+                        let mut stmt = conn
+                            .prepare(&format!("{SELECT} WHERE env_name IS NOT NULL ORDER BY name"))
+                            .map_err(storage_err)?;
+                        let rows = stmt
+                            .query_map([], row_to_project)
+                            .map_err(storage_err)?
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(storage_err)?;
+                        rows
+                    }
+                };
+                Ok(projects)
+            })
+            .await
+    }
+
+    async fn mark_deploy_success(&self, name: &str, at: i64) -> Result<(), DomainError> {
+        let name = name.to_string();
+        self.db
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE projects SET last_success_at = ?2 WHERE name = ?1",
+                    params![name, at],
+                )
+                .map(|_| ())
+                .map_err(storage_err)
+            })
+            .await
+    }
+
+    async fn set_on_create_done(&self, name: &str, done: bool) -> Result<(), DomainError> {
+        let name = name.to_string();
+        self.db
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE projects SET env_on_create_done = ?2 WHERE name = ?1",
+                    params![name, done],
+                )
+                .map(|_| ())
+                .map_err(storage_err)
             })
             .await
     }
@@ -375,5 +475,61 @@ mod tests {
             .map(|p| p.config.name)
             .collect();
         assert_eq!(names, vec!["alpha".to_string(), "zeta".to_string()]);
+    }
+
+    fn env_cfg(name: &str, base: &str, env: &str) -> ProjectConfig {
+        let mut config = cfg(name);
+        config.environment = Some(pi_domain::entities::EnvironmentMeta {
+            env: env.into(),
+            base: base.into(),
+            slug: None,
+            ttl_secs: Some(3600),
+            on_create: Some("seed".into()),
+        });
+        config
+    }
+
+    #[tokio::test]
+    async fn upsert_persists_environment_meta_and_flags_survive_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo(&dir, 8000, 8999);
+        let p = repo
+            .upsert(&env_cfg("myapp--test", "myapp", "test"))
+            .await
+            .unwrap();
+        let meta = p.config.environment.as_ref().unwrap();
+        assert_eq!((meta.env.as_str(), meta.base.as_str()), ("test", "myapp"));
+        assert!(!p.on_create_done);
+        assert_eq!(p.last_success_at, None);
+
+        repo.set_on_create_done("myapp--test", true).await.unwrap();
+        repo.mark_deploy_success("myapp--test", 12345)
+            .await
+            .unwrap();
+        // re-upsert (new deploy) must NOT reset the runtime flags
+        let p = repo
+            .upsert(&env_cfg("myapp--test", "myapp", "test"))
+            .await
+            .unwrap();
+        assert!(p.on_create_done);
+        assert_eq!(p.last_success_at, Some(12345));
+    }
+
+    #[tokio::test]
+    async fn list_environments_filters_by_base_and_excludes_base_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo(&dir, 8000, 8999);
+        repo.upsert(&cfg("myapp")).await.unwrap();
+        repo.upsert(&env_cfg("myapp--test", "myapp", "test"))
+            .await
+            .unwrap();
+        repo.upsert(&env_cfg("other--test", "other", "test"))
+            .await
+            .unwrap();
+        let all = repo.list_environments(None).await.unwrap();
+        assert_eq!(all.len(), 2);
+        let mine = repo.list_environments(Some("myapp")).await.unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].config.name, "myapp--test");
     }
 }

@@ -48,6 +48,17 @@ fn migrations() -> Migrations<'static> {
         );
         "#,
         ),
+        M::up(
+            r#"
+        ALTER TABLE projects ADD COLUMN env_name TEXT;
+        ALTER TABLE projects ADD COLUMN env_base TEXT;
+        ALTER TABLE projects ADD COLUMN env_slug TEXT;
+        ALTER TABLE projects ADD COLUMN env_ttl_secs INTEGER;
+        ALTER TABLE projects ADD COLUMN env_on_create TEXT;
+        ALTER TABLE projects ADD COLUMN env_on_create_done INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE projects ADD COLUMN last_success_at INTEGER;
+        "#,
+        ),
     ])
 }
 
