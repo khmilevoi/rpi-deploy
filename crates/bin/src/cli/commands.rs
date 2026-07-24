@@ -22,7 +22,7 @@ pub async fn deploy(
 ) -> anyhow::Result<()> {
     let resolved = crate::cli::overlay::resolve(env.as_deref(), &vars)?;
     let rpitoml = resolved.rpitoml;
-    let _env_selection = resolved.env;
+    let env_selection = resolved.env;
     let project = rpitoml.to_project_config();
     output::show_deploy_banner(&rpitoml.project.name);
 
@@ -36,6 +36,10 @@ pub async fn deploy(
         compat.agent_version(),
         compat.agent_api()
     ));
+
+    if env_selection.is_some() {
+        compat.gate(crate::compat::Feature::Environments)?;
+    }
 
     if compat.gate(crate::compat::Feature::SourceCheck)? {
         crate::cli::sourcekey::preflight(
@@ -51,9 +55,15 @@ pub async fn deploy(
     let req = DeployRequest {
         project: (&project).into(),
         git_ref,
-        // Wiring `_env_selection` into the request is a later task (Task 10);
-        // this task only adds the wire type.
-        environment: None,
+        environment: env_selection
+            .as_ref()
+            .map(|s| crate::proto::EnvironmentDto {
+                env: s.env.clone(),
+                base: s.base.clone(),
+                slug: s.slug.clone(),
+                ttl_secs: s.ttl_secs,
+                on_create: s.on_create.clone(),
+            }),
     };
     let started = std::time::Instant::now();
     let accepted = api.deploy(&req).await?;

@@ -210,6 +210,43 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Manage environments (overlays of rpi.toml)
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// List environments registered on the agent
+    Ls {
+        /// All environments on the agent, not only this project's
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Destroy an environment: stack, volumes, ingress, DNS, secrets, registry
+    Destroy {
+        env: String,
+        #[arg(long = "vars")]
+        vars: Vec<String>,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
+    /// Remove the environment's volumes and re-run on_create on next deploy
+    ResetData {
+        env: String,
+        #[arg(long = "vars")]
+        vars: Vec<String>,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        connect: cli::config::ConnectOpts,
+    },
 }
 
 #[derive(Subcommand)]
@@ -554,6 +591,27 @@ async fn run() -> anyhow::Result<()> {
         Cmd::Config {
             cmd: ConfigCmd::Show { env, vars },
         } => cli::commands::config_show(env, vars).await,
+        Cmd::Env {
+            cmd: EnvCmd::Ls { all, connect },
+        } => cli::envcmds::env_ls(all, connect).await,
+        Cmd::Env {
+            cmd:
+                EnvCmd::Destroy {
+                    env,
+                    vars,
+                    yes,
+                    connect,
+                },
+        } => cli::envcmds::env_destroy(env, vars, yes, connect).await,
+        Cmd::Env {
+            cmd:
+                EnvCmd::ResetData {
+                    env,
+                    vars,
+                    yes,
+                    connect,
+                },
+        } => cli::envcmds::env_reset_data(env, vars, yes, connect).await,
     }
 }
 

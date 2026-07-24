@@ -401,8 +401,6 @@ pub struct EnvSelection {
     pub env: String,
     pub base: String,
     pub slug: Option<String>,
-    /// Not yet read outside tests — wired into the deploy path in a later task.
-    #[allow(dead_code)]
     pub key: String,
     pub ttl_secs: Option<u64>,
     pub on_create: Option<String>,

@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use crate::cli::sse::SseParser;
 use crate::proto::{
     AgentOverviewDto, CommandRunRequest, CommandsResponse, DeployAccepted, DeployRequest,
-    DeploymentDto, DiagnosticReportDto, GcResponse, LifecycleResponse, ProjectViewDto,
-    RemoveResponse, SecretsListResponse, SecretsSendRequest, SecretsSendResponse,
-    SourceCheckRequest, SourceCheckResponse, StatsReportDto, VersionInfo,
+    DeploymentDto, DiagnosticReportDto, EnvironmentActionResponse, EnvironmentViewDto, GcResponse,
+    LifecycleResponse, ProjectViewDto, RemoveResponse, SecretsListResponse, SecretsSendRequest,
+    SecretsSendResponse, SourceCheckRequest, SourceCheckResponse, StatsReportDto, VersionInfo,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -417,6 +417,48 @@ impl ApiClient {
             }
         }
         anyhow::bail!("command stream ended without an exit status (agent restarted?)")
+    }
+
+    pub async fn list_environments(
+        &self,
+        base: Option<&str>,
+    ) -> anyhow::Result<Vec<EnvironmentViewDto>> {
+        let url = match base {
+            Some(base) => format!("{}/v1/environments?base={base}", self.base),
+            None => format!("{}/v1/environments", self.base),
+        };
+        let resp = self.http.get(url).send().await?;
+        Ok(expect_feature(resp, crate::compat::Feature::Environments)
+            .await?
+            .json()
+            .await?)
+    }
+
+    pub async fn destroy_environment(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<EnvironmentActionResponse> {
+        let resp = self
+            .http
+            .delete(format!("{}/v1/environments/{key}", self.base))
+            .send()
+            .await?;
+        Ok(expect_feature(resp, crate::compat::Feature::Environments)
+            .await?
+            .json()
+            .await?)
+    }
+
+    pub async fn reset_environment(&self, key: &str) -> anyhow::Result<EnvironmentActionResponse> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/environments/{key}/reset-data", self.base))
+            .send()
+            .await?;
+        Ok(expect_feature(resp, crate::compat::Feature::Environments)
+            .await?
+            .json()
+            .await?)
     }
 }
 
