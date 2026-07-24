@@ -51,6 +51,9 @@ pub async fn deploy(
     let req = DeployRequest {
         project: (&project).into(),
         git_ref,
+        // Wiring `_env_selection` into the request is a later task (Task 10);
+        // this task only adds the wire type.
+        environment: None,
     };
     let started = std::time::Instant::now();
     let accepted = api.deploy(&req).await?;

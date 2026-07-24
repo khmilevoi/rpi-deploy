@@ -293,6 +293,7 @@ mod tests {
             timeouts: StageTimeoutOverrides::default(),
             commands: Default::default(),
             command_timeout_secs: None,
+            environment: None,
         }
     }
 

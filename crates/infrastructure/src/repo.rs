@@ -43,9 +43,14 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> Result<Project, rusqlite::Error> {
             timeouts: StageTimeoutOverrides::default(), // per-deploy input, not stored
             commands: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
             command_timeout_secs: row.get(11)?,
+            // Task 9 persists real overlay metadata; not stored yet.
+            environment: None,
         },
         host_port: row.get(7)?,
         created_at: row.get(8)?,
+        // Task 9 persists these fields; not stored yet.
+        on_create_done: false,
+        last_success_at: None,
     })
 }
 
@@ -214,6 +219,7 @@ mod tests {
             timeouts: StageTimeoutOverrides::default(),
             commands: Default::default(),
             command_timeout_secs: None,
+            environment: None,
         }
     }
 

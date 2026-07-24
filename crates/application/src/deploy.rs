@@ -442,6 +442,7 @@ mod tests {
             timeouts: StageTimeoutOverrides::default(),
             commands: Default::default(),
             command_timeout_secs: None,
+            environment: None,
         }
     }
 
@@ -520,6 +521,8 @@ mod tests {
                 config: c.clone(),
                 host_port: 8000,
                 created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
             })
         });
         let stage_order = Arc::clone(&order);
@@ -720,6 +723,8 @@ mod tests {
                 config: c.clone(),
                 host_port: 8000,
                 created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
             })
         });
         m.source.expect_fetch().returning(|_, _, _| {
@@ -931,6 +936,8 @@ mod tests {
                 config: c.clone(),
                 host_port: 8000,
                 created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
             })
         });
         m.source.expect_fetch().returning(|_, _, _| {
@@ -998,6 +1005,8 @@ mod tests {
                 config: c.clone(),
                 host_port: 8000,
                 created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
             })
         });
         m.source.expect_fetch().returning(|_, _, _| {
@@ -1204,6 +1213,8 @@ mod tests {
                 config: c.clone(),
                 host_port: 8000,
                 created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
             })
         });
         m.source.expect_fetch().returning(|_, _, _| {
@@ -1260,6 +1271,8 @@ mod tests {
                 config: c.clone(),
                 host_port: 8000,
                 created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
             })
         });
         m.history.expect_mark_running().returning(|_, _| Ok(()));
@@ -1314,6 +1327,8 @@ mod tests {
                 config: c.clone(),
                 host_port: 8000,
                 created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
             })
         });
         m.history.expect_mark_running().returning(|_, _| Ok(()));
@@ -1453,6 +1468,8 @@ mod tests {
                 config: c.clone(),
                 host_port: if c.name == "a" { 8000 } else { 8001 },
                 created_at: 1,
+                on_create_done: false,
+                last_success_at: None,
             })
         });
         m.source.expect_fetch().returning(|p, _, _| {

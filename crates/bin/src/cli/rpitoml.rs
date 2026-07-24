@@ -353,6 +353,9 @@ impl RpiToml {
                 .command
                 .as_deref()
                 .and_then(|t| parse_duration_secs(t).ok()),
+            // The deploy path fills this from the resolved `EnvSelection`
+            // (later task); rpi.toml alone never carries an environment.
+            environment: None,
         }
     }
 }
